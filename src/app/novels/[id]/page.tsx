@@ -4,7 +4,6 @@ import { Pencil, RefreshCw, Sparkles } from 'lucide-react'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { ChapterReader } from '@/components/novel/ChapterReader'
-import { ChapterSelectionDialog } from '@/components/novel/ChapterSelectionDialog'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { GenerationStatus } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
@@ -135,40 +134,30 @@ const INITIAL: State = {
   error: null
 }
 
-function StartGenerationButton({
+function NextChapterButton({
   hasOutline,
-  chaptersDone,
-  totalChapters,
-  status,
-  onStart
+  nextChapterNumber,
+  onGenerateOutline,
+  onGenerateChapter
 }: {
   hasOutline: boolean
-  chaptersDone: number
-  totalChapters: number
-  status: Status
-  onStart: () => void
+  // 次に生成すべき章 (=最新生成済み章 + 1)。全て生成済みなら null。
+  nextChapterNumber: number | null
+  onGenerateOutline: () => void
+  onGenerateChapter: (n: number) => void
 }) {
-  // 章数 0 (= novel ロード未完) や 全章生成済み のときは何も出さない。
-  const allDone = hasOutline && totalChapters > 0 && chaptersDone >= totalChapters
-  if (allDone) return null
-
-  let label: string
-  let Icon: typeof Sparkles
   if (!hasOutline) {
-    label = '章立てを生成'
-    Icon = Sparkles
-  } else if (status === 'cancelled') {
-    label = '続きから再開'
-    Icon = RefreshCw
-  } else {
-    label = '本文を生成'
-    Icon = Sparkles
+    return (
+      <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={onGenerateOutline}>
+        <Sparkles />
+        章立てを生成
+      </Button>
+    )
   }
-
+  if (nextChapterNumber === null) return null
   return (
-    <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={onStart}>
-      <Icon />
-      {label}
+    <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={() => onGenerateChapter(nextChapterNumber)}>
+      <Sparkles />第 {nextChapterNumber} 章を生成
     </Button>
   )
 }
@@ -207,7 +196,6 @@ export default function NovelDetailPage() {
   const [state, dispatch] = useReducer(reducer, INITIAL)
   const abortRef = useRef<AbortController | null>(null)
   const novelIdRef = useRef<string | null>(null)
-  const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
   const [regeneratingOutlineChapter, setRegeneratingOutlineChapter] = useState<number | null>(null)
 
   const loadNovel = useCallback(async (id: string) => {
@@ -424,33 +412,24 @@ export default function NovelDetailPage() {
       )}
 
       {novel && !isGenerating && status !== 'loading' && status !== 'error' && (
-        <StartGenerationButton
+        <NextChapterButton
           hasOutline={outline !== null}
-          chaptersDone={chapters.filter((c) => c.done).length}
-          totalChapters={totalChapters}
-          status={status}
-          onStart={() => {
+          nextChapterNumber={
+            outline
+              ? (() => {
+                  const doneSet = new Set(chapters.filter((c) => c.done).map((c) => c.number))
+                  const next = outline.chapters.find((ch) => !doneSet.has(ch.chapter_number))
+                  return next ? next.chapter_number : null
+                })()
+              : null
+          }
+          onGenerateOutline={() => {
             const id = novelIdRef.current
-            if (!id) return
-            if (!outline) {
-              // 章立て生成だけ走らせて止める。本文生成は別ボタンで明示的に開始する。
-              doGenerateOutline(id)
-            } else {
-              setChapterPickerOpen(true)
-            }
+            if (id) doGenerateOutline(id)
           }}
-        />
-      )}
-
-      {outline && (
-        <ChapterSelectionDialog
-          open={chapterPickerOpen}
-          onOpenChange={setChapterPickerOpen}
-          outline={outline}
-          chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
-          onConfirm={(targets) => {
+          onGenerateChapter={(n) => {
             const id = novelIdRef.current
-            if (id && targets.length > 0) runGeneration(id, targets)
+            if (id) runGeneration(id, [n])
           }}
         />
       )}
