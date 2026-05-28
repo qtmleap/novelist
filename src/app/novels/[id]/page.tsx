@@ -221,6 +221,8 @@ export default function NovelDetailPage() {
   const [outlineRegenOpen, setOutlineRegenOpen] = useState(false)
   const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
   const [regeneratingOutlineChapter, setRegeneratingOutlineChapter] = useState<number | null>(null)
+  // 章リストから「読みたい章」を選んで本文を表示する。デフォルトは未選択 (本文非表示)。
+  const [selectedChapter, setSelectedChapter] = useState<number | null>(null)
 
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
@@ -359,6 +361,11 @@ export default function NovelDetailPage() {
 
   const isGenerating = state.status === 'generatingOutline' || state.status === 'generatingChapter'
   const { novel, outline, chapters, streamingIndex, buffer, status, error } = state
+
+  // 生成中の章は強制的に表示対象にする (見えないところで進捗が走るのを避ける)。
+  useEffect(() => {
+    if (streamingIndex !== null) setSelectedChapter(streamingIndex)
+  }, [streamingIndex])
   const totalChapters = outline ? outline.chapters.length : (novel?.num_chapters ?? 0)
   const currentChapter = streamingIndex ?? chapters.filter((c) => c.done).length + 1
 
@@ -408,6 +415,11 @@ export default function NovelDetailPage() {
           onRegenerateChapter={handleRegenerateOutlineChapter}
           regeneratingChapter={regeneratingOutlineChapter}
           isBusy={isGenerating || regeneratingOutlineChapter !== null}
+          chapters={chapters}
+          costs={novel?.generation_costs ?? []}
+          streamingIndex={streamingIndex}
+          selectedChapter={selectedChapter}
+          onSelectChapter={setSelectedChapter}
           regenerateSlot={
             outline && !isGenerating ? (
               <AlertDialog open={outlineRegenOpen} onOpenChange={setOutlineRegenOpen}>
@@ -444,19 +456,21 @@ export default function NovelDetailPage() {
         />
       )}
 
-      {(chapters.length > 0 || streamingIndex !== null) && (
-        <div className='space-y-3'>
-          <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>本文</p>
-          <ChapterReader
-            chapters={chapters}
-            streamingIndex={streamingIndex}
-            buffer={buffer}
-            costs={novel?.generation_costs ?? []}
-            onRegenerate={handleRetryChapter}
-            isBusy={isGenerating}
-          />
-        </div>
-      )}
+      {selectedChapter !== null &&
+        (chapters.some((c) => c.number === selectedChapter) || streamingIndex === selectedChapter) && (
+          <div className='space-y-3'>
+            <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>本文</p>
+            <ChapterReader
+              chapters={chapters}
+              streamingIndex={streamingIndex}
+              buffer={buffer}
+              costs={novel?.generation_costs ?? []}
+              onRegenerate={handleRetryChapter}
+              isBusy={isGenerating}
+              selectedChapter={selectedChapter}
+            />
+          </div>
+        )}
 
       {status === 'error' && streamingIndex !== null && (
         <Button
