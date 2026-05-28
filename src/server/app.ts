@@ -270,11 +270,12 @@ export const app = new Hono()
         num_chapters: novel.num_chapters
       }
 
-      // 既存 outline がある + chapters[] 指定 → 部分再生成。
-      // それ以外 (= 初回 / 指定なし) → 全章まとめて生成。
+      // 既存 outline がある + chapters[] 指定 (かつ全章ではない) → 部分再生成。
+      // それ以外 (= 初回 / 指定なし / 全章指定) → 全章まとめて生成 (Worker のタイムアウト回避)。
       const existing = novel.outline ? OutlineSchema.safeParse(JSON.parse(novel.outline)) : null
       const targets = options.chapters?.filter((n) => n >= 1 && n <= novel.num_chapters)
-      const canPartial = existing?.success === true && targets && targets.length > 0
+      const canPartial =
+        existing?.success === true && targets !== undefined && targets.length > 0 && targets.length < novel.num_chapters
 
       try {
         if (canPartial && existing.success) {
