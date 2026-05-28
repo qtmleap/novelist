@@ -14,6 +14,7 @@ import {
   SidebarMenuItem,
   SidebarRail
 } from '@/components/ui/sidebar'
+import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
   { label: '小説一覧', href: '/novels', icon: Library },
@@ -35,15 +36,15 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible='icon'>
       <SidebarHeader className='h-16 justify-center border-b'>
-        <SidebarMenu>
-          <SidebarMenuItem className='group-data-[collapsible=icon]:hidden'>
-            <SidebarMenuButton size='lg' asChild>
-              <a href='/novels'>
-                <span className='font-semibold tracking-widest'>NOVELIST</span>
-              </a>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+        <a
+          href='/novels'
+          className={cn(
+            'group-data-[collapsible=icon]:hidden',
+            'inline-flex items-center px-3 text-sm font-semibold tracking-widest text-sidebar-foreground transition-colors hover:text-sidebar-accent-foreground'
+          )}
+        >
+          NOVELIST
+        </a>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
