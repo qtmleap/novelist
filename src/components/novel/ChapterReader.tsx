@@ -21,6 +21,8 @@ type Props = {
   costs?: ChapterCost[]
   onRegenerate?: (chapterNumber: number) => void
   isBusy?: boolean
+  // 単一章のみ表示する。null なら従来通り全章スタック表示。
+  selectedChapter?: number | null
 }
 
 function fmtTokens(n: number): string {
@@ -112,7 +114,8 @@ export function ChapterReader({
   autoScroll = true,
   costs,
   onRegenerate,
-  isBusy = false
+  isBusy = false,
+  selectedChapter = null
 }: Props) {
   // 章ごとの DOM 参照を保持。再生成時にその章ヘッダを画面上端付近にスクロールするため。
   const chapterRefs = useRef<Map<number, HTMLDivElement>>(new Map())
@@ -134,7 +137,7 @@ export function ChapterReader({
   const costByNumber = new Map<number, ChapterCost>()
   for (const c of costs ?? []) costByNumber.set(c.chapter_number, c)
 
-  const displayChapters: ChapterData[] = [...chapters]
+  let displayChapters: ChapterData[] = [...chapters]
   if (streamingIndex !== null) {
     const alreadyIn = displayChapters.some((c) => c.number === streamingIndex)
     if (!alreadyIn) {
@@ -145,6 +148,9 @@ export function ChapterReader({
         displayChapters[idx] = { ...displayChapters[idx], content: buffer, done: false }
       }
     }
+  }
+  if (selectedChapter !== null) {
+    displayChapters = displayChapters.filter((c) => c.number === selectedChapter)
   }
 
   return (
