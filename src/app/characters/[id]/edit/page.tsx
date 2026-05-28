@@ -144,7 +144,7 @@ export default function EditCharacterPage() {
       />
 
       <div>
-        <h1 className='text-xl font-semibold'>登場人物編集</h1>
+        <h1 className='text-xl font-semibold'>編集</h1>
         <p className='mt-0.5 text-sm text-muted-foreground'>登場人物の情報を編集します。</p>
       </div>
 

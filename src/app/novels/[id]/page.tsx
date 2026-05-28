@@ -368,7 +368,7 @@ export default function NovelDetailPage() {
 
   return (
     <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '小説', href: '/novels' }, { label: novel?.title ?? '詳細' }]} />
+      <PageHeader crumbs={[{ label: '小説一覧', href: '/novels' }, { label: novel?.title ?? '詳細' }]} />
 
       {novel && (
         <div className='flex items-start justify-between gap-3'>

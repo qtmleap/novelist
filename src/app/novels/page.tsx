@@ -37,7 +37,7 @@ export default function NovelsPage() {
 
   return (
     <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '小説' }]} />
+      <PageHeader crumbs={[{ label: '小説一覧' }]} />
 
       <div className='flex items-center justify-between'>
         <div>
