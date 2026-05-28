@@ -20,7 +20,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { api, readApiError } from '@/lib/api/client'
-import { getEditorModel, getWriterModel } from '@/lib/settings'
+import { getWriterModel } from '@/lib/settings'
 import { readChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
 import type { ChapterCost, NovelWithChapters } from '@/schemas/novel.dto'
@@ -230,82 +230,94 @@ export default function ChapterDetailPage() {
             </Button>
           </div>
 
-          {isLatest && (
-            <div className='border-t pt-6'>
-              <div className='mb-3'>
-                <h2 className='text-sm font-semibold text-destructive'>危険な操作</h2>
-                <p className='mt-0.5 text-sm text-muted-foreground'>
-                  整合性のため、再生成と削除は最新の生成済み章 (この章) でのみ可能です。
-                </p>
-              </div>
-              <div className='flex flex-wrap items-center gap-2'>
-                <AlertDialog open={regenOpen} onOpenChange={setRegenOpen}>
-                  <AlertDialogTrigger asChild>
-                    <Button type='button' variant='outline' size='sm' disabled={busy} className='[&_svg]:size-5!'>
-                      {isRegenerating ? <Loader2 className='animate-spin' /> : <RefreshCw />}
-                      本文を再生成
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>第 {chapterNumber} 章の本文を再生成しますか？</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        既存の本文を破棄して上書きします。元には戻せません。Gemini API
-                        を呼び出すので追加コストが発生します。
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>キャンセル</AlertDialogCancel>
-                      <AlertDialogAction
-                        onClick={(e) => {
-                          e.preventDefault()
-                          setRegenOpen(false)
-                          handleRegenerate()
-                        }}
-                        className='[&_svg]:size-5!'
-                      >
-                        <RefreshCw />
-                        再生成する
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-
-                <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-                  <AlertDialogTrigger asChild>
-                    <Button type='button' variant='destructive' size='sm' disabled={busy} className='[&_svg]:size-5!'>
-                      {isDeleting ? <Loader2 className='animate-spin' /> : <Trash2 />}
-                      本文を削除
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>第 {chapterNumber} 章の本文を削除しますか？</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        本文と章タイトルを削除します
-                        (章立てとコスト履歴は残ります)。削除後は小説一覧の詳細画面に戻ります。元には戻せません。
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel disabled={isDeleting}>キャンセル</AlertDialogCancel>
-                      <AlertDialogAction
-                        variant='destructive'
-                        disabled={isDeleting}
-                        onClick={(e) => {
-                          e.preventDefault()
-                          handleDelete()
-                        }}
-                        className='[&_svg]:size-5!'
-                      >
-                        {isDeleting ? <Loader2 className='animate-spin' /> : <Trash2 />}
-                        {isDeleting ? '削除中…' : '削除する'}
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              </div>
+          <div className='border-t pt-6'>
+            <div className='mb-3'>
+              <h2 className='text-sm font-semibold text-destructive'>危険な操作</h2>
+              <p className='mt-0.5 text-sm text-muted-foreground'>
+                {isLatest
+                  ? '再生成と削除は元に戻せません。'
+                  : '整合性のため、再生成と削除は最新の生成済み章でのみ可能です。'}
+              </p>
             </div>
-          )}
+            <div className='flex flex-wrap items-center gap-2'>
+              <AlertDialog open={regenOpen} onOpenChange={setRegenOpen}>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    disabled={busy || !isLatest}
+                    className='[&_svg]:size-5!'
+                  >
+                    {isRegenerating ? <Loader2 className='animate-spin' /> : <RefreshCw />}
+                    本文を再生成
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>第 {chapterNumber} 章の本文を再生成しますか？</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      既存の本文を破棄して上書きします。元には戻せません。Gemini API
+                      を呼び出すので追加コストが発生します。
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={(e) => {
+                        e.preventDefault()
+                        setRegenOpen(false)
+                        handleRegenerate()
+                      }}
+                      className='[&_svg]:size-5!'
+                    >
+                      <RefreshCw />
+                      再生成する
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+
+              <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    type='button'
+                    variant='destructive'
+                    size='sm'
+                    disabled={busy || !isLatest}
+                    className='[&_svg]:size-5!'
+                  >
+                    {isDeleting ? <Loader2 className='animate-spin' /> : <Trash2 />}
+                    本文を削除
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>第 {chapterNumber} 章の本文を削除しますか？</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      本文と章タイトルを削除します
+                      (章立てとコスト履歴は残ります)。削除後は小説一覧の詳細画面に戻ります。元には戻せません。
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel disabled={isDeleting}>キャンセル</AlertDialogCancel>
+                    <AlertDialogAction
+                      variant='destructive'
+                      disabled={isDeleting}
+                      onClick={(e) => {
+                        e.preventDefault()
+                        handleDelete()
+                      }}
+                      className='[&_svg]:size-5!'
+                    >
+                      {isDeleting ? <Loader2 className='animate-spin' /> : <Trash2 />}
+                      {isDeleting ? '削除中…' : '削除する'}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          </div>
         </>
       )}
     </div>
