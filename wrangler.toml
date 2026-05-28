@@ -2,8 +2,11 @@ name = "novelist"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 main = "./worker/index.ts"
-preview_urls = true
-workers_dev = true
+# Public workers.dev / preview URLs are disabled in every env to keep the
+# Gemini API key from being abused via the default subdomains. Reach the
+# worker through your own custom domain instead.
+preview_urls = false
+workers_dev = false
 
 [assets]
 not_found_handling = "none"
@@ -27,6 +30,8 @@ migrations_dir = "prisma/migrations"
 # ── staging (deployed on PR merge to develop) ──
 [env.staging]
 name = "novelist-staging"
+preview_urls = false
+workers_dev = false
 
 [env.staging.vars]
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -40,6 +45,8 @@ migrations_dir = "prisma/migrations"
 # ── production (deployed on PR merge to master) ──
 [env.production]
 name = "novelist-production"
+preview_urls = false
+workers_dev = false
 
 [env.production.vars]
 GEMINI_MODEL = "gemini-2.5-flash"
