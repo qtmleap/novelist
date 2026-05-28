@@ -60,7 +60,7 @@ export function OutlineSelectionDialog({ open, onOpenChange, totalChapters, outl
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='sm:max-w-2xl'>
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>章立てを生成する章を選択</DialogTitle>
           <DialogDescription>
@@ -94,14 +94,9 @@ export function OutlineSelectionDialog({ open, onOpenChange, totalChapters, outl
                 <Checkbox id={id} checked={checked} onCheckedChange={() => toggle(n)} className='mt-0.5' />
                 <label htmlFor={id} className='min-w-0 flex-1 cursor-pointer'>
                   <p className='font-medium text-sm leading-snug'>
-                    第 {n} 章{ch ? `: ${ch.title}` : null}
-                    {ch && <span className='ml-2 text-xs font-normal text-muted-foreground'>(章立てあり)</span>}
+                    第 {n} 章{ch ? `: ${ch.title}` : ''}
+                    {!ch && <span className='ml-2 text-xs font-normal italic text-muted-foreground'>未生成</span>}
                   </p>
-                  {ch ? (
-                    <p className='mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground'>{ch.summary}</p>
-                  ) : (
-                    <p className='mt-0.5 text-xs italic leading-relaxed text-muted-foreground/60'>未生成</p>
-                  )}
                 </label>
               </li>
             )
