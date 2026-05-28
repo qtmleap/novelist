@@ -19,13 +19,23 @@ jobs:
           bun-version: latest
       - name: Set environment
         run: |
-          echo "ENVIRONMENT=$(if [[ '${{ github.event.pull_request.base.ref }}' == '${{ github.event.repository.default_branch }}' ]]; then echo 'production'; else echo 'development'; fi)" >> $GITHUB_ENV
+          if [[ '${{ github.event.pull_request.base.ref }}' == 'master' ]]; then
+            echo "ENVIRONMENT=production" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=staging" >> $GITHUB_ENV
+          fi
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Generate Prisma client
+        run: bunx prisma generate
+        env:
+          DATABASE_URL: file:./dev.db
+      - name: Build
+        run: bun run build
       - name: Wrangler deploy
         uses: cloudflare/wrangler-action@v4
-        env:
-          ENVIRONMENT: ${{ github.event.pull_request.base.ref == 'master' && 'production' || 'development' }}
         with:
           wranglerVersion: latest
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --env ${{ env.ENVIRONMENT }} --minify src/index.ts
+          command: deploy --env ${{ env.ENVIRONMENT }}
