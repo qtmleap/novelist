@@ -4,7 +4,6 @@ import { BookMarked, Check, ChevronRight, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 import type { ReactNode } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
-import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import type { ChapterCost, Outline } from '@/schemas/novel.dto'
 
@@ -18,6 +17,9 @@ type Props = {
   streamingIndex?: number | null
   // 生成済みの章を押したときの遷移先 (例: /novels/[id]/chapters/[number])。
   novelId?: string
+  // novel.num_chapters。outline がまだ無い章や、outline 枠を上回る章数を持つ novel でも
+  // 全章ぶんの枠を表示するため、明示で渡してもらう。
+  expectedTotal?: number
 }
 
 function fmtTokens(n: number): string {
@@ -31,61 +33,52 @@ export function OutlineView({
   chapters,
   costs,
   streamingIndex = null,
-  novelId
+  novelId,
+  expectedTotal = 0
 }: Props) {
   const chapterByNumber = new Map<number, ChapterData>()
   for (const c of chapters ?? []) chapterByNumber.set(c.number, c)
   const costByNumber = new Map<number, ChapterCost>()
   for (const c of costs ?? []) costByNumber.set(c.chapter_number, c)
-  if (isGenerating && !outline) {
-    return (
-      <div className='space-y-3'>
-        <div className='flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground'>
-          <BookMarked className='size-5 text-primary' />
-          章立て生成中...
-        </div>
-        <div className='divide-y border-y'>
-          {[0, 1, 2].map((i) => (
-            <div key={i} className='flex items-start gap-3 px-4 py-3'>
-              <Skeleton className='size-6 shrink-0 rounded' />
-              <div className='flex-1 space-y-1.5'>
-                <Skeleton className='h-4 w-1/2' />
-                <Skeleton className='h-3 w-full' />
-                <Skeleton className='h-3 w-4/5' />
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    )
-  }
+  const outlineByNumber = new Map<number, Outline['chapters'][number]>()
+  for (const ch of outline?.chapters ?? []) outlineByNumber.set(ch.chapter_number, ch)
 
-  if (!outline) return null
+  // 表示対象は outline の章番号 + novel.num_chapters まで。
+  // どちらも 0 のときは何も出さない。
+  const maxNumber = Math.max(expectedTotal, ...Array.from(outlineByNumber.keys()), streamingIndex ?? 0)
+  if (maxNumber === 0 && !isGenerating) return null
+  const slots = Array.from({ length: maxNumber }, (_, i) => i + 1)
 
   return (
     <div className='space-y-3'>
       <div className='flex items-center justify-between gap-2'>
         <div className='flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground'>
           <BookMarked className='size-5 text-primary' />
-          章立て
+          {isGenerating && !outline ? '章立て生成中...' : '章立て'}
         </div>
         {regenerateSlot}
       </div>
       <ol className='divide-y border-y'>
-        {outline.chapters.map((ch) => {
-          const chapterData = chapterByNumber.get(ch.chapter_number)
+        {slots.map((n) => {
+          const ch = outlineByNumber.get(n)
+          const chapterData = chapterByNumber.get(n)
           const done = chapterData?.done === true
-          const isStreaming = streamingIndex === ch.chapter_number
+          const isStreaming = streamingIndex === n
           const linkable = done && novelId !== undefined
-          const cost = costByNumber.get(ch.chapter_number)
+          const cost = costByNumber.get(n)
+          const hasOutlineEntry = ch !== undefined
           const rowContent = (
             <>
               <span className='flex size-6 shrink-0 items-center justify-center rounded bg-muted text-xs font-semibold tabular-nums text-muted-foreground'>
-                {ch.chapter_number}
+                {n}
               </span>
               <div className='min-w-0 flex-1'>
                 <p className='flex items-center gap-1.5 font-medium text-sm leading-snug'>
-                  {ch.title}
+                  {hasOutlineEntry ? (
+                    ch.title
+                  ) : (
+                    <span className='font-normal italic text-muted-foreground'>未生成</span>
+                  )}
                   {isStreaming ? (
                     <Loader2 className='size-3.5 shrink-0 animate-spin text-primary' />
                   ) : done ? (
@@ -96,7 +89,13 @@ export function OutlineView({
                     />
                   ) : null}
                 </p>
-                <p className='mt-0.5 text-xs leading-relaxed text-muted-foreground'>{ch.summary}</p>
+                {hasOutlineEntry ? (
+                  <p className='mt-0.5 text-xs leading-relaxed text-muted-foreground'>{ch.summary}</p>
+                ) : (
+                  <p className='mt-0.5 text-xs italic leading-relaxed text-muted-foreground/60'>
+                    章立てがまだ生成されていません
+                  </p>
+                )}
                 {done && chapterData && (
                   <div className='mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
                     <span>{chapterData.content.length.toLocaleString()} 文字</span>
@@ -115,11 +114,15 @@ export function OutlineView({
               {linkable && <ChevronRight className='size-5 shrink-0 self-center text-muted-foreground' />}
             </>
           )
-          const className = cn('flex items-start gap-3 px-4 py-3 transition-colors', linkable && 'hover:bg-muted/40')
+          const className = cn(
+            'flex items-start gap-3 px-4 py-3 transition-colors',
+            linkable && 'hover:bg-muted/40',
+            !hasOutlineEntry && 'opacity-70'
+          )
           return (
-            <li key={ch.chapter_number} className='contents'>
+            <li key={n} className='contents'>
               {linkable ? (
-                <Link href={`/novels/${novelId}/chapters/${ch.chapter_number}`} className={className}>
+                <Link href={`/novels/${novelId}/chapters/${n}`} className={className}>
                   {rowContent}
                 </Link>
               ) : (
