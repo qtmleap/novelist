@@ -99,7 +99,7 @@ export default function CharactersPage() {
 
       <div className='flex items-center justify-between'>
         <div>
-          <h1 className='text-xl font-semibold'>登場人物</h1>
+          <h1 className='text-xl font-semibold'>登場人物一覧</h1>
           <p className='mt-0.5 text-sm text-muted-foreground'>登場人物の情報を管理します。</p>
         </div>
         <Button asChild size='sm' className='[&_svg]:size-5!'>

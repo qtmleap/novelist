@@ -27,7 +27,7 @@ export default function NewNovelPage() {
 
   return (
     <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '小説', href: '/novels' }, { label: '新規作成' }]} />
+      <PageHeader crumbs={[{ label: '小説一覧', href: '/novels' }, { label: '新規作成' }]} />
 
       <div>
         <h1 className='text-xl font-semibold'>新規作成</h1>

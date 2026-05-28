@@ -116,14 +116,14 @@ export default function NovelEditPage() {
     <div className='space-y-6'>
       <PageHeader
         crumbs={[
-          { label: '小説', href: '/novels' },
+          { label: '小説一覧', href: '/novels' },
           { label: initialValues?.title ?? '詳細', href: novelId ? `/novels/${novelId}` : undefined },
           { label: '編集' }
         ]}
       />
 
       <div>
-        <h1 className='text-xl font-semibold'>小説の編集</h1>
+        <h1 className='text-xl font-semibold'>編集</h1>
         <p className='mt-0.5 text-sm text-muted-foreground'>
           基本情報・文体・登場人物を編集できます。章本文への影響を最小化するため、章数を変えると章立ての再生成が必要になることがあります。
         </p>
