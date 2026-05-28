@@ -202,3 +202,9 @@ export const GenerateOptionsSchema = z.object({
   model: GeminiModelSchema.optional()
 })
 export type GenerateOptions = z.infer<typeof GenerateOptionsSchema>
+
+// outline 生成時のみ使える追加オプション: 章の指定セットだけ (既存 outline ありの場合のみ意味を持つ)。
+export const GenerateOutlineOptionsSchema = GenerateOptionsSchema.extend({
+  chapters: z.array(z.number().int().min(1)).optional()
+})
+export type GenerateOutlineOptions = z.infer<typeof GenerateOutlineOptionsSchema>

@@ -294,9 +294,11 @@ export async function regenerateOutlineChapter(
   cast?: CastMember[],
   relations?: CastRelation[]
 ): Promise<OutlineChapter> {
-  const target = existing.chapters.find((c) => c.chapter_number === chapterNumber)
-  if (!target) {
-    throw new Error(`Chapter ${chapterNumber} not found in outline`)
+  // 既存に当該章が無い場合 (= 後から num_chapters を増やした) も生成できるよう、無ければ空のテンプレを充てる。
+  const target = existing.chapters.find((c) => c.chapter_number === chapterNumber) ?? {
+    chapter_number: chapterNumber,
+    title: '',
+    summary: ''
   }
 
   const model = resolveModel(env, modelOverride)
