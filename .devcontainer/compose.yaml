@@ -1,0 +1,28 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - node_modules:/home/vscode/app/node_modules
+      - ../:/home/vscode/app:cached
+    environment:
+      NODE_OPTIONS: "--no-deprecation"
+    tty: true
+    stdin_open: true
+    ports:
+      - 11575:11575
+
+  firebase:
+    image: andreysenov/firebase-tools:latest
+    command: firebase emulators:start --only auth --import=auth --export-on-exit=auth
+    volumes:
+      - ./auth:/home/node/auth
+      - ./firebase.json:/home/node/firebase.json
+      - ./.firebaserc:/home/node/.firebaserc
+    ports:
+      - 11599:11599
+      - 11540:11540
+
+volumes:
+  node_modules:
