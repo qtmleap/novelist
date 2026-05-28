@@ -562,7 +562,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
         )}
       </div>
 
-      <Button type='submit' disabled={isSubmitting} className='w-full [&_svg]:size-5!'>
+      <Button type='submit' size='sm' disabled={isSubmitting} className='[&_svg]:size-5!'>
         {isSubmitting ? (
           <>
             <Loader2 className='animate-spin' />
