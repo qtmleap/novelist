@@ -1,6 +1,7 @@
 'use client'
 
-import { BookMarked, BookOpen, Check, Loader2, RefreshCw } from 'lucide-react'
+import { BookMarked, Check, ChevronRight, Loader2, RefreshCw } from 'lucide-react'
+import Link from 'next/link'
 import type { ReactNode } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { Button } from '@/components/ui/button'
@@ -18,8 +19,8 @@ type Props = {
   chapters?: ChapterData[]
   costs?: ChapterCost[]
   streamingIndex?: number | null
-  selectedChapter?: number | null
-  onSelectChapter?: (chapterNumber: number) => void
+  // 生成済みの章を押したときの遷移先 (例: /novels/[id]/chapters/[number])。
+  novelId?: string
 }
 
 function fmtTokens(n: number): string {
@@ -36,8 +37,7 @@ export function OutlineView({
   chapters,
   costs,
   streamingIndex = null,
-  selectedChapter = null,
-  onSelectChapter
+  novelId
 }: Props) {
   const chapterByNumber = new Map<number, ChapterData>()
   for (const c of chapters ?? []) chapterByNumber.set(c.number, c)
@@ -80,18 +80,14 @@ export function OutlineView({
       <ol className='divide-y border-y'>
         {outline.chapters.map((ch) => {
           const regenerating = regeneratingChapter === ch.chapter_number
-          const showButton = onRegenerateChapter !== undefined
+          const showRegen = onRegenerateChapter !== undefined
           const chapterData = chapterByNumber.get(ch.chapter_number)
           const done = chapterData?.done === true
           const isStreaming = streamingIndex === ch.chapter_number
-          const isSelected = selectedChapter === ch.chapter_number
-          const selectable = onSelectChapter !== undefined && (done || isStreaming)
+          const linkable = done && novelId !== undefined
           const cost = costByNumber.get(ch.chapter_number)
-          return (
-            <li
-              key={ch.chapter_number}
-              className={cn('flex items-start gap-3 px-4 py-3 transition-colors', isSelected && 'bg-muted/60')}
-            >
+          const rowContent = (
+            <>
               <span className='flex size-6 shrink-0 items-center justify-center rounded bg-muted text-xs font-semibold tabular-nums text-muted-foreground'>
                 {ch.chapter_number}
               </span>
@@ -124,22 +120,8 @@ export function OutlineView({
                   </div>
                 )}
               </div>
-              {selectable && (
-                <Button
-                  type='button'
-                  variant={isSelected ? 'secondary' : 'ghost'}
-                  size='icon'
-                  aria-label={`第 ${ch.chapter_number} 章の本文を表示`}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onSelectChapter?.(ch.chapter_number)
-                  }}
-                  className='size-8 shrink-0 text-muted-foreground hover:text-foreground [&_svg]:size-5!'
-                >
-                  <BookOpen />
-                </Button>
-              )}
-              {showButton && (
+              {linkable && <ChevronRight className='size-5 shrink-0 self-center text-muted-foreground' />}
+              {showRegen && (
                 <Button
                   type='button'
                   variant='ghost'
@@ -147,6 +129,7 @@ export function OutlineView({
                   aria-label={`第 ${ch.chapter_number} 章の章立てを再生成`}
                   disabled={isBusy || regenerating}
                   onClick={(e) => {
+                    e.preventDefault()
                     e.stopPropagation()
                     onRegenerateChapter?.(ch.chapter_number)
                   }}
@@ -154,6 +137,18 @@ export function OutlineView({
                 >
                   {regenerating ? <Loader2 className='animate-spin' /> : <RefreshCw />}
                 </Button>
+              )}
+            </>
+          )
+          const className = cn('flex items-start gap-3 px-4 py-3 transition-colors', linkable && 'hover:bg-muted/40')
+          return (
+            <li key={ch.chapter_number} className='contents'>
+              {linkable ? (
+                <Link href={`/novels/${novelId}/chapters/${ch.chapter_number}`} className={className}>
+                  {rowContent}
+                </Link>
+              ) : (
+                <div className={className}>{rowContent}</div>
               )}
             </li>
           )
