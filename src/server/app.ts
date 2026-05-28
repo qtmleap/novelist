@@ -21,7 +21,12 @@ import {
   updateNovel
 } from '@/lib/novel/repository'
 import { CreateCharacterSchema } from '@/schemas/character.dto'
-import { CreateNovelSchema, GenerateOptionsSchema, OutlineSchema } from '@/schemas/novel.dto'
+import {
+  CreateNovelSchema,
+  GenerateOptionsSchema,
+  GenerateOutlineOptionsSchema,
+  OutlineSchema
+} from '@/schemas/novel.dto'
 
 function serializeNovel(n: {
   id: string
@@ -236,7 +241,7 @@ export const app = new Hono()
     }
   })
 
-  .post('/novels/:id/outline', zValidator('json', GenerateOptionsSchema), async (c) => {
+  .post('/novels/:id/outline', zValidator('json', GenerateOutlineOptionsSchema), async (c) => {
     const id = c.req.param('id')
     const options = c.req.valid('json')
     const prisma = getPrisma()
@@ -256,22 +261,45 @@ export const app = new Hono()
       }
       const cast = buildCastForGemini(novel.character_links)
       const relations = buildRelationsForGemini(novel.relations)
+
+      const params = {
+        title: novel.title,
+        genre: novel.genre,
+        characters: novel.characters,
+        setting: novel.setting,
+        num_chapters: novel.num_chapters
+      }
+
+      // 既存 outline がある + chapters[] 指定 → 部分再生成。
+      // それ以外 (= 初回 / 指定なし) → 全章まとめて生成。
+      const existing = novel.outline ? OutlineSchema.safeParse(JSON.parse(novel.outline)) : null
+      const targets = options.chapters?.filter((n) => n >= 1 && n <= novel.num_chapters)
+      const canPartial = existing?.success === true && targets && targets.length > 0
+
       try {
-        const outline = await generateOutline(
-          env,
-          {
-            title: novel.title,
-            genre: novel.genre,
-            characters: novel.characters,
-            setting: novel.setting,
-            num_chapters: novel.num_chapters
-          },
-          style,
-          options.model,
-          cast,
-          relations
-        )
+        if (canPartial && existing.success) {
+          // 既存の outline を保持しつつ、選択された章だけ生成し直してマージする。
+          // 各章本文も整合性のため削除する (per-chapter outline regen と同じルール)。
+          let merged = existing.data
+          for (const n of targets) {
+            const next = await regenerateOutlineChapter(env, params, style, merged, n, options.model, cast, relations)
+            merged = {
+              chapters: merged.chapters.map((ch) => (ch.chapter_number === n ? next : ch))
+            }
+            // 章番号が outline に存在しなかった場合は末尾に追加。
+            if (!merged.chapters.some((ch) => ch.chapter_number === n)) {
+              merged = { chapters: [...merged.chapters, next].sort((a, b) => a.chapter_number - b.chapter_number) }
+            }
+            await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: n } })
+          }
+          await saveOutline(prisma, id, JSON.stringify(merged))
+          return c.json({ outline: merged })
+        }
+
+        // 全章まとめて生成。既存本文は無効化されるので全削除。
+        const outline = await generateOutline(env, params, style, options.model, cast, relations)
         await saveOutline(prisma, id, JSON.stringify(outline))
+        await prisma.chapter.deleteMany({ where: { novel_id: id } })
         return c.json({ outline })
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
