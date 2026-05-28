@@ -326,6 +326,9 @@ export const app = new Hono()
           chapters: parsedOutline.data.chapters.map((ch) => (ch.chapter_number === chapterNumber ? next : ch))
         }
         await saveOutline(prisma, id, JSON.stringify(merged))
+        // 章立て (タイトル・要約) と本文がずれた状態は混乱の元なので、
+        // 章立てを上書きしたらこの章の本文も全 version 削除する。
+        await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
         return c.json({ outline: merged })
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
@@ -481,6 +484,31 @@ export const app = new Hono()
         await prisma.$disconnect()
       }
     })
+  })
+
+  // 章本文の削除。整合性を保つため「最新の生成済み章」しか消せない (後続を消さないと前章を消す意味がないので)。
+  .delete('/novels/:id/chapters/:number', async (c) => {
+    const id = c.req.param('id')
+    const chapterNumber = Number.parseInt(c.req.param('number'), 10)
+    if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
+      return c.json({ error: 'invalid_chapter_number' }, 400)
+    }
+    const prisma = getPrisma()
+    try {
+      const latest = await prisma.chapter.findFirst({
+        where: { novel_id: id },
+        orderBy: { chapter_number: 'desc' },
+        select: { chapter_number: true }
+      })
+      if (!latest) return c.json({ error: 'no_chapters' }, 404)
+      if (latest.chapter_number !== chapterNumber) {
+        return c.json({ error: 'not_latest_chapter' }, 409)
+      }
+      await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
+      return c.body(null, 204)
+    } finally {
+      await prisma.$disconnect()
+    }
   })
 
   // ── Characters ───────────────────────────────────────────────────────

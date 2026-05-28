@@ -1,7 +1,17 @@
 'use client'
 
 import { RefreshCw } from 'lucide-react'
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { ChapterCost } from '@/schemas/novel.dto'
@@ -52,17 +62,22 @@ function ChapterBlock({
   cost,
   onRegenerate,
   canRegenerate,
+  regenAllowed,
   registerRef
 }: {
   chapter: ChapterData
   isStreaming: boolean
   cost?: ChapterCost
   onRegenerate?: (n: number) => void
+  // 一時的な不可 (生成中など)。ボタンは出すが disabled。
   canRegenerate: boolean
+  // 構造的な不可 (後続章が生成済み)。ボタン自体を出さない。
+  regenAllowed: boolean
   registerRef?: (n: number, el: HTMLDivElement | null) => void
 }) {
+  const [regenOpen, setRegenOpen] = useState(false)
   const showMeta = chapter.content.length > 0
-  const showRegenerate = chapter.done && !isStreaming && onRegenerate !== undefined
+  const showRegenerate = chapter.done && !isStreaming && onRegenerate !== undefined && regenAllowed
 
   return (
     <div ref={(el) => registerRef?.(chapter.number, el)}>
@@ -71,17 +86,42 @@ function ChapterBlock({
         <div className='mt-0.5 flex items-start gap-2'>
           {chapter.title && <h2 className='min-w-0 flex-1 text-base font-semibold'>{chapter.title}</h2>}
           {showRegenerate && (
-            <Button
-              type='button'
-              variant='ghost'
-              size='icon'
-              aria-label={`第 ${chapter.number} 章を再生成`}
-              disabled={!canRegenerate}
-              onClick={() => onRegenerate?.(chapter.number)}
-              className='size-8 shrink-0 text-muted-foreground hover:text-foreground [&_svg]:size-5!'
-            >
-              <RefreshCw />
-            </Button>
+            <AlertDialog open={regenOpen} onOpenChange={setRegenOpen}>
+              <Button
+                type='button'
+                variant='ghost'
+                size='icon'
+                aria-label={`第 ${chapter.number} 章を再生成`}
+                disabled={!canRegenerate}
+                onClick={() => setRegenOpen(true)}
+                className='size-8 shrink-0 text-muted-foreground hover:text-foreground [&_svg]:size-5!'
+              >
+                <RefreshCw />
+              </Button>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>第 {chapter.number} 章の本文を再生成しますか？</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    既存の本文を破棄して上書きします。元には戻せません。Gemini API
+                    を呼び出すので追加コストが発生します。
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={(e) => {
+                      e.preventDefault()
+                      setRegenOpen(false)
+                      onRegenerate?.(chapter.number)
+                    }}
+                    className='[&_svg]:size-5!'
+                  >
+                    <RefreshCw />
+                    再生成する
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
           )}
         </div>
         {showMeta && <ChapterMeta chars={chapter.content.length} cost={cost} />}
@@ -153,6 +193,10 @@ export function ChapterReader({
     displayChapters = displayChapters.filter((c) => c.number === selectedChapter)
   }
 
+  // 後続の章が生成済みなら、その手前の章は再生成不可。
+  // ベースは displayChapters ではなく chapters 全体 (selectedChapter 時の不正解判定を避ける) から見る。
+  const maxDoneNumber = chapters.reduce((acc, c) => (c.done && c.number > acc ? c.number : acc), 0)
+
   return (
     <div className='space-y-8'>
       {displayChapters.map((ch) => (
@@ -163,6 +207,7 @@ export function ChapterReader({
           cost={costByNumber.get(ch.number)}
           onRegenerate={onRegenerate}
           canRegenerate={!isBusy}
+          regenAllowed={ch.number >= maxDoneNumber}
           registerRef={registerRef}
         />
       ))}
