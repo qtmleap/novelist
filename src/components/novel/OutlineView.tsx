@@ -101,7 +101,11 @@ export function OutlineView({
                   {isStreaming ? (
                     <Loader2 className='size-3.5 shrink-0 animate-spin text-primary' />
                   ) : done ? (
-                    <Check className='size-3.5 shrink-0 text-primary' aria-label='本文あり' />
+                    <Check
+                      strokeWidth={3}
+                      className='size-4 shrink-0 text-emerald-500 dark:text-emerald-400'
+                      aria-label='本文あり'
+                    />
                   ) : null}
                 </p>
                 <p className='mt-0.5 text-xs leading-relaxed text-muted-foreground'>{ch.summary}</p>
