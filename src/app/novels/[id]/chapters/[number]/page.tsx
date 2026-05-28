@@ -67,8 +67,6 @@ export default function ChapterDetailPage() {
   const [regenOpen, setRegenOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
-  const [outlineRegenOpen, setOutlineRegenOpen] = useState(false)
-  const [isRegenOutlining, setIsRegenOutlining] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
@@ -171,26 +169,8 @@ export default function ChapterDetailPage() {
     }
   }
 
-  const handleRegenerateOutline = async () => {
-    if (!novelId || chapterNumber <= 0) return
-    setIsRegenOutlining(true)
-    try {
-      const res = await api.novels[':id'].outline[':number'].$post({
-        param: { id: novelId, number: String(chapterNumber) },
-        json: { model: getEditorModel() }
-      })
-      if (!res.ok) throw new Error(await readApiError(res))
-      // server 側で章本文も削除されるため、novel 詳細に戻して状態をリセットする。
-      window.location.assign(`/novels/${novelId}`)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '章立ての再生成に失敗しました')
-      setIsRegenOutlining(false)
-      setOutlineRegenOpen(false)
-    }
-  }
-
   const displayContent = isRegenerating ? buffer : (chapter?.content ?? '')
-  const busy = isRegenerating || isDeleting || isRegenOutlining
+  const busy = isRegenerating || isDeleting
 
   return (
     <div className='space-y-6'>
@@ -259,37 +239,6 @@ export default function ChapterDetailPage() {
                 </p>
               </div>
               <div className='flex flex-wrap items-center gap-2'>
-                <AlertDialog open={outlineRegenOpen} onOpenChange={setOutlineRegenOpen}>
-                  <AlertDialogTrigger asChild>
-                    <Button type='button' variant='outline' size='sm' disabled={busy} className='[&_svg]:size-5!'>
-                      {isRegenOutlining ? <Loader2 className='animate-spin' /> : <RefreshCw />}
-                      章立てを再生成
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>第 {chapterNumber} 章の章立てを再生成しますか？</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        この章のタイトル・要約を上書きし、生成済みの本文も削除します。章立てと本文がずれた状態を残さないためです。元には戻せません。Gemini
-                        API を呼び出すので追加コストが発生します。
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel disabled={isRegenOutlining}>キャンセル</AlertDialogCancel>
-                      <AlertDialogAction
-                        onClick={(e) => {
-                          e.preventDefault()
-                          handleRegenerateOutline()
-                        }}
-                        className='[&_svg]:size-5!'
-                      >
-                        <RefreshCw />
-                        再生成する
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-
                 <AlertDialog open={regenOpen} onOpenChange={setRegenOpen}>
                   <AlertDialogTrigger asChild>
                     <Button type='button' variant='outline' size='sm' disabled={busy} className='[&_svg]:size-5!'>
