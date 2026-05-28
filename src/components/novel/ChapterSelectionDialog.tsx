@@ -54,7 +54,7 @@ export function ChapterSelectionDialog({ open, onOpenChange, outline, chaptersDo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className='sm:max-w-2xl'>
         <DialogHeader>
           <DialogTitle>生成する章を選択</DialogTitle>
           <DialogDescription>
