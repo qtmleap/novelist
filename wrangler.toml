@@ -20,8 +20,9 @@ GEMINI_MODEL = "gemini-2.5-flash"
 # .wrangler/state/, so the placeholder is fine during dev.
 [[d1_databases]]
 binding = "DB"
-database_name = "ainovel-db"
+database_name = "novelist"
 database_id = "PLACEHOLDER_RUN_WRANGLER_D1_CREATE"
+migrations_dir = "prisma/migrations"
 
 # ── staging (deployed on PR merge to develop) ──
 [env.staging]
@@ -32,8 +33,9 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 [[env.staging.d1_databases]]
 binding = "DB"
-database_name = "ainovel-db-staging"
-database_id = "PLACEHOLDER_RUN_WRANGLER_D1_CREATE"
+database_name = "novelist-staging"
+database_id = "169253a8-8421-4de2-83ed-6ff2727768a0"
+migrations_dir = "prisma/migrations"
 
 # ── production (deployed on PR merge to master) ──
 [env.production]
@@ -44,5 +46,6 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 [[env.production.d1_databases]]
 binding = "DB"
-database_name = "ainovel-db-production"
-database_id = "PLACEHOLDER_RUN_WRANGLER_D1_CREATE"
+database_name = "novelist-production"
+database_id = "48501a98-987a-45e6-b6e5-14144656eba0"
+migrations_dir = "prisma/migrations"

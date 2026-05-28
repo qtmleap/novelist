@@ -1,6 +1,7 @@
 'use client'
 
 import { Library, Settings, Users } from 'lucide-react'
+import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import {
   Sidebar,
@@ -36,7 +37,7 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible='icon'>
       <SidebarHeader className='h-16 justify-center border-b'>
-        <a
+        <Link
           href='/novels'
           className={cn(
             'group-data-[collapsible=icon]:hidden',
@@ -44,7 +45,7 @@ export function AppSidebar() {
           )}
         >
           NOVELIST
-        </a>
+        </Link>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
@@ -56,10 +57,10 @@ export function AppSidebar() {
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild isActive={isActive} tooltip={item.label} className='[&>svg]:size-5!'>
-                      <a href={item.href}>
+                      <Link href={item.href}>
                         <item.icon />
                         <span>{item.label}</span>
-                      </a>
+                      </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 )
