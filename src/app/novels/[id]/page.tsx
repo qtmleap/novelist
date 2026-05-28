@@ -146,7 +146,8 @@ function NextChapterButton({
   if (nextChapterNumber === null) return null
   return (
     <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={() => onGenerateChapter(nextChapterNumber)}>
-      <Sparkles />第 {nextChapterNumber} 章を生成
+      <Sparkles />
+      本文を生成
     </Button>
   )
 }
