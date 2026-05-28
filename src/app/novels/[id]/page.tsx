@@ -1,7 +1,7 @@
 'use client'
 
 import { Pencil, RefreshCw, Sparkles } from 'lucide-react'
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { ChapterReader } from '@/components/novel/ChapterReader'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
@@ -196,8 +196,6 @@ export default function NovelDetailPage() {
   const [state, dispatch] = useReducer(reducer, INITIAL)
   const abortRef = useRef<AbortController | null>(null)
   const novelIdRef = useRef<string | null>(null)
-  const [regeneratingOutlineChapter, setRegeneratingOutlineChapter] = useState<number | null>(null)
-
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
     try {
@@ -307,25 +305,6 @@ export default function NovelDetailPage() {
     await doGenerateChapter(id, num, abort)
   }
 
-  const handleRegenerateOutlineChapter = async (num: number) => {
-    const id = novelIdRef.current
-    if (!id) return
-    setRegeneratingOutlineChapter(num)
-    try {
-      const res = await api.novels[':id'].outline[':number'].$post({
-        param: { id, number: String(num) },
-        json: { model: getEditorModel() }
-      })
-      if (!res.ok) throw new Error(await readApiError(res))
-      // server 側で章立て更新と一緒に該当章の本文も削除されるので、novel 全体を取り直す。
-      await loadNovel(id)
-    } catch (e) {
-      dispatch({ type: 'OUTLINE_ERR', error: e instanceof Error ? e.message : '章立ての再生成に失敗しました' })
-    } finally {
-      setRegeneratingOutlineChapter(null)
-    }
-  }
-
   const isGenerating = state.status === 'generatingOutline' || state.status === 'generatingChapter'
   const { novel, outline, chapters, streamingIndex, buffer, status, error } = state
   const totalChapters = outline ? outline.chapters.length : (novel?.num_chapters ?? 0)
@@ -374,9 +353,7 @@ export default function NovelDetailPage() {
         <OutlineView
           outline={outline}
           isGenerating={status === 'generatingOutline'}
-          onRegenerateChapter={handleRegenerateOutlineChapter}
-          regeneratingChapter={regeneratingOutlineChapter}
-          isBusy={isGenerating || regeneratingOutlineChapter !== null}
+          isBusy={isGenerating}
           chapters={chapters}
           costs={novel?.generation_costs ?? []}
           streamingIndex={streamingIndex}
