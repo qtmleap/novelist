@@ -26,10 +26,10 @@ export default function NewCharacterPage() {
 
   return (
     <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '登場人物', href: '/characters' }, { label: '新規登録' }]} />
+      <PageHeader crumbs={[{ label: '登場人物一覧', href: '/characters' }, { label: '新規登録' }]} />
 
       <div>
-        <h1 className='text-xl font-semibold'>登場人物登録</h1>
+        <h1 className='text-xl font-semibold'>新規登録</h1>
         <p className='mt-0.5 text-sm text-muted-foreground'>新しい登場人物の情報を入力してください。</p>
       </div>
 
