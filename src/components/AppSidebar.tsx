@@ -2,7 +2,7 @@
 
 import { Library, Settings, Users } from 'lucide-react'
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
+import { usePathname } from 'next/navigation'
 import {
   Sidebar,
   SidebarContent,
@@ -24,11 +24,7 @@ const NAV_ITEMS = [
 ]
 
 export function AppSidebar() {
-  const [pathname, setPathname] = useState('')
-
-  useEffect(() => {
-    setPathname(window.location.pathname)
-  }, [])
+  const pathname = usePathname()
 
   const activeHref = NAV_ITEMS.map((item) => item.href)
     .filter((href) => pathname === href || pathname.startsWith(`${href}/`))
