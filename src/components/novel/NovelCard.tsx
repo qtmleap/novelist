@@ -2,6 +2,7 @@
 
 import { BookOpen, Calendar, ChevronRight, Layers } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
+import { cn } from '@/lib/utils'
 import type { Novel } from '@/schemas/novel.dto'
 
 type Props = {
@@ -35,7 +36,10 @@ export function NovelCard({ novel }: Props) {
         </div>
       </div>
       <div className='ml-auto flex items-center gap-1 shrink-0'>
-        <Badge variant={hasOutline ? 'default' : 'secondary'} className='text-xs'>
+        <Badge
+          variant='outline'
+          className={cn('text-xs', hasOutline ? 'border-green-500 text-green-600' : 'text-muted-foreground')}
+        >
           {status}
         </Badge>
         <ChevronRight className='size-5 text-muted-foreground' />

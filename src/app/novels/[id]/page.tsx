@@ -4,6 +4,7 @@ import { Pencil, RefreshCw, Sparkles } from 'lucide-react'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { ChapterReader } from '@/components/novel/ChapterReader'
+import { ChapterSelectionDialog } from '@/components/novel/ChapterSelectionDialog'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { GenerationStatus } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
@@ -218,6 +219,7 @@ export default function NovelDetailPage() {
   const abortRef = useRef<AbortController | null>(null)
   const novelIdRef = useRef<string | null>(null)
   const [outlineRegenOpen, setOutlineRegenOpen] = useState(false)
+  const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
   const [regeneratingOutlineChapter, setRegeneratingOutlineChapter] = useState<number | null>(null)
 
   const loadNovel = useCallback(async (id: string) => {
@@ -284,8 +286,10 @@ export default function NovelDetailPage() {
     }
   }, [])
 
+  // chapters が null/undefined のときは「outline 内の未生成 + 残り全部」を対象にする。
+  // 配列が渡された場合はその章だけを順番に流す。
   const runGeneration = useCallback(
-    async (id: string, existingOutline: Outline | null, existingChapters: ChapterData[]) => {
+    async (id: string, existingOutline: Outline | null, chapterNumbers: number[] | null) => {
       const abort = new AbortController()
       abortRef.current = abort
 
@@ -295,11 +299,9 @@ export default function NovelDetailPage() {
         if (!outline || abort.signal.aborted) return
       }
 
-      const total = outline.chapters.length
-      const done = new Set(existingChapters.filter((c) => c.done).map((c) => c.number))
-      for (let n = 1; n <= total; n++) {
+      const targets = chapterNumbers ?? outline.chapters.map((c) => c.chapter_number).filter((n) => n > 0)
+      for (const n of targets) {
         if (abort.signal.aborted) break
-        if (done.has(n)) continue
         const succeeded = await doGenerateChapter(id, n, abort)
         if (!succeeded || abort.signal.aborted) break
       }
@@ -412,9 +414,6 @@ export default function NovelDetailPage() {
           onRegenerateChapter={handleRegenerateOutlineChapter}
           regeneratingChapter={regeneratingOutlineChapter}
           isBusy={isGenerating || regeneratingOutlineChapter !== null}
-          chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
-          streamingIndex={streamingIndex}
-          onGenerateChapter={handleRetryChapter}
           regenerateSlot={
             outline && !isGenerating ? (
               <AlertDialog open={outlineRegenOpen} onOpenChange={setOutlineRegenOpen}>
@@ -485,7 +484,26 @@ export default function NovelDetailPage() {
           status={status}
           onStart={() => {
             const id = novelIdRef.current
-            if (id) runGeneration(id, outline, chapters)
+            if (!id) return
+            if (!outline) {
+              // 章立てが未生成なら、まず生成 + そのあと全章をデフォルト対象に流す
+              runGeneration(id, null, null)
+            } else {
+              setChapterPickerOpen(true)
+            }
+          }}
+        />
+      )}
+
+      {outline && (
+        <ChapterSelectionDialog
+          open={chapterPickerOpen}
+          onOpenChange={setChapterPickerOpen}
+          outline={outline}
+          chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
+          onConfirm={(targets) => {
+            const id = novelIdRef.current
+            if (id && targets.length > 0) runGeneration(id, outline, targets)
           }}
         />
       )}
