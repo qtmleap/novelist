@@ -32,6 +32,9 @@ migrations_dir = "prisma/migrations"
 name = "novelist-staging"
 preview_urls = false
 workers_dev = false
+routes = [
+  { pattern = "novel-staging.qleap.jp", custom_domain = true }
+]
 
 [env.staging.observability]
 enabled = true
@@ -51,6 +54,9 @@ migrations_dir = "prisma/migrations"
 name = "novelist-production"
 preview_urls = false
 workers_dev = false
+routes = [
+  { pattern = "novel.qleap.jp", custom_domain = true }
+]
 
 [env.production.observability]
 enabled = true
