@@ -1,7 +1,8 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
+import { usePathname } from 'next/navigation'
+import { useEffect, useMemo, useState } from 'react'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
 import { PageHeader } from '@/components/PageHeader'
@@ -14,9 +15,8 @@ function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
 }
 
-function getNovelAndChapter(): { novelId: string; chapterNumber: number } {
-  if (typeof window === 'undefined') return { novelId: '', chapterNumber: 0 }
-  const parts = window.location.pathname.split('/')
+function parseRoute(pathname: string): { novelId: string; chapterNumber: number } {
+  const parts = pathname.split('/')
   const novelIdx = parts.indexOf('novels')
   const chapterIdx = parts.indexOf('chapters')
   return {
@@ -43,24 +43,25 @@ function ChapterMeta({ chars, cost }: { chars: number; cost?: ChapterCost }) {
 }
 
 export default function ChapterDetailPage() {
+  const pathname = usePathname()
+  const { novelId, chapterNumber } = useMemo(() => parseRoute(pathname), [pathname])
   const [novel, setNovel] = useState<NovelWithChapters | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [novelId, setNovelId] = useState('')
-  const [chapterNumber, setChapterNumber] = useState(0)
 
+  // 同じ novel に閉じた章遷移では fetch をスキップ。novel が変わったときだけ再取得する。
   useEffect(() => {
-    const { novelId: nid, chapterNumber: n } = getNovelAndChapter()
-    setNovelId(nid)
-    setChapterNumber(n)
-    if (!nid || n <= 0) {
+    if (!novelId) {
       setLoading(false)
       return
     }
+    if (novel?.id === novelId) return
     let cancelled = false
+    setLoading(true)
+    setError(null)
     ;(async () => {
       try {
-        const res = await api.novels[':id'].$get({ param: { id: nid } })
+        const res = await api.novels[':id'].$get({ param: { id: novelId } })
         if (!res.ok) {
           if (res.status === 404) throw new Error('小説が見つかりません')
           throw new Error(await readApiError(res))
@@ -76,7 +77,7 @@ export default function ChapterDetailPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [novelId, novel?.id])
 
   const chapter = novel?.chapters.find((c) => c.chapter_number === chapterNumber) ?? null
   const cost = novel?.generation_costs.find((c) => c.chapter_number === chapterNumber)
