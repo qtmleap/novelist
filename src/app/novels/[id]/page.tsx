@@ -355,15 +355,16 @@ export default function NovelDetailPage() {
         />
       )}
 
-      {(outline || status === 'generatingOutline') && (
+      {novel && (
         <OutlineView
           outline={outline}
           isGenerating={status === 'generatingOutline'}
           isBusy={isGenerating}
           chapters={chapters}
-          costs={novel?.generation_costs ?? []}
+          costs={novel.generation_costs ?? []}
           streamingIndex={streamingIndex}
-          novelId={novel?.id}
+          novelId={novel.id}
+          expectedTotal={novel.num_chapters}
         />
       )}
 
