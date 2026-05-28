@@ -3,7 +3,7 @@
 import { Loader2, Pencil, RefreshCw, Sparkles } from 'lucide-react'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
-import { ChapterReader } from '@/components/novel/ChapterReader'
+import { ChapterSelectionDialog } from '@/components/novel/ChapterSelectionDialog'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { GenerationStatus } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
@@ -135,17 +135,17 @@ const INITIAL: State = {
   error: null
 }
 
-function NextChapterButton({
-  nextChapterNumber,
-  onGenerateChapter
+function GenerateChaptersButton({
+  hasUndoneChapter,
+  onOpen
 }: {
-  // 次に生成すべき章 (=最新生成済み章 + 1)。全て生成済みなら null。
-  nextChapterNumber: number | null
-  onGenerateChapter: (n: number) => void
+  // 章立てが完成済み (全章ぶんある) かつ未生成の本文が残っているときだけ出す。
+  hasUndoneChapter: boolean
+  onOpen: () => void
 }) {
-  if (nextChapterNumber === null) return null
+  if (!hasUndoneChapter) return null
   return (
-    <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={() => onGenerateChapter(nextChapterNumber)}>
+    <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={onOpen}>
       <Sparkles />
       本文を生成
     </Button>
@@ -187,6 +187,7 @@ export default function NovelDetailPage() {
   const abortRef = useRef<AbortController | null>(null)
   const novelIdRef = useRef<string | null>(null)
   const [outlineDialogOpen, setOutlineDialogOpen] = useState(false)
+  const [chapterDialogOpen, setChapterDialogOpen] = useState(false)
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
     try {
@@ -378,21 +379,6 @@ export default function NovelDetailPage() {
         />
       )}
 
-      {streamingIndex !== null && (
-        <div className='space-y-3'>
-          <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>生成中の本文</p>
-          <ChapterReader
-            chapters={chapters}
-            streamingIndex={streamingIndex}
-            buffer={buffer}
-            costs={novel?.generation_costs ?? []}
-            onRegenerate={handleRetryChapter}
-            isBusy={isGenerating}
-            selectedChapter={streamingIndex}
-          />
-        </div>
-      )}
-
       {status === 'error' && streamingIndex !== null && (
         <Button
           type='button'
@@ -405,19 +391,17 @@ export default function NovelDetailPage() {
         </Button>
       )}
 
-      {novel && !isGenerating && status !== 'loading' && status !== 'error' && outline && (
-        <NextChapterButton
-          nextChapterNumber={(() => {
-            const doneSet = new Set(chapters.filter((c) => c.done).map((c) => c.number))
-            const next = outline.chapters.find((ch) => !doneSet.has(ch.chapter_number))
-            return next ? next.chapter_number : null
-          })()}
-          onGenerateChapter={(n) => {
-            const id = novelIdRef.current
-            if (id) runGeneration(id, [n])
-          }}
-        />
-      )}
+      {novel &&
+        !isGenerating &&
+        status !== 'loading' &&
+        status !== 'error' &&
+        outline &&
+        outline.chapters.length >= novel.num_chapters && (
+          <GenerateChaptersButton
+            hasUndoneChapter={chapters.filter((c) => c.done).length < novel.num_chapters}
+            onOpen={() => setChapterDialogOpen(true)}
+          />
+        )}
 
       {novel && (
         <OutlineSelectionDialog
@@ -428,6 +412,19 @@ export default function NovelDetailPage() {
           onConfirm={(targets) => {
             const id = novelIdRef.current
             if (id && targets.length > 0) doGenerateOutline(id, targets)
+          }}
+        />
+      )}
+
+      {novel && outline && (
+        <ChapterSelectionDialog
+          open={chapterDialogOpen}
+          onOpenChange={setChapterDialogOpen}
+          outline={outline}
+          chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
+          onConfirm={(targets) => {
+            const id = novelIdRef.current
+            if (id && targets.length > 0) runGeneration(id, targets)
           }}
         />
       )}
