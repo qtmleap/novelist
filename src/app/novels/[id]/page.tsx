@@ -319,6 +319,12 @@ export default function NovelDetailPage() {
           <div className='min-w-0'>
             <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>{novel.genre}</p>
             <h1 className='mt-1 text-xl font-semibold'>{novel.title}</h1>
+            <p className='mt-0.5 text-sm text-muted-foreground'>
+              <span className='tabular-nums'>{chapters.filter((c) => c.done).length}</span>
+              {' / '}
+              <span className='tabular-nums'>{novel.num_chapters}</span>
+              {' 章 生成済み'}
+            </p>
           </div>
           <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
             <a href={`/novels/${novel.id}/edit`}>

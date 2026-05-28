@@ -205,6 +205,12 @@ export const app = new Hono()
     const input = c.req.valid('json')
     const prisma = getPrisma()
     try {
+      const existing = await prisma.novel.findUnique({ where: { id }, select: { num_chapters: true } })
+      if (!existing) return c.json({ error: 'not_found' }, 404)
+      // 章数を減らすと既存章本文が宙ぶらりんになるので拒否。増やすのは OK。
+      if (input.num_chapters < existing.num_chapters) {
+        return c.json({ error: 'num_chapters_cannot_decrease', current: existing.num_chapters }, 409)
+      }
       const novel = await updateNovel(prisma, id, input)
       return c.json(serializeNovel(novel))
     } catch (e) {
