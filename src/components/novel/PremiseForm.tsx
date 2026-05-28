@@ -65,6 +65,8 @@ const EMPTY_DEFAULTS: CreateNovelInput = {
 }
 
 export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'create' }: Props) {
+  // 編集モードでは章数を減らせない (= 既に生成済みの章本文が宙ぶらりんになるため)。
+  const minChapterCount = mode === 'edit' ? (defaultValues?.num_chapters ?? 1) : 1
   const [dictionary, setDictionary] = useState<Character[]>([])
 
   useEffect(() => {
@@ -191,13 +193,16 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {CHAPTER_COUNT_OPTIONS.map((n) => (
+                {CHAPTER_COUNT_OPTIONS.filter((n) => n >= minChapterCount).map((n) => (
                   <SelectItem key={n} value={String(n)}>
                     {n} 章
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            {mode === 'edit' && (
+              <p className='text-xs text-muted-foreground'>整合性のため、章数は減らせません (増やすのは可)。</p>
+            )}
             {form.formState.errors.num_chapters && (
               <p className='text-xs text-destructive'>{form.formState.errors.num_chapters.message}</p>
             )}
