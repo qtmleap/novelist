@@ -1,0 +1,103 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  runtime  = "cloudflare"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Novel {
+  id              String                   @id @default(uuid())
+  title           String
+  genre           String
+  characters      String
+  setting         String
+  num_chapters     Int
+  target_chars     Int                      @default(4000)
+  pov              String                   @default("一人称")
+  tone             String                   @default("一般文芸")
+  pov_character_id String                   @default("")
+  ending           String                   @default("未指定")
+  outline          String?
+  created_at      DateTime                 @default(now())
+  updated_at      DateTime                 @updatedAt
+  chapters         Chapter[]
+  character_links  NovelCharacter[]
+  relations        NovelCharacterRelation[]
+  generation_costs ChapterGenerationCost[]
+}
+
+model Character {
+  id                  String                   @id @default(uuid())
+  name                String
+  gender              String                   @default("")
+  age                 String                   @default("")
+  occupation          String                   @default("")
+  appearance          String                   @default("")
+  first_person        String                   @default("")
+  address_others      String                   @default("")
+  speech_examples     String                   @default("[]")
+  description         String                   @default("")
+  created_at          DateTime                 @default(now())
+  updated_at          DateTime                 @updatedAt
+  novel_links         NovelCharacter[]
+  relations_as_source NovelCharacterRelation[] @relation("RelationSource")
+  relations_as_target NovelCharacterRelation[] @relation("RelationTarget")
+}
+
+model NovelCharacter {
+  novel_id     String
+  character_id String
+  role         String    @default("")
+  novel        Novel     @relation(fields: [novel_id], references: [id], onDelete: Cascade)
+  character    Character @relation(fields: [character_id], references: [id], onDelete: Cascade)
+
+  @@id([novel_id, character_id])
+  @@index([character_id])
+}
+
+model NovelCharacterRelation {
+  id                  String    @id @default(uuid())
+  novel_id            String
+  source_character_id String
+  target_character_id String
+  relation            String
+  description         String    @default("")
+  address_override    String    @default("")
+  novel               Novel     @relation(fields: [novel_id], references: [id], onDelete: Cascade)
+  source              Character @relation("RelationSource", fields: [source_character_id], references: [id], onDelete: Cascade)
+  target              Character @relation("RelationTarget", fields: [target_character_id], references: [id], onDelete: Cascade)
+
+  @@index([novel_id])
+}
+
+model ChapterGenerationCost {
+  id             String   @id @default(uuid())
+  novel_id       String
+  chapter_number Int
+  model          String
+  prompt_tokens  Int
+  output_tokens  Int
+  cost_usd       Float
+  created_at     DateTime @default(now())
+  novel          Novel    @relation(fields: [novel_id], references: [id], onDelete: Cascade)
+
+  @@index([novel_id])
+}
+
+model Chapter {
+  id             String   @id @default(uuid())
+  novel_id       String
+  chapter_number Int
+  version        Int      @default(1)
+  title          String?
+  content        String
+  created_at     DateTime @default(now())
+
+  novel Novel @relation(fields: [novel_id], references: [id], onDelete: Cascade)
+
+  @@unique([novel_id, chapter_number, version])
+  @@index([novel_id, chapter_number])
+}

@@ -1,0 +1,25 @@
+name = "vinext-app"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+main = "./worker/index.ts"
+preview_urls = true
+workers_dev = true
+
+[assets]
+not_found_handling = "none"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+GEMINI_MODEL = "gemini-2.5-flash"
+# GEMINI_API_KEY is a secret — set it with: bunx wrangler secret put GEMINI_API_KEY
+
+# D1 binding for novel storage.
+# database_id is filled in once `wrangler d1 create ainovel-db` is run by a human.
+# Local dev uses an in-tree SQLite under .wrangler/state/, so this can stay placeholder during dev.
+[[d1_databases]]
+binding = "DB"
+database_name = "ainovel-db"
+database_id = "PLACEHOLDER_RUN_WRANGLER_D1_CREATE"
