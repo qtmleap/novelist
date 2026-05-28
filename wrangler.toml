@@ -2,8 +2,11 @@ name = "novelist"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 main = "./worker/index.ts"
-preview_urls = true
-workers_dev = true
+# Public workers.dev / preview URLs are disabled in every env to keep the
+# Gemini API key from being abused via the default subdomains. Reach the
+# worker through your own custom domain instead.
+preview_urls = false
+workers_dev = false
 
 [assets]
 not_found_handling = "none"
@@ -20,29 +23,50 @@ GEMINI_MODEL = "gemini-2.5-flash"
 # .wrangler/state/, so the placeholder is fine during dev.
 [[d1_databases]]
 binding = "DB"
-database_name = "ainovel-db"
+database_name = "novelist"
 database_id = "PLACEHOLDER_RUN_WRANGLER_D1_CREATE"
+migrations_dir = "prisma/migrations"
 
 # ── staging (deployed on PR merge to develop) ──
 [env.staging]
 name = "novelist-staging"
+preview_urls = false
+workers_dev = false
+routes = [
+  { pattern = "novel-staging.qleap.jp", custom_domain = true }
+]
+
+[env.staging.observability]
+enabled = true
+head_sampling_rate = 1
 
 [env.staging.vars]
 GEMINI_MODEL = "gemini-2.5-flash"
 
 [[env.staging.d1_databases]]
 binding = "DB"
-database_name = "ainovel-db-staging"
-database_id = "PLACEHOLDER_RUN_WRANGLER_D1_CREATE"
+database_name = "novelist-staging"
+database_id = "169253a8-8421-4de2-83ed-6ff2727768a0"
+migrations_dir = "prisma/migrations"
 
 # ── production (deployed on PR merge to master) ──
 [env.production]
 name = "novelist-production"
+preview_urls = false
+workers_dev = false
+routes = [
+  { pattern = "novel.qleap.jp", custom_domain = true }
+]
+
+[env.production.observability]
+enabled = true
+head_sampling_rate = 1
 
 [env.production.vars]
 GEMINI_MODEL = "gemini-2.5-flash"
 
 [[env.production.d1_databases]]
 binding = "DB"
-database_name = "ainovel-db-production"
-database_id = "PLACEHOLDER_RUN_WRANGLER_D1_CREATE"
+database_name = "novelist-production"
+database_id = "48501a98-987a-45e6-b6e5-14144656eba0"
+migrations_dir = "prisma/migrations"
