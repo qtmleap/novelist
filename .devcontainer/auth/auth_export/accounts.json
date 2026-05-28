@@ -1,0 +1,25 @@
+{
+  "kind": "identitytoolkit#DownloadAccountResponse",
+  "users": [
+    {
+      "localId": "test-user-001",
+      "email": "test@example.com",
+      "emailVerified": true,
+      "displayName": "Test User",
+      "photoUrl": "",
+      "providerUserInfo": [
+        {
+          "providerId": "google.com",
+          "rawId": "100000000000000001",
+          "email": "test@example.com",
+          "displayName": "Test User",
+          "photoUrl": ""
+        }
+      ],
+      "validSince": "1712620800",
+      "createdAt": "1712620800000",
+      "lastLoginAt": "1712620800000",
+      "lastRefreshAt": "2026-04-09T00:00:00.000Z"
+    }
+  ]
+}
