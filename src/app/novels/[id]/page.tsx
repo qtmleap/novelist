@@ -412,6 +412,9 @@ export default function NovelDetailPage() {
           onRegenerateChapter={handleRegenerateOutlineChapter}
           regeneratingChapter={regeneratingOutlineChapter}
           isBusy={isGenerating || regeneratingOutlineChapter !== null}
+          chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
+          streamingIndex={streamingIndex}
+          onGenerateChapter={handleRetryChapter}
           regenerateSlot={
             outline && !isGenerating ? (
               <AlertDialog open={outlineRegenOpen} onOpenChange={setOutlineRegenOpen}>
