@@ -53,6 +53,8 @@ jobs:
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Generate Prisma client
         run: bunx prisma generate
+        env:
+          DATABASE_URL: file:./dev.db
       - name: Type check
         run: bunx tsc --noEmit
   build:
@@ -70,6 +72,8 @@ jobs:
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Generate Prisma client
         run: bunx prisma generate
+        env:
+          DATABASE_URL: file:./dev.db
       - name: Build
         run: bun run build
   test:
