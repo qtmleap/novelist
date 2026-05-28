@@ -1,12 +1,13 @@
 'use client'
 
-import { Pencil, RefreshCw, Sparkles } from 'lucide-react'
-import { useCallback, useEffect, useReducer, useRef } from 'react'
+import { Loader2, Pencil, RefreshCw, Sparkles } from 'lucide-react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { ChapterReader } from '@/components/novel/ChapterReader'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { GenerationStatus } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
+import { OutlineSelectionDialog } from '@/components/novel/OutlineSelectionDialog'
 import { OutlineView } from '@/components/novel/OutlineView'
 import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/button'
@@ -135,25 +136,13 @@ const INITIAL: State = {
 }
 
 function NextChapterButton({
-  hasOutline,
   nextChapterNumber,
-  onGenerateOutline,
   onGenerateChapter
 }: {
-  hasOutline: boolean
   // 次に生成すべき章 (=最新生成済み章 + 1)。全て生成済みなら null。
   nextChapterNumber: number | null
-  onGenerateOutline: () => void
   onGenerateChapter: (n: number) => void
 }) {
-  if (!hasOutline) {
-    return (
-      <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={onGenerateOutline}>
-        <Sparkles />
-        章立てを生成
-      </Button>
-    )
-  }
   if (nextChapterNumber === null) return null
   return (
     <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={() => onGenerateChapter(nextChapterNumber)}>
@@ -196,6 +185,7 @@ export default function NovelDetailPage() {
   const [state, dispatch] = useReducer(reducer, INITIAL)
   const abortRef = useRef<AbortController | null>(null)
   const novelIdRef = useRef<string | null>(null)
+  const [outlineDialogOpen, setOutlineDialogOpen] = useState(false)
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
     try {
@@ -211,22 +201,27 @@ export default function NovelDetailPage() {
     }
   }, [])
 
-  const doGenerateOutline = useCallback(async (id: string): Promise<Outline | null> => {
-    dispatch({ type: 'OUTLINE_START' })
-    try {
-      const res = await api.novels[':id'].outline.$post({
-        param: { id },
-        json: { model: getEditorModel() }
-      })
-      if (!res.ok) throw new Error(await readApiError(res))
-      const body = (await res.json()) as { outline: Outline }
-      dispatch({ type: 'OUTLINE_OK', outline: body.outline })
-      return body.outline
-    } catch (e) {
-      dispatch({ type: 'OUTLINE_ERR', error: e instanceof Error ? e.message : '章立て生成に失敗しました' })
-      return null
-    }
-  }, [])
+  const doGenerateOutline = useCallback(
+    async (id: string, chapters?: number[]): Promise<Outline | null> => {
+      dispatch({ type: 'OUTLINE_START' })
+      try {
+        const res = await api.novels[':id'].outline.$post({
+          param: { id },
+          json: { model: getEditorModel(), ...(chapters ? { chapters } : {}) }
+        })
+        if (!res.ok) throw new Error(await readApiError(res))
+        const body = (await res.json()) as { outline: Outline }
+        dispatch({ type: 'OUTLINE_OK', outline: body.outline })
+        // chapters[] 指定の部分再生成では、対象章の本文も server 側で消えるので novel 全体を取り直す。
+        await loadNovel(id)
+        return body.outline
+      } catch (e) {
+        dispatch({ type: 'OUTLINE_ERR', error: e instanceof Error ? e.message : '章立て生成に失敗しました' })
+        return null
+      }
+    },
+    [loadNovel]
+  )
 
   const doGenerateChapter = useCallback(async (id: string, num: number, abort: AbortController): Promise<boolean> => {
     dispatch({ type: 'CHAPTER_START', chapterNumber: num })
@@ -326,12 +321,26 @@ export default function NovelDetailPage() {
               {' 章 生成済み'}
             </p>
           </div>
-          <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
-            <a href={`/novels/${novel.id}/edit`}>
-              <Pencil />
-              編集
-            </a>
-          </Button>
+          <div className='flex shrink-0 items-center gap-2'>
+            {status !== 'loading' && (outline === null || outline.chapters.length < novel.num_chapters) && (
+              <Button
+                type='button'
+                size='sm'
+                disabled={isGenerating}
+                className='[&_svg]:size-5!'
+                onClick={() => setOutlineDialogOpen(true)}
+              >
+                {status === 'generatingOutline' ? <Loader2 className='animate-spin' /> : <Sparkles />}
+                章立てを生成
+              </Button>
+            )}
+            <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
+              <a href={`/novels/${novel.id}/edit`}>
+                <Pencil />
+                編集
+              </a>
+            </Button>
+          </div>
         </div>
       )}
 
@@ -395,25 +404,29 @@ export default function NovelDetailPage() {
         </Button>
       )}
 
-      {novel && !isGenerating && status !== 'loading' && status !== 'error' && (
+      {novel && !isGenerating && status !== 'loading' && status !== 'error' && outline && (
         <NextChapterButton
-          hasOutline={outline !== null}
-          nextChapterNumber={
-            outline
-              ? (() => {
-                  const doneSet = new Set(chapters.filter((c) => c.done).map((c) => c.number))
-                  const next = outline.chapters.find((ch) => !doneSet.has(ch.chapter_number))
-                  return next ? next.chapter_number : null
-                })()
-              : null
-          }
-          onGenerateOutline={() => {
-            const id = novelIdRef.current
-            if (id) doGenerateOutline(id)
-          }}
+          nextChapterNumber={(() => {
+            const doneSet = new Set(chapters.filter((c) => c.done).map((c) => c.number))
+            const next = outline.chapters.find((ch) => !doneSet.has(ch.chapter_number))
+            return next ? next.chapter_number : null
+          })()}
           onGenerateChapter={(n) => {
             const id = novelIdRef.current
             if (id) runGeneration(id, [n])
+          }}
+        />
+      )}
+
+      {novel && (
+        <OutlineSelectionDialog
+          open={outlineDialogOpen}
+          onOpenChange={setOutlineDialogOpen}
+          totalChapters={novel.num_chapters}
+          outline={outline}
+          onConfirm={(targets) => {
+            const id = novelIdRef.current
+            if (id && targets.length > 0) doGenerateOutline(id, targets)
           }}
         />
       )}
