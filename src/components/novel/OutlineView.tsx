@@ -1,20 +1,9 @@
 'use client'
 
-import { BookMarked, Check, ChevronRight, Loader2, RefreshCw } from 'lucide-react'
+import { BookMarked, Check, ChevronRight, Loader2 } from 'lucide-react'
 import Link from 'next/link'
-import { type ReactNode, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle
-} from '@/components/ui/alert-dialog'
-import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import type { ChapterCost, Outline } from '@/schemas/novel.dto'
@@ -23,8 +12,6 @@ type Props = {
   outline: Outline | null
   isGenerating: boolean
   regenerateSlot?: ReactNode
-  onRegenerateChapter?: (chapterNumber: number) => void
-  regeneratingChapter?: number | null
   isBusy?: boolean
   chapters?: ChapterData[]
   costs?: ChapterCost[]
@@ -41,15 +28,11 @@ export function OutlineView({
   outline,
   isGenerating,
   regenerateSlot,
-  onRegenerateChapter,
-  regeneratingChapter,
-  isBusy = false,
   chapters,
   costs,
   streamingIndex = null,
   novelId
 }: Props) {
-  const [pendingRegen, setPendingRegen] = useState<number | null>(null)
   const chapterByNumber = new Map<number, ChapterData>()
   for (const c of chapters ?? []) chapterByNumber.set(c.number, c)
   const costByNumber = new Map<number, ChapterCost>()
@@ -90,17 +73,11 @@ export function OutlineView({
       </div>
       <ol className='divide-y border-y'>
         {outline.chapters.map((ch) => {
-          const regenerating = regeneratingChapter === ch.chapter_number
           const chapterData = chapterByNumber.get(ch.chapter_number)
           const done = chapterData?.done === true
           const isStreaming = streamingIndex === ch.chapter_number
           const linkable = done && novelId !== undefined
           const cost = costByNumber.get(ch.chapter_number)
-          // 先の章が生成済みなら、この章を再生成すると後続章と矛盾するので無効化する。
-          const hasLaterDone = outline.chapters.some(
-            (other) => other.chapter_number > ch.chapter_number && chapterByNumber.get(other.chapter_number)?.done
-          )
-          const showRegen = onRegenerateChapter !== undefined && !hasLaterDone
           const rowContent = (
             <>
               <span className='flex size-6 shrink-0 items-center justify-center rounded bg-muted text-xs font-semibold tabular-nums text-muted-foreground'>
@@ -136,23 +113,6 @@ export function OutlineView({
                 )}
               </div>
               {linkable && <ChevronRight className='size-5 shrink-0 self-center text-muted-foreground' />}
-              {showRegen && (
-                <Button
-                  type='button'
-                  variant='ghost'
-                  size='icon'
-                  aria-label={`第 ${ch.chapter_number} 章の章立てを再生成`}
-                  disabled={isBusy || regenerating}
-                  onClick={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    setPendingRegen(ch.chapter_number)
-                  }}
-                  className='size-8 shrink-0 text-muted-foreground hover:text-foreground [&_svg]:size-5!'
-                >
-                  {regenerating ? <Loader2 className='animate-spin' /> : <RefreshCw />}
-                </Button>
-              )}
             </>
           )
           const className = cn('flex items-start gap-3 px-4 py-3 transition-colors', linkable && 'hover:bg-muted/40')
@@ -169,32 +129,6 @@ export function OutlineView({
           )
         })}
       </ol>
-      <AlertDialog open={pendingRegen !== null} onOpenChange={(open) => !open && setPendingRegen(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>第 {pendingRegen} 章の章立てを再生成しますか？</AlertDialogTitle>
-            <AlertDialogDescription>
-              この章のタイトル・要約を上書きし、すでに生成済みの本文も削除します。章立てと本文がずれた状態を残さないためです。元には戻せません。Gemini
-              API を呼び出すので追加コストが発生します。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>キャンセル</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault()
-                const target = pendingRegen
-                setPendingRegen(null)
-                if (target !== null) onRegenerateChapter?.(target)
-              }}
-              className='[&_svg]:size-5!'
-            >
-              <RefreshCw />
-              再生成する
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }
