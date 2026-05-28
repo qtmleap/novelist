@@ -303,7 +303,7 @@ export default function NovelDetailPage() {
   }
 
   const isGenerating = state.status === 'generatingOutline' || state.status === 'generatingChapter'
-  const { novel, outline, chapters, streamingIndex, buffer, status, error } = state
+  const { novel, outline, chapters, streamingIndex, status, error } = state
   const totalChapters = outline ? outline.chapters.length : (novel?.num_chapters ?? 0)
   const currentChapter = streamingIndex ?? chapters.filter((c) => c.done).length + 1
 
