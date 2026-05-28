@@ -13,7 +13,8 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarRail
+  SidebarRail,
+  useSidebar
 } from '@/components/ui/sidebar'
 import { cn } from '@/lib/utils'
 
@@ -25,16 +26,22 @@ const NAV_ITEMS = [
 
 export function AppSidebar() {
   const pathname = usePathname()
+  const { isMobile, setOpenMobile } = useSidebar()
 
   const activeHref = NAV_ITEMS.map((item) => item.href)
     .filter((href) => pathname === href || pathname.startsWith(`${href}/`))
     .sort((a, b) => b.length - a.length)[0]
+
+  const closeIfMobile = () => {
+    if (isMobile) setOpenMobile(false)
+  }
 
   return (
     <Sidebar collapsible='icon'>
       <SidebarHeader className='h-16 justify-center border-b'>
         <Link
           href='/novels'
+          onClick={closeIfMobile}
           className={cn(
             'group-data-[collapsible=icon]:hidden',
             'inline-flex items-center px-3 text-sm font-semibold tracking-widest text-sidebar-foreground transition-colors hover:text-sidebar-accent-foreground'
@@ -53,7 +60,7 @@ export function AppSidebar() {
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild isActive={isActive} tooltip={item.label} className='[&>svg]:size-5!'>
-                      <Link href={item.href}>
+                      <Link href={item.href} onClick={closeIfMobile}>
                         <item.icon />
                         <span>{item.label}</span>
                       </Link>
