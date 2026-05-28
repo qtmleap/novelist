@@ -166,13 +166,13 @@ function StartGenerationButton({
   let label: string
   let Icon: typeof Sparkles
   if (!hasOutline) {
-    label = '章立てから生成開始'
+    label = '章立てを生成'
     Icon = Sparkles
   } else if (status === 'cancelled') {
     label = '続きから再開'
     Icon = RefreshCw
   } else {
-    label = '未生成の章を生成'
+    label = '本文を生成'
     Icon = Sparkles
   }
 
@@ -286,21 +286,15 @@ export default function NovelDetailPage() {
     }
   }, [])
 
-  // chapters が null/undefined のときは「outline 内の未生成 + 残り全部」を対象にする。
-  // 配列が渡された場合はその章だけを順番に流す。
+  // 章リストを順番に流す。章立て生成は別フロー (doGenerateOutline) なのでここでは扱わない —
+  // 章立て生成直後の自動本文生成を避けるため、ボタン側で 2 段階に分けている。
   const runGeneration = useCallback(
-    async (id: string, existingOutline: Outline | null, chapterNumbers: number[] | null) => {
+    async (id: string, chapterNumbers: number[]) => {
+      if (chapterNumbers.length === 0) return
       const abort = new AbortController()
       abortRef.current = abort
 
-      let outline = existingOutline
-      if (!outline) {
-        outline = await doGenerateOutline(id)
-        if (!outline || abort.signal.aborted) return
-      }
-
-      const targets = chapterNumbers ?? outline.chapters.map((c) => c.chapter_number).filter((n) => n > 0)
-      for (const n of targets) {
+      for (const n of chapterNumbers) {
         if (abort.signal.aborted) break
         const succeeded = await doGenerateChapter(id, n, abort)
         if (!succeeded || abort.signal.aborted) break
@@ -308,7 +302,7 @@ export default function NovelDetailPage() {
 
       if (!abort.signal.aborted) dispatch({ type: 'CANCEL' })
     },
-    [doGenerateOutline, doGenerateChapter]
+    [doGenerateChapter]
   )
 
   // Mount effect — runs once. 生成は明示的なボタン操作からのみ開始する (新規作成直後の自動実行は無し)。
@@ -486,8 +480,8 @@ export default function NovelDetailPage() {
             const id = novelIdRef.current
             if (!id) return
             if (!outline) {
-              // 章立てが未生成なら、まず生成 + そのあと全章をデフォルト対象に流す
-              runGeneration(id, null, null)
+              // 章立て生成だけ走らせて止める。本文生成は別ボタンで明示的に開始する。
+              doGenerateOutline(id)
             } else {
               setChapterPickerOpen(true)
             }
@@ -503,7 +497,7 @@ export default function NovelDetailPage() {
           chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
           onConfirm={(targets) => {
             const id = novelIdRef.current
-            if (id && targets.length > 0) runGeneration(id, outline, targets)
+            if (id && targets.length > 0) runGeneration(id, targets)
           }}
         />
       )}
