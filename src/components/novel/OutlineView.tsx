@@ -1,6 +1,6 @@
 'use client'
 
-import { BookMarked, Loader2, PenLine, RefreshCw } from 'lucide-react'
+import { BookMarked, Loader2, RefreshCw } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -13,10 +13,6 @@ type Props = {
   onRegenerateChapter?: (chapterNumber: number) => void
   regeneratingChapter?: number | null
   isBusy?: boolean
-  // 章本文の生成ボタン用。done に含まれる章は「本文あり」、streamingIndex の章は spinner。
-  chaptersDone?: Set<number>
-  streamingIndex?: number | null
-  onGenerateChapter?: (chapterNumber: number) => void
 }
 
 export function OutlineView({
@@ -25,10 +21,7 @@ export function OutlineView({
   regenerateSlot,
   onRegenerateChapter,
   regeneratingChapter,
-  isBusy = false,
-  chaptersDone,
-  streamingIndex = null,
-  onGenerateChapter
+  isBusy = false
 }: Props) {
   if (isGenerating && !outline) {
     return (
@@ -67,10 +60,7 @@ export function OutlineView({
       <ol className='divide-y border-y'>
         {outline.chapters.map((ch) => {
           const regenerating = regeneratingChapter === ch.chapter_number
-          const showOutlineRegen = onRegenerateChapter !== undefined
-          const isDone = chaptersDone?.has(ch.chapter_number) ?? false
-          const isStreaming = streamingIndex === ch.chapter_number
-          const showGenerate = onGenerateChapter !== undefined && !isDone
+          const showButton = onRegenerateChapter !== undefined
           return (
             <li key={ch.chapter_number} className='flex items-start gap-3 px-4 py-3'>
               <span className='flex size-6 shrink-0 items-center justify-center rounded bg-muted text-xs font-semibold tabular-nums text-muted-foreground'>
@@ -80,20 +70,7 @@ export function OutlineView({
                 <p className='font-medium text-sm leading-snug'>{ch.title}</p>
                 <p className='mt-0.5 text-xs leading-relaxed text-muted-foreground'>{ch.summary}</p>
               </div>
-              {showGenerate && (
-                <Button
-                  type='button'
-                  variant='outline'
-                  size='sm'
-                  disabled={isBusy && !isStreaming}
-                  onClick={() => onGenerateChapter?.(ch.chapter_number)}
-                  className='shrink-0 [&_svg]:size-5!'
-                >
-                  {isStreaming ? <Loader2 className='animate-spin' /> : <PenLine />}
-                  {isStreaming ? '生成中…' : '本文を生成'}
-                </Button>
-              )}
-              {showOutlineRegen && (
+              {showButton && (
                 <Button
                   type='button'
                   variant='ghost'
