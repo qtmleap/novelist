@@ -33,6 +33,10 @@ name = "novelist-staging"
 preview_urls = false
 workers_dev = false
 
+[env.staging.observability]
+enabled = true
+head_sampling_rate = 1
+
 [env.staging.vars]
 GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -47,6 +51,10 @@ migrations_dir = "prisma/migrations"
 name = "novelist-production"
 preview_urls = false
 workers_dev = false
+
+[env.production.observability]
+enabled = true
+head_sampling_rate = 1
 
 [env.production.vars]
 GEMINI_MODEL = "gemini-2.5-flash"
