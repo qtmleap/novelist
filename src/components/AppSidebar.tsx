@@ -1,7 +1,8 @@
 'use client'
 
 import { Library, Settings, Users } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import {
   Sidebar,
   SidebarContent,
@@ -12,8 +13,10 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarRail
+  SidebarRail,
+  useSidebar
 } from '@/components/ui/sidebar'
+import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
   { label: '小説一覧', href: '/novels', icon: Library },
@@ -22,28 +25,30 @@ const NAV_ITEMS = [
 ]
 
 export function AppSidebar() {
-  const [pathname, setPathname] = useState('')
-
-  useEffect(() => {
-    setPathname(window.location.pathname)
-  }, [])
+  const pathname = usePathname()
+  const { isMobile, setOpenMobile } = useSidebar()
 
   const activeHref = NAV_ITEMS.map((item) => item.href)
     .filter((href) => pathname === href || pathname.startsWith(`${href}/`))
     .sort((a, b) => b.length - a.length)[0]
 
+  const closeIfMobile = () => {
+    if (isMobile) setOpenMobile(false)
+  }
+
   return (
     <Sidebar collapsible='icon'>
       <SidebarHeader className='h-16 justify-center border-b'>
-        <SidebarMenu>
-          <SidebarMenuItem className='group-data-[collapsible=icon]:hidden'>
-            <SidebarMenuButton size='lg' asChild>
-              <a href='/novels'>
-                <span className='font-semibold tracking-widest'>NOVELIST</span>
-              </a>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+        <Link
+          href='/novels'
+          onClick={closeIfMobile}
+          className={cn(
+            'group-data-[collapsible=icon]:hidden',
+            'inline-flex items-center px-3 text-sm font-semibold tracking-widest text-sidebar-foreground transition-colors hover:text-sidebar-accent-foreground'
+          )}
+        >
+          NOVELIST
+        </Link>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
@@ -55,10 +60,10 @@ export function AppSidebar() {
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild isActive={isActive} tooltip={item.label} className='[&>svg]:size-5!'>
-                      <a href={item.href}>
+                      <Link href={item.href} onClick={closeIfMobile}>
                         <item.icon />
                         <span>{item.label}</span>
-                      </a>
+                      </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 )
