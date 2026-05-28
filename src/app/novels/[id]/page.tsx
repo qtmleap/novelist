@@ -10,17 +10,6 @@ import { GenerationStatus } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
 import { OutlineView } from '@/components/novel/OutlineView'
 import { PageHeader } from '@/components/PageHeader'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger
-} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { api, readApiError } from '@/lib/api/client'
 import { getEditorModel, getWriterModel } from '@/lib/settings'
@@ -218,7 +207,6 @@ export default function NovelDetailPage() {
   const [state, dispatch] = useReducer(reducer, INITIAL)
   const abortRef = useRef<AbortController | null>(null)
   const novelIdRef = useRef<string | null>(null)
-  const [outlineRegenOpen, setOutlineRegenOpen] = useState(false)
   const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
   const [regeneratingOutlineChapter, setRegeneratingOutlineChapter] = useState<number | null>(null)
 
@@ -331,13 +319,6 @@ export default function NovelDetailPage() {
     await doGenerateChapter(id, num, abort)
   }
 
-  const handleRegenerateOutline = async () => {
-    const id = novelIdRef.current
-    if (!id) return
-    setOutlineRegenOpen(false)
-    await doGenerateOutline(id)
-  }
-
   const handleRegenerateOutlineChapter = async (num: number) => {
     const id = novelIdRef.current
     if (!id) return
@@ -348,8 +329,8 @@ export default function NovelDetailPage() {
         json: { model: getEditorModel() }
       })
       if (!res.ok) throw new Error(await readApiError(res))
-      const body = (await res.json()) as { outline: Outline }
-      dispatch({ type: 'OUTLINE_OK', outline: body.outline })
+      // server 側で章立て更新と一緒に該当章の本文も削除されるので、novel 全体を取り直す。
+      await loadNovel(id)
     } catch (e) {
       dispatch({ type: 'OUTLINE_ERR', error: e instanceof Error ? e.message : '章立ての再生成に失敗しました' })
     } finally {
@@ -412,39 +393,6 @@ export default function NovelDetailPage() {
           costs={novel?.generation_costs ?? []}
           streamingIndex={streamingIndex}
           novelId={novel?.id}
-          regenerateSlot={
-            outline && !isGenerating ? (
-              <AlertDialog open={outlineRegenOpen} onOpenChange={setOutlineRegenOpen}>
-                <AlertDialogTrigger asChild>
-                  <Button type='button' variant='ghost' size='sm' className='[&_svg]:size-5!'>
-                    <RefreshCw />
-                    章立てを再生成
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>章立てを再生成しますか？</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      章立てを上書きします。既存の本文はそのまま残りますが、新しい章立てとタイトル・要約がずれる可能性があります。
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>キャンセル</AlertDialogCancel>
-                    <AlertDialogAction
-                      onClick={(e) => {
-                        e.preventDefault()
-                        handleRegenerateOutline()
-                      }}
-                      className='[&_svg]:size-5!'
-                    >
-                      <RefreshCw />
-                      再生成する
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
-            ) : null
-          }
         />
       )}
 
