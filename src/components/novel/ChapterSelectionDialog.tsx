@@ -79,7 +79,6 @@ export function ChapterSelectionDialog({ open, onOpenChange, outline, chaptersDo
 
         <ol className='max-h-80 divide-y overflow-y-auto'>
           {outline.chapters.map((ch) => {
-            const done = chaptersDone.has(ch.chapter_number)
             const checked = selected.has(ch.chapter_number)
             const id = `chapter-select-${ch.chapter_number}`
             return (
@@ -93,7 +92,6 @@ export function ChapterSelectionDialog({ open, onOpenChange, outline, chaptersDo
                 <label htmlFor={id} className='min-w-0 flex-1 cursor-pointer'>
                   <p className='font-medium text-sm leading-snug'>
                     第 {ch.chapter_number} 章: {ch.title}
-                    {done && <span className='ml-2 text-xs font-normal text-muted-foreground'>(本文あり)</span>}
                   </p>
                   <p className='mt-0.5 text-xs leading-relaxed text-muted-foreground line-clamp-2'>{ch.summary}</p>
                 </label>
