@@ -15,11 +15,10 @@ export default function NewCharacterPage() {
     setIsSubmitting(true)
     setError(null)
     try {
-      const res = await api.characters.$post({ json: data })
-      if (!res.ok) throw new Error(await readApiError(res))
+      await api.createCharacter(data)
       window.location.assign('/characters')
     } catch (e) {
-      setError(e instanceof Error ? e.message : '登場人物の登録に失敗しました')
+      setError(readApiError(e, '登場人物の登録に失敗しました'))
       setIsSubmitting(false)
     }
   }
