@@ -12,6 +12,21 @@ import {
 import { saveChapter } from '@/lib/novel/repository'
 import type { GeminiModel, Outline } from '@/schemas/novel.dto'
 
+// Gemini の finishReason を人向けの日本語メッセージに変換する。
+// 'STOP' 以外がここに届く前提なので 'STOP' は扱わない。
+function truncationMessage(finishReason: string): string {
+  if (finishReason === 'MAX_TOKENS') {
+    return '生成が文字数上限で打ち切られました。途中までの本文は保存されています。設定で目標文字数を下げるか、章を分けて再生成してください。'
+  }
+  if (finishReason === 'SAFETY') {
+    return 'Gemini のセーフティ判定で生成が打ち切られました。途中までの本文は保存されています。プロンプトや設定をやや穏当な内容に調整して再生成してください。'
+  }
+  if (finishReason === 'RECITATION') {
+    return 'Gemini が引用拒否で停止しました。途中までの本文は保存されています。固有名詞や台詞をプロンプトから減らして再生成してください。'
+  }
+  return `生成が途中で打ち切られました (理由: ${finishReason})。途中までの本文は保存されています。`
+}
+
 // DO 起動時に worker から渡されるペイロード。プロンプト合成に必要な小説 + outline 情報を全部含む
 // (DO 側で D1 を読みに行かない: 起動時の novel スナップショットを使うほうが冪等で扱いやすい)。
 export type StartChapterGenPayload = {
@@ -189,7 +204,18 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       // 完了時 buffer flush
       await this.ctx.storage.put('buffer', this.buffer)
 
-      // D1 へ章本文を保存
+      // Gemini の finishReason を取得 (stream 終了時に resolve される)。
+      // 'STOP' = 正常完了。'MAX_TOKENS' / 'SAFETY' / 'RECITATION' / 'OTHER' は途中打ち切り。
+      let usage: StreamChapterUsage | undefined
+      try {
+        usage = await result.usage
+      } catch {
+        usage = undefined
+      }
+      const finishReason = usage === undefined ? 'STOP' : usage.finishReason
+      const truncated = finishReason !== 'STOP'
+
+      // D1 へ章本文を保存 (途中打ち切りでも残しておいて、UI 側で再生成判断できるようにする)
       const prisma = this.makePrisma()
       let saved: { id: string }
       try {
@@ -202,27 +228,40 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       }
 
       // コスト記録 (best-effort)
-      try {
-        const usage: StreamChapterUsage = await result.usage
-        const costUsd = computeCostUsd(usage.model, usage.promptTokens, usage.outputTokens)
-        await prisma.chapterGenerationCost.create({
-          data: {
-            novel_id: payload.novelId,
-            chapter_number: payload.chapterNumber,
-            model: usage.model,
-            prompt_tokens: usage.promptTokens,
-            output_tokens: usage.outputTokens,
-            cost_usd: costUsd
-          }
-        })
-      } catch {
-        /* best-effort */
+      if (usage) {
+        try {
+          const costUsd = computeCostUsd(usage.model, usage.promptTokens, usage.outputTokens)
+          await prisma.chapterGenerationCost.create({
+            data: {
+              novel_id: payload.novelId,
+              chapter_number: payload.chapterNumber,
+              model: usage.model,
+              prompt_tokens: usage.promptTokens,
+              output_tokens: usage.outputTokens,
+              cost_usd: costUsd
+            }
+          })
+        } catch {
+          /* best-effort */
+        }
       }
       await prisma.$disconnect()
 
-      this.phase = 'done'
       this.chapterId = saved.id
       this.chapterTitle = payload.chapterTitle
+
+      if (truncated) {
+        // 途中打ち切り: 部分本文は D1 に保存済み。UI には error として通知し、ユーザーが再生成を判断できるようにする。
+        this.phase = 'error'
+        this.errMsg = truncationMessage(finishReason)
+        await this.persistAll()
+        const errEvent = encoder.encode(`data: ${JSON.stringify({ error: this.errMsg })}\n\n`)
+        await this.fanout(errEvent)
+        await this.closeAll()
+        return
+      }
+
+      this.phase = 'done'
       await this.persistAll()
 
       const event = encoder.encode(
