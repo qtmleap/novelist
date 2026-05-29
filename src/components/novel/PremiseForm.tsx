@@ -63,6 +63,7 @@ const EMPTY_DEFAULTS: CreateNovelInput = {
   age_rating: DEFAULT_AGE_RATING,
   pov_character_id: '',
   ending: DEFAULT_ENDING,
+  notes: '',
   character_links: [],
   relations: []
 }
@@ -182,6 +183,27 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
           <p className='text-xs text-muted-foreground'>登場人物辞典を使う場合は下の「登場人物」で選択してください。</p>
           {form.formState.errors.characters && (
             <p className='text-xs text-destructive'>{form.formState.errors.characters.message}</p>
+          )}
+        </div>
+
+        <div className='space-y-2'>
+          <Label htmlFor='notes'>
+            物語に入れたいシーン・展開 <span className='text-muted-foreground font-normal'>（任意）</span>
+          </Label>
+          <Textarea
+            id='notes'
+            placeholder={
+              '例:\n- 主人公とヒロインがカラオケで歌う場面\n- 親友がさり気なく主人公を励ますシーン\n- ラスト近くで雨が降る'
+            }
+            rows={4}
+            {...form.register('notes')}
+            className='resize-none'
+          />
+          <p className='text-xs text-muted-foreground'>
+            章立ての (再)生成時に AI が各章へ振り分けて反映します。本文生成時は章立て側に乗っているので再注入しません。
+          </p>
+          {form.formState.errors.notes && (
+            <p className='text-xs text-destructive'>{form.formState.errors.notes.message}</p>
           )}
         </div>
 
