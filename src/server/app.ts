@@ -38,6 +38,7 @@ function serializeNovel(n: {
   target_chars: number
   pov: string
   tone: string
+  age_rating: string
   pov_character_id: string
   ending: string
   outline: string | null
@@ -54,6 +55,7 @@ function serializeNovel(n: {
     target_chars: n.target_chars,
     pov: n.pov,
     tone: n.tone,
+    age_rating: n.age_rating,
     pov_character_id: n.pov_character_id,
     ending: n.ending,
     outline: n.outline,
@@ -256,6 +258,7 @@ export const app = new Hono()
       const style = {
         pov: novel.pov,
         tone: novel.tone,
+        age_rating: novel.age_rating,
         ending: novel.ending,
         viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
       }
@@ -334,6 +337,7 @@ export const app = new Hono()
       const style = {
         pov: novel.pov,
         tone: novel.tone,
+        age_rating: novel.age_rating,
         ending: novel.ending,
         viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
       }
@@ -433,6 +437,7 @@ export const app = new Hono()
     const style = {
       pov: novel.pov,
       tone: novel.tone,
+      age_rating: novel.age_rating,
       ending: novel.ending,
       viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
     }
