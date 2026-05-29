@@ -509,6 +509,11 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
   // notes は章立て生成時にのみ使う (outline.summary に既に振り分けが乗っているため、
   // 本文生成では全体リストを再注入しない)。
 
+  // 結末への寄せ方は章の現在位置から自然に決まるはず (序盤=展開、終盤=収束、最終章=結末到達)。
+  // 過剰に「結末を温存せよ/直接示せ」と指示せず、進行度だけ渡してモデルに任せる。
+  const totalChapters = Math.max(...outline.chapters.map((c) => c.chapter_number))
+  const positionLine = `現在執筆中: 第${chapterNumber}章 / 全${totalChapters}章`
+
   const sections: string[] = [
     `【作品情報】\nタイトル: ${novel.title}\nジャンル: ${novel.genre}\n登場人物: ${novel.characters}\n世界観・設定: ${novel.setting}`,
     `【文体・視点】\n${styleInstruction}`,
@@ -517,6 +522,7 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
     writingRules,
     `【全体の章立て（概要）】\n${allChapterSummaries}`,
     prevChaptersText ? `【直前の章の本文（参考）】\n${prevChaptersText}` : '',
+    `【執筆位置】\n${positionLine}`,
     `【執筆対象】\n第${chapterNumber}章「${targetEntry.title}」\n概要: ${targetEntry.summary}`
   ].filter((s) => s.length > 0)
 
