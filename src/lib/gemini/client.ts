@@ -1,8 +1,47 @@
+import { z } from 'zod'
 import type { Env } from '@/lib/db'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
 import { type GeminiModel, type Outline, type OutlineChapter, OutlineSchema } from '@/schemas/novel.dto'
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
+
+// generateContent / streamGenerateContent 共通レスポンス。任意フィールドが多いので
+// すべて optional で受けて safeParse する (壊れたチャンクは無視 = 既存挙動)。
+const GeminiCandidateSchema = z.object({
+  content: z
+    .object({
+      parts: z.array(z.object({ text: z.string().optional() })).optional()
+    })
+    .optional(),
+  finishReason: z.string().optional(),
+  safetyRatings: z
+    .array(
+      z.object({
+        category: z.string(),
+        probability: z.string(),
+        blocked: z.boolean().optional()
+      })
+    )
+    .optional()
+})
+
+const GeminiUsageMetadataSchema = z.object({
+  promptTokenCount: z.number().optional(),
+  candidatesTokenCount: z.number().optional(),
+  totalTokenCount: z.number().optional()
+})
+
+const GeminiResponseSchema = z.object({
+  candidates: z.array(GeminiCandidateSchema).optional(),
+  promptFeedback: z
+    .object({
+      blockReason: z.string().optional(),
+      safetyRatings: z.unknown().optional()
+    })
+    .optional(),
+  usageMetadata: GeminiUsageMetadataSchema.optional()
+})
+type GeminiResponse = z.infer<typeof GeminiResponseSchema>
 
 type GeminiNovelParams = {
   title: string
@@ -289,14 +328,7 @@ export async function generateOutline(
     throw new Error(`Gemini generateOutline failed: ${res.status} ${err}`)
   }
 
-  const data = (await res.json()) as {
-    candidates?: Array<{
-      content?: { parts?: Array<{ text?: string }> }
-      finishReason?: string
-      safetyRatings?: Array<{ category: string; probability: string; blocked?: boolean }>
-    }>
-    promptFeedback?: { blockReason?: string; safetyRatings?: unknown }
-  }
+  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
 
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
   if (!text) {
@@ -405,14 +437,7 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
     throw new Error(`Gemini regenerateOutlineChapter failed: ${res.status} ${err}`)
   }
 
-  const data = (await res.json()) as {
-    candidates?: Array<{
-      content?: { parts?: Array<{ text?: string }> }
-      finishReason?: string
-      safetyRatings?: Array<{ category: string; probability: string; blocked?: boolean }>
-    }>
-    promptFeedback?: { blockReason?: string; safetyRatings?: unknown }
-  }
+  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
   if (!text) {
     const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
@@ -598,27 +623,18 @@ ${sections.join('\n\n')}
 }
 
 function extractUsage(chunk: unknown, model: string): StreamChapterUsage | undefined {
-  if (typeof chunk !== 'object' || chunk === null) return undefined
-  const c = chunk as Record<string, unknown>
-  const meta = c.usageMetadata
-  if (typeof meta !== 'object' || meta === null) return undefined
-  const m = meta as Record<string, unknown>
-  const promptTokens = typeof m.promptTokenCount === 'number' ? m.promptTokenCount : 0
-  const outputTokens = typeof m.candidatesTokenCount === 'number' ? m.candidatesTokenCount : 0
-  const totalTokens = typeof m.totalTokenCount === 'number' ? m.totalTokenCount : promptTokens + outputTokens
+  const parsed = GeminiResponseSchema.safeParse(chunk)
+  if (!parsed.success) return undefined
+  const meta = parsed.data.usageMetadata
+  if (!meta) return undefined
+  const promptTokens = meta.promptTokenCount ?? 0
+  const outputTokens = meta.candidatesTokenCount ?? 0
+  const totalTokens = meta.totalTokenCount ?? promptTokens + outputTokens
   return { model, promptTokens, outputTokens, totalTokens }
 }
 
 function extractText(chunk: unknown): string {
-  if (typeof chunk !== 'object' || chunk === null) return ''
-  const c = chunk as Record<string, unknown>
-  const candidates = c.candidates
-  if (!Array.isArray(candidates) || candidates.length === 0) return ''
-  const first = candidates[0] as Record<string, unknown>
-  const content = first.content as Record<string, unknown> | undefined
-  if (!content) return ''
-  const parts = content.parts
-  if (!Array.isArray(parts) || parts.length === 0) return ''
-  const part = parts[0] as Record<string, unknown>
-  return typeof part.text === 'string' ? part.text : ''
+  const parsed = GeminiResponseSchema.safeParse(chunk)
+  if (!parsed.success) return ''
+  return parsed.data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
 }

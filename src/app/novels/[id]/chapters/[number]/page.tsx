@@ -80,15 +80,10 @@ export default function ChapterDetailPage() {
     setError(null)
     ;(async () => {
       try {
-        const res = await api.novels[':id'].$get({ param: { id: novelId } })
-        if (!res.ok) {
-          if (res.status === 404) throw new Error('小説が見つかりません')
-          throw new Error(await readApiError(res))
-        }
-        const data = await res.json()
+        const data = await api.getNovel({ params: { id: novelId } })
         if (!cancelled) setNovel(data)
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : '章の取得に失敗しました')
+        if (!cancelled) setError(readApiError(e, '章の取得に失敗しました'))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -121,19 +116,18 @@ export default function ChapterDetailPage() {
     setBuffer('')
     setError(null)
     try {
-      const res = await api.novels[':id'].chapters[':number'].generate.$post({
-        param: { id: novelId, number: String(chapterNumber) },
-        json: { model: getWriterModel() }
-      })
-      if (!res.ok) throw new Error(await readApiError(res))
+      await api.startChapterGeneration(
+        { model: getWriterModel() },
+        { params: { id: novelId, number: String(chapterNumber) } }
+      )
 
       await new Promise<void>((resolve) => {
         const sub = subscribeChapterStream(`/api/novels/${novelId}/chapters/${chapterNumber}/stream`, {
           onDelta: (text) => setBuffer((b) => b + text),
           onDone: async () => {
             try {
-              const refreshed = await api.novels[':id'].$get({ param: { id: novelId } })
-              if (refreshed.ok) setNovel(await refreshed.json())
+              const refreshed = await api.getNovel({ params: { id: novelId } })
+              setNovel(refreshed)
             } catch {
               // 再取得に失敗しても streaming buffer 自体は描画済み
             }
@@ -151,7 +145,7 @@ export default function ChapterDetailPage() {
         })
       })
     } catch (e) {
-      setError(e instanceof Error ? e.message : '再生成に失敗しました')
+      setError(readApiError(e, '再生成に失敗しました'))
     } finally {
       setIsRegenerating(false)
       setBuffer('')
@@ -162,13 +156,10 @@ export default function ChapterDetailPage() {
     if (!novelId || chapterNumber <= 0) return
     setIsDeleting(true)
     try {
-      const res = await api.novels[':id'].chapters[':number'].$delete({
-        param: { id: novelId, number: String(chapterNumber) }
-      })
-      if (res.status !== 204 && !res.ok) throw new Error(await readApiError(res))
+      await api.deleteChapter(undefined, { params: { id: novelId, number: String(chapterNumber) } })
       window.location.assign(`/novels/${novelId}`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '削除に失敗しました')
+      setError(readApiError(e, '削除に失敗しました'))
       setIsDeleting(false)
       setDeleteOpen(false)
     }
