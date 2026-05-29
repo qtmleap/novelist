@@ -77,7 +77,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
     api.characters
       .$get()
       .then((r) => (r.ok ? r.json() : []))
-      .then((data) => setDictionary(data as Character[]))
+      .then((data) => setDictionary(data))
       .catch(() => setDictionary([]))
   }, [])
 
