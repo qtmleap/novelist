@@ -41,6 +41,8 @@ function serializeNovel(n: {
   pov_character_id: string
   ending: string
   notes: string
+  editor_model: string
+  writer_model: string
   outline: string | null
   created_at: Date
   updated_at: Date
@@ -59,6 +61,8 @@ function serializeNovel(n: {
     pov_character_id: n.pov_character_id,
     ending: n.ending,
     notes: n.notes,
+    editor_model: n.editor_model,
+    writer_model: n.writer_model,
     outline: n.outline,
     created_at: n.created_at.toISOString(),
     updated_at: n.updated_at.toISOString()

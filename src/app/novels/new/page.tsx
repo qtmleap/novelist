@@ -2,14 +2,23 @@
 
 import { useState } from 'react'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
-import { PremiseForm } from '@/components/novel/PremiseForm'
+import { EMPTY_DEFAULTS, PremiseForm } from '@/components/novel/PremiseForm'
 import { PageHeader } from '@/components/PageHeader'
 import { api, readApiError } from '@/lib/api/client'
+import { getEditorModel, getWriterModel } from '@/lib/settings'
 import type { CreateNovelInput } from '@/schemas/novel.dto'
 
 export default function NewNovelPage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // localStorage は use client コンポーネントのレンダ時 (= ブラウザ) で読める。
+  // SSR では getEditorModel/getWriterModel は DEFAULT_* を返すフォールバックがある。
+  const defaults: CreateNovelInput = {
+    ...EMPTY_DEFAULTS,
+    editor_model: getEditorModel(),
+    writer_model: getWriterModel()
+  }
 
   const handleSubmit = async (data: CreateNovelInput) => {
     setIsSubmitting(true)
@@ -36,7 +45,7 @@ export default function NewNovelPage() {
 
       {error && <ErrorAlert message={error} onRetry={() => setError(null)} />}
 
-      <PremiseForm onSubmit={handleSubmit} isSubmitting={isSubmitting} />
+      <PremiseForm onSubmit={handleSubmit} isSubmitting={isSubmitting} defaultValues={defaults} />
     </div>
   )
 }

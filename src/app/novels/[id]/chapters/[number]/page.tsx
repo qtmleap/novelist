@@ -20,10 +20,9 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { api, readApiError } from '@/lib/api/client'
-import { getWriterModel } from '@/lib/settings'
 import { subscribeChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
-import type { ChapterCost, NovelWithChapters } from '@/schemas/novel.dto'
+import { type ChapterCost, GeminiModelSchema, type NovelWithChapters } from '@/schemas/novel.dto'
 
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
@@ -114,13 +113,13 @@ export default function ChapterDetailPage() {
   const nextHref = chapterNumber < totalChapters && novelId ? `/novels/${novelId}/chapters/${chapterNumber + 1}` : null
 
   const handleRegenerate = async () => {
-    if (!novelId || chapterNumber <= 0) return
+    if (!novelId || chapterNumber <= 0 || !novel) return
     setIsRegenerating(true)
     setBuffer('')
     setError(null)
     try {
       await api.startChapterGeneration(
-        { model: getWriterModel() },
+        { model: GeminiModelSchema.parse(novel.writer_model) },
         { params: { id: novelId, number: String(chapterNumber) } }
       )
 
