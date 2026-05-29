@@ -79,11 +79,12 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             {auth.status === 'authenticated' ? (
-              <SidebarMenuButton asChild tooltip='ログアウト' className='[&>svg]:size-5!'>
-                {/* CF Access のログアウトエンドポイント。Worker は介さずに CF が直接処理する。 */}
+              <SidebarMenuButton asChild tooltip={auth.email} className='[&>svg]:size-5!'>
+                {/* CF Access のログアウトエンドポイント。Worker は介さずに CF が直接処理する。
+                    ラベルは「ログアウト」固定。email は tooltip でだけ見える (ローカル開発の dev@local がそのまま出ないように)。 */}
                 <a href='/cdn-cgi/access/logout'>
                   <LogOut />
-                  <span className='truncate'>{auth.email}</span>
+                  <span>ログアウト</span>
                 </a>
               </SidebarMenuButton>
             ) : (
