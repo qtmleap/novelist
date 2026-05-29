@@ -324,16 +324,23 @@ export default function NovelDetailPage() {
             </p>
           </div>
           <div className='flex shrink-0 items-center gap-2'>
-            {status !== 'loading' && (outline === null || outline.chapters.length < novel.num_chapters) && (
+            {status !== 'loading' && (
               <Button
                 type='button'
                 size='sm'
+                variant={outline && outline.chapters.length >= novel.num_chapters ? 'outline' : 'default'}
                 disabled={isGenerating}
                 className='[&_svg]:size-5!'
                 onClick={() => setOutlineDialogOpen(true)}
               >
-                {status === 'generatingOutline' ? <Loader2 className='animate-spin' /> : <Sparkles />}
-                章立てを生成
+                {status === 'generatingOutline' ? (
+                  <Loader2 className='animate-spin' />
+                ) : outline && outline.chapters.length >= novel.num_chapters ? (
+                  <RefreshCw />
+                ) : (
+                  <Sparkles />
+                )}
+                {outline && outline.chapters.length >= novel.num_chapters ? '章立てを再生成' : '章立てを生成'}
               </Button>
             )}
             <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
