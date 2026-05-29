@@ -142,8 +142,15 @@ export function computeCostUsd(model: string, promptTokens: number, outputTokens
 
 function maxOutputTokens(model: string, targetChars: number): number {
   const cap = OUTPUT_TOKEN_CAP[model] ?? 8192
-  return Math.min(targetChars * 2 + 1024, cap)
+  // 日本語 1 文字 ≒ 1.5 token、加えて Gemini が目標値より多めに書くケースもあるため
+  // ざっくり 4 倍 + 余白 2048 で確保。CAP で頭打ちにする。
+  return Math.min(targetChars * 4 + 2048, cap)
 }
+
+// Gemini 2.5+ と 3.x は出力前に "thinking" を行い、その思考トークンも maxOutputTokens から差し引かれる。
+// 小説本文のように「指示通りに長文を書く」タスクでは思考はほぼ不要で、有効だと本文に回す予算が枯れて
+// MAX_TOKENS で打ち切られる。budget=0 で無効化する (model が thinking 非対応なら無視される)。
+const THINKING_OFF = { thinkingBudget: 0 } as const
 
 // 小説生成では Gemini の安全フィルタを無効化する (Gemini 2.0+ は threshold='OFF' に対応)。
 // 旧 API の BLOCK_NONE と違い、フィルタ評価自体を行わないため安全ブロックで途切れない。
@@ -313,7 +320,8 @@ export async function generateOutline(
     contents: [{ parts: [{ text: prompt }] }],
     safetySettings: SAFETY_SETTINGS_OFF,
     generationConfig: {
-      responseMimeType: 'application/json'
+      responseMimeType: 'application/json',
+      thinkingConfig: THINKING_OFF
     }
   }
 
@@ -423,7 +431,7 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
     safetySettings: SAFETY_SETTINGS_OFF,
-    generationConfig: { responseMimeType: 'application/json' }
+    generationConfig: { responseMimeType: 'application/json', thinkingConfig: THINKING_OFF }
   }
 
   const res = await fetch(url, {
@@ -545,7 +553,8 @@ ${sections.join('\n\n')}
     safetySettings: SAFETY_SETTINGS_OFF,
     generationConfig: {
       temperature: 0.9,
-      maxOutputTokens: maxOutputTokens(model, targetChars)
+      maxOutputTokens: maxOutputTokens(model, targetChars),
+      thinkingConfig: THINKING_OFF
     }
   }
 
