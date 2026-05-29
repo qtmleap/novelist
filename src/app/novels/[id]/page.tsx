@@ -12,6 +12,7 @@ import { OutlineView } from '@/components/novel/OutlineView'
 import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import { subscribeChapterStream } from '@/lib/stream'
 import {
@@ -139,14 +140,24 @@ const INITIAL: State = {
 
 function GenerateChaptersButton({
   hasUndoneChapter,
+  disabled,
   onOpen
 }: {
   // 章立てが完成済みなら常に出す。未生成残りがあれば「生成」、全章生成済みなら「再生成」のラベル。
   hasUndoneChapter: boolean
+  // 未認証など押せない状態。disabled 時は tooltip でその旨を伝える。
+  disabled: boolean
   onOpen: () => void
 }) {
   return (
-    <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={onOpen}>
+    <Button
+      type='button'
+      size='sm'
+      className='[&_svg]:size-5!'
+      onClick={onOpen}
+      disabled={disabled}
+      title={disabled ? 'ログインが必要です' : undefined}
+    >
       {hasUndoneChapter ? <Sparkles /> : <RefreshCw />}
       {hasUndoneChapter ? '本文を生成' : '本文を再生成'}
     </Button>
@@ -192,6 +203,8 @@ export default function NovelDetailPage() {
   const [promptPreviewOpen, setPromptPreviewOpen] = useState(false)
   const [promptPreview, setPromptPreview] = useState<string | null>(null)
   const [promptPreviewLoading, setPromptPreviewLoading] = useState(false)
+  const auth = useAuth()
+  const editAllowed = canEdit(auth)
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
     try {
@@ -353,7 +366,8 @@ export default function NovelDetailPage() {
                 type='button'
                 size='sm'
                 variant={outline && outline.chapters.length >= novel.num_chapters ? 'outline' : 'default'}
-                disabled={isGenerating}
+                disabled={isGenerating || !editAllowed}
+                title={!editAllowed ? 'ログインが必要です' : undefined}
                 className='[&_svg]:size-5!'
                 onClick={() => setOutlineDialogOpen(true)}
               >
@@ -367,12 +381,19 @@ export default function NovelDetailPage() {
                 {outline && outline.chapters.length >= novel.num_chapters ? '章立てを再生成' : '章立てを生成'}
               </Button>
             )}
-            <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
-              <a href={`/novels/${novel.id}/edit`}>
+            {editAllowed ? (
+              <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
+                <a href={`/novels/${novel.id}/edit`}>
+                  <Pencil />
+                  編集
+                </a>
+              </Button>
+            ) : (
+              <Button size='sm' variant='outline' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
                 <Pencil />
                 編集
-              </a>
-            </Button>
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -430,6 +451,7 @@ export default function NovelDetailPage() {
         outline.chapters.length >= novel.num_chapters && (
           <GenerateChaptersButton
             hasUndoneChapter={chapters.filter((c) => c.done).length < novel.num_chapters}
+            disabled={!editAllowed}
             onOpen={() => setChapterDialogOpen(true)}
           />
         )}
