@@ -325,7 +325,7 @@ export default function NovelDetailPage() {
       <PageHeader crumbs={[{ label: '小説一覧', href: '/novels' }, { label: novel?.title ?? '詳細' }]} />
 
       {novel && (
-        <div className='flex items-start justify-between gap-3'>
+        <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
           <div className='min-w-0'>
             <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>{novel.genre}</p>
             <h1 className='mt-1 text-xl font-semibold'>{novel.title}</h1>
@@ -336,12 +336,12 @@ export default function NovelDetailPage() {
               {' 章 生成済み'}
             </p>
           </div>
-          <div className='flex shrink-0 items-center gap-2'>
+          <div className='flex flex-wrap items-center gap-2 sm:shrink-0'>
             {status !== 'loading' && (
               <Button
                 type='button'
                 size='sm'
-                variant='ghost'
+                variant='outline'
                 disabled={isGenerating}
                 onClick={async () => {
                   const id = novelIdRef.current
