@@ -140,15 +140,14 @@ function GenerateChaptersButton({
   hasUndoneChapter,
   onOpen
 }: {
-  // 章立てが完成済み (全章ぶんある) かつ未生成の本文が残っているときだけ出す。
+  // 章立てが完成済みなら常に出す。未生成残りがあれば「生成」、全章生成済みなら「再生成」のラベル。
   hasUndoneChapter: boolean
   onOpen: () => void
 }) {
-  if (!hasUndoneChapter) return null
   return (
     <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={onOpen}>
-      <Sparkles />
-      本文を生成
+      {hasUndoneChapter ? <Sparkles /> : <RefreshCw />}
+      {hasUndoneChapter ? '本文を生成' : '本文を再生成'}
     </Button>
   )
 }
