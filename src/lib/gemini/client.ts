@@ -547,15 +547,12 @@ ${sections.join('\n\n')}
       return
     }
 
-    const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
     let lastUsage: StreamChapterUsage | undefined
 
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
+      for await (const value of res.body) {
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
@@ -579,7 +576,6 @@ ${sections.join('\n\n')}
         }
       }
     } finally {
-      reader.releaseLock()
       await writer.close()
       if (lastUsage) {
         resolveUsage(lastUsage)
