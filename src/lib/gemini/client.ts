@@ -472,6 +472,10 @@ export type StreamChapterUsage = {
   promptTokens: number
   outputTokens: number
   totalTokens: number
+  // Gemini が報告する finishReason。'STOP' = 自然完了、それ以外 (MAX_TOKENS/SAFETY/RECITATION/OTHER) は
+  // 途中で打ち切られたサインなので DO 側で警告として通知する。chunk が finishReason を送ってこなかった
+  // 場合は 'STOP' として扱う (= 正常終了とみなす)。
+  finishReason: string
 }
 
 export type StreamChapterResult = {
@@ -580,7 +584,10 @@ ${sections.join('\n\n')}
 
     const decoder = new TextDecoder()
     let buffer = ''
-    let lastUsage: StreamChapterUsage | undefined
+    let lastUsage: Omit<StreamChapterUsage, 'finishReason'> | undefined
+    // finishReason は最終 chunk にのみ乗ることが多いので、流れる度に上書き。
+    // 終了時にこれを見て途中打ち切り (MAX_TOKENS/SAFETY/RECITATION) を検出する。
+    let lastFinishReason: string | undefined
 
     try {
       for await (const value of res.body) {
@@ -604,12 +611,15 @@ ${sections.join('\n\n')}
           }
           const meta = extractUsage(chunk, model)
           if (meta) lastUsage = meta
+          const fr = extractFinishReason(chunk)
+          if (fr) lastFinishReason = fr
         }
       }
     } finally {
       await writer.close()
       if (lastUsage) {
-        resolveUsage(lastUsage)
+        const finishReason = lastFinishReason === undefined ? 'STOP' : lastFinishReason
+        resolveUsage({ ...lastUsage, finishReason })
       } else {
         rejectUsage(new Error('Gemini stream ended without usageMetadata'))
       }
@@ -628,7 +638,7 @@ ${sections.join('\n\n')}
   return { stream: readable, usage }
 }
 
-function extractUsage(chunk: unknown, model: string): StreamChapterUsage | undefined {
+function extractUsage(chunk: unknown, model: string): Omit<StreamChapterUsage, 'finishReason'> | undefined {
   const parsed = GeminiResponseSchema.safeParse(chunk)
   if (!parsed.success) return undefined
   const meta = parsed.data.usageMetadata
@@ -643,4 +653,11 @@ function extractText(chunk: unknown): string {
   const parsed = GeminiResponseSchema.safeParse(chunk)
   if (!parsed.success) return ''
   return parsed.data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+}
+
+// chunk に乗っていれば finishReason を取り出す。最終 chunk にだけ含まれることが多い。
+function extractFinishReason(chunk: unknown): string | undefined {
+  const parsed = GeminiResponseSchema.safeParse(chunk)
+  if (!parsed.success) return undefined
+  return parsed.data.candidates?.[0]?.finishReason
 }
