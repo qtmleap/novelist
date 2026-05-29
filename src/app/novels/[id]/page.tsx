@@ -11,6 +11,7 @@ import { OutlineSelectionDialog } from '@/components/novel/OutlineSelectionDialo
 import { OutlineView } from '@/components/novel/OutlineView'
 import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { api, readApiError } from '@/lib/api/client'
 import { getEditorModel, getWriterModel } from '@/lib/settings'
 import { readChapterStream } from '@/lib/stream'
@@ -188,6 +189,9 @@ export default function NovelDetailPage() {
   const novelIdRef = useRef<string | null>(null)
   const [outlineDialogOpen, setOutlineDialogOpen] = useState(false)
   const [chapterDialogOpen, setChapterDialogOpen] = useState(false)
+  const [promptPreviewOpen, setPromptPreviewOpen] = useState(false)
+  const [promptPreview, setPromptPreview] = useState<string | null>(null)
+  const [promptPreviewLoading, setPromptPreviewLoading] = useState(false)
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
     try {
@@ -328,6 +332,32 @@ export default function NovelDetailPage() {
               <Button
                 type='button'
                 size='sm'
+                variant='ghost'
+                disabled={isGenerating}
+                onClick={async () => {
+                  const id = novelIdRef.current
+                  if (!id) return
+                  setPromptPreviewLoading(true)
+                  setPromptPreviewOpen(true)
+                  try {
+                    const res = await api.novels[':id'].outline.preview.$get({ param: { id } })
+                    if (!res.ok) throw new Error(await readApiError(res))
+                    const data = (await res.json()) as { prompt: string }
+                    setPromptPreview(data.prompt)
+                  } catch (e) {
+                    setPromptPreview(`プレビュー取得に失敗しました: ${e instanceof Error ? e.message : String(e)}`)
+                  } finally {
+                    setPromptPreviewLoading(false)
+                  }
+                }}
+              >
+                プロンプト確認
+              </Button>
+            )}
+            {status !== 'loading' && (
+              <Button
+                type='button'
+                size='sm'
                 variant={outline && outline.chapters.length >= novel.num_chapters ? 'outline' : 'default'}
                 disabled={isGenerating}
                 className='[&_svg]:size-5!'
@@ -422,6 +452,21 @@ export default function NovelDetailPage() {
           }}
         />
       )}
+
+      <Dialog open={promptPreviewOpen} onOpenChange={setPromptPreviewOpen}>
+        <DialogContent className='sm:max-w-3xl'>
+          <DialogHeader>
+            <DialogTitle>章立てを生成するときに Gemini に送るプロンプト</DialogTitle>
+            <DialogDescription>そのまま送信しても block されないかを確認するためのプレビューです。</DialogDescription>
+          </DialogHeader>
+          {promptPreviewLoading && <p className='text-sm text-muted-foreground'>取得中…</p>}
+          {!promptPreviewLoading && promptPreview !== null && (
+            <pre className='max-h-[60vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap'>
+              {promptPreview}
+            </pre>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {novel && outline && (
         <ChapterSelectionDialog
