@@ -10,6 +10,16 @@ type GeminiNovelParams = {
   characters: string
   setting: string
   num_chapters: number
+  // ユーザーが PremiseForm の備考欄に書いた追加指示 (任意)。
+  notes?: string
+}
+
+// 章立て生成時にのみ参照する「物語に取り込みたい要素」セクション。
+// 箇条書きで何個でも記述された自由テキストを、AI が物語の自然な箇所に振り分けて
+// outline の構成 (各章の summary) に反映することを期待する。
+function buildNotesSection(notes: string | undefined): string {
+  if (!notes || notes.trim().length === 0) return ''
+  return `【物語に取り込みたい要素】\n${notes.trim()}\n上記の各項目を、物語のどこかに自然に組み込むよう章立て (各章の概要) に反映してください。配置や順序は AI 側で判断して構いません。`
 }
 
 type ViewpointChar = {
@@ -226,7 +236,8 @@ export async function generateOutline(
   const styleInstruction = buildStyleInstruction(style)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
-  const extraSections = [castSection, relationsSection].filter((s) => s.length > 0).join('\n\n')
+  const notesSection = buildNotesSection(novel.notes)
+  const extraSections = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
 
   const prompt = `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
 
@@ -319,7 +330,8 @@ export async function regenerateOutlineChapter(
   const styleInstruction = buildStyleInstruction(style)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
-  const extra = [castSection, relationsSection].filter((s) => s.length > 0).join('\n\n')
+  const notesSection = buildNotesSection(novel.notes)
+  const extra = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
 
   const otherChapters = existing.chapters
     .filter((c) => c.chapter_number !== chapterNumber)
@@ -429,6 +441,8 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
   const writingRules = buildWritingRules(cast)
+  // notes は章立て生成時にのみ使う (outline.summary に既に振り分けが乗っているため、
+  // 本文生成では全体リストを再注入しない)。
 
   const sections: string[] = [
     `【作品情報】\nタイトル: ${novel.title}\nジャンル: ${novel.genre}\n登場人物: ${novel.characters}\n世界観・設定: ${novel.setting}`,

@@ -41,6 +41,7 @@ function serializeNovel(n: {
   age_rating: string
   pov_character_id: string
   ending: string
+  notes: string
   outline: string | null
   created_at: Date
   updated_at: Date
@@ -58,6 +59,7 @@ function serializeNovel(n: {
     age_rating: n.age_rating,
     pov_character_id: n.pov_character_id,
     ending: n.ending,
+    notes: n.notes,
     outline: n.outline,
     created_at: n.created_at.toISOString(),
     updated_at: n.updated_at.toISOString()
@@ -270,7 +272,8 @@ export const app = new Hono()
         genre: novel.genre,
         characters: novel.characters,
         setting: novel.setting,
-        num_chapters: novel.num_chapters
+        num_chapters: novel.num_chapters,
+        notes: novel.notes
       }
 
       // 既存 outline がある + chapters[] 指定 (かつ全章ではない) → 部分再生成。
@@ -352,7 +355,8 @@ export const app = new Hono()
             genre: novel.genre,
             characters: novel.characters,
             setting: novel.setting,
-            num_chapters: novel.num_chapters
+            num_chapters: novel.num_chapters,
+            notes: novel.notes
           },
           style,
           parsedOutline.data,
@@ -453,7 +457,8 @@ export const app = new Hono()
           genre: novel.genre,
           characters: novel.characters,
           setting: novel.setting,
-          num_chapters: novel.num_chapters
+          num_chapters: novel.num_chapters,
+          notes: novel.notes
         },
         outline,
         chapterNumber,
