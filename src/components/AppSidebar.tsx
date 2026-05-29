@@ -1,11 +1,12 @@
 'use client'
 
-import { Library, Settings, Users } from 'lucide-react'
+import { Library, LogIn, LogOut, Settings, Users } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -16,6 +17,7 @@ import {
   SidebarRail,
   useSidebar
 } from '@/components/ui/sidebar'
+import { useAuth } from '@/hooks/useAuth'
 import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
@@ -27,6 +29,7 @@ const NAV_ITEMS = [
 export function AppSidebar() {
   const pathname = usePathname()
   const { isMobile, setOpenMobile } = useSidebar()
+  const auth = useAuth()
 
   const activeHref = NAV_ITEMS.map((item) => item.href)
     .filter((href) => pathname === href || pathname.startsWith(`${href}/`))
@@ -72,6 +75,34 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+      <SidebarFooter className='border-t'>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            {auth.status === 'authenticated' ? (
+              <SidebarMenuButton asChild tooltip='ログアウト' className='[&>svg]:size-5!'>
+                {/* CF Access のログアウトエンドポイント。Worker は介さずに CF が直接処理する。 */}
+                <a href='/cdn-cgi/access/logout'>
+                  <LogOut />
+                  <span className='truncate'>{auth.email}</span>
+                </a>
+              </SidebarMenuButton>
+            ) : (
+              <SidebarMenuButton
+                asChild
+                tooltip={auth.status === 'loading' ? '確認中…' : 'ログイン'}
+                className='[&>svg]:size-5!'
+                disabled={auth.status === 'loading'}
+              >
+                {/* CF Access の Application で /api/auth/login を Allow に設定すれば、ここで認証フローが起動する。 */}
+                <a href='/api/auth/login'>
+                  <LogIn />
+                  <span>{auth.status === 'loading' ? '確認中…' : 'ログイン'}</span>
+                </a>
+              </SidebarMenuButton>
+            )}
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarFooter>
       <SidebarRail />
     </Sidebar>
   )

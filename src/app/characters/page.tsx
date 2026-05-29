@@ -6,6 +6,7 @@ import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import type { Character } from '@/schemas/character.dto'
 
@@ -72,6 +73,8 @@ function CharacterRow({ character }: { character: Character }) {
 export default function CharactersPage() {
   const [characters, setCharacters] = useState<Character[]>([])
   const [loading, setLoading] = useState(true)
+  const auth = useAuth()
+  const editAllowed = canEdit(auth)
   const [error, setError] = useState<string | null>(null)
 
   const fetchCharacters = useCallback(async () => {
@@ -100,12 +103,19 @@ export default function CharactersPage() {
           <h1 className='text-xl font-semibold'>登場人物一覧</h1>
           <p className='mt-0.5 text-sm text-muted-foreground'>登場人物の情報を管理します。</p>
         </div>
-        <Button asChild size='sm' className='[&_svg]:size-5!'>
-          <a href='/characters/new'>
+        {editAllowed ? (
+          <Button asChild size='sm' className='[&_svg]:size-5!'>
+            <a href='/characters/new'>
+              <UserPlus />
+              新規登録
+            </a>
+          </Button>
+        ) : (
+          <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
             <UserPlus />
             新規登録
-          </a>
-        </Button>
+          </Button>
+        )}
       </div>
 
       {loading && <CharacterSkeletonList />}

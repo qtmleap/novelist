@@ -19,6 +19,7 @@ import {
   AlertDialogTrigger
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import { subscribeChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
@@ -67,6 +68,8 @@ export default function ChapterDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  const auth = useAuth()
+  const editAllowed = canEdit(auth)
 
   useEffect(() => {
     if (!novelId) {
@@ -246,7 +249,8 @@ export default function ChapterDetailPage() {
                     type='button'
                     variant='outline'
                     size='sm'
-                    disabled={busy || !canRegenerate}
+                    disabled={busy || !canRegenerate || !editAllowed}
+                    title={!editAllowed ? 'ログインが必要です' : undefined}
                     className='[&_svg]:size-5!'
                   >
                     {isRegenerating ? <Loader2 className='animate-spin' /> : <RefreshCw />}
@@ -284,7 +288,8 @@ export default function ChapterDetailPage() {
                     type='button'
                     variant='destructive'
                     size='sm'
-                    disabled={busy || !isLatest}
+                    disabled={busy || !isLatest || !editAllowed}
+                    title={!editAllowed ? 'ログインが必要です' : undefined}
                     className='[&_svg]:size-5!'
                   >
                     {isDeleting ? <Loader2 className='animate-spin' /> : <Trash2 />}

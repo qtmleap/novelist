@@ -20,6 +20,8 @@ const ErrorBodySchema = z.object({
 const OutlineWrapperSchema = z.object({ outline: OutlineSchema })
 const PromptPreviewSchema = z.object({ prompt: z.string() })
 const GenerateAckSchema = z.object({ status: z.enum(['started', 'already_streaming']) })
+// /auth/me は常に 200 を返し、未認証なら email=null。これでフロントは「未認証 vs API ダウン」を切り分け可能。
+const AuthStateSchema = z.object({ email: z.string().nullable() })
 
 // makeApi は as const 配列を受けて alias 名でメソッドを生やすため、すべての
 // エンドポイントを 1 つのリテラル配列にまとめないと型情報が縮退する。
@@ -157,6 +159,15 @@ export const api = makeApi([
     description: '登場人物を削除',
     response: z.unknown(),
     status: 204,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  // ── Auth ──
+  {
+    method: 'get',
+    path: '/api/auth/me',
+    alias: 'getAuthState',
+    description: 'ログイン中のユーザー email を返す (未ログインなら null)',
+    response: AuthStateSchema,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   }
 ] as const)
