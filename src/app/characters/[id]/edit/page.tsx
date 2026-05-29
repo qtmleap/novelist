@@ -85,15 +85,10 @@ export default function EditCharacterPage() {
 
     const load = async () => {
       try {
-        const res = await api.characters[':id'].$get({ param: { id } })
-        if (!res.ok) {
-          if (res.status === 404) throw new Error('登場人物が見つかりません')
-          throw new Error(await readApiError(res))
-        }
-        const data = await res.json()
+        const data = await api.getCharacter({ params: { id } })
         setCharacter(data)
       } catch (e) {
-        setError(e instanceof Error ? e.message : '登場人物の取得に失敗しました')
+        setError(readApiError(e, '登場人物の取得に失敗しました'))
       } finally {
         setLoading(false)
       }
@@ -107,11 +102,10 @@ export default function EditCharacterPage() {
     setIsSubmitting(true)
     setSubmitError(null)
     try {
-      const res = await api.characters[':id'].$put({ param: { id: characterId }, json: data })
-      if (!res.ok) throw new Error(await readApiError(res))
+      await api.updateCharacter(data, { params: { id: characterId } })
       window.location.assign(`/characters/${characterId}`)
     } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : '登場人物の更新に失敗しました')
+      setSubmitError(readApiError(e, '登場人物の更新に失敗しました'))
       setIsSubmitting(false)
     }
   }
@@ -121,13 +115,10 @@ export default function EditCharacterPage() {
     setIsDeleting(true)
     setSubmitError(null)
     try {
-      const res = await api.characters[':id'].$delete({ param: { id: characterId } })
-      if (res.status !== 204 && !res.ok) {
-        throw new Error(await readApiError(res))
-      }
+      await api.deleteCharacter(undefined, { params: { id: characterId } })
       window.location.assign('/characters')
     } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : '削除に失敗しました')
+      setSubmitError(readApiError(e, '削除に失敗しました'))
       setIsDeleting(false)
       setDeleteDialogOpen(false)
     }

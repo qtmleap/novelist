@@ -195,14 +195,12 @@ export default function NovelDetailPage() {
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
     try {
-      const res = await api.novels[':id'].$get({ param: { id } })
-      if (!res.ok) throw new Error(await readApiError(res))
-      const novel = await res.json()
+      const novel = await api.getNovel({ params: { id } })
       const outline = parseOutline(novel.outline)
       dispatch({ type: 'LOAD_OK', novel, outline })
       return { novel, outline }
     } catch (e) {
-      dispatch({ type: 'LOAD_ERR', error: e instanceof Error ? e.message : '小説の取得に失敗しました' })
+      dispatch({ type: 'LOAD_ERR', error: readApiError(e, '小説の取得に失敗しました') })
       return null
     }
   }, [])
@@ -211,18 +209,16 @@ export default function NovelDetailPage() {
     async (id: string, chapters?: number[]): Promise<Outline | null> => {
       dispatch({ type: 'OUTLINE_START' })
       try {
-        const res = await api.novels[':id'].outline.$post({
-          param: { id },
-          json: { model: getEditorModel(), ...(chapters ? { chapters } : {}) }
-        })
-        if (!res.ok) throw new Error(await readApiError(res))
-        const body = (await res.json()) as { outline: Outline }
+        const body = await api.generateOutline(
+          { model: getEditorModel(), chapters: chapters ?? [] },
+          { params: { id } }
+        )
         dispatch({ type: 'OUTLINE_OK', outline: body.outline })
         // chapters[] 指定の部分再生成では、対象章の本文も server 側で消えるので novel 全体を取り直す。
         await loadNovel(id)
         return body.outline
       } catch (e) {
-        dispatch({ type: 'OUTLINE_ERR', error: e instanceof Error ? e.message : '章立て生成に失敗しました' })
+        dispatch({ type: 'OUTLINE_ERR', error: readApiError(e, '章立て生成に失敗しました') })
         return null
       }
     },
@@ -233,11 +229,7 @@ export default function NovelDetailPage() {
     dispatch({ type: 'CHAPTER_START', chapterNumber: num })
     try {
       // 1. DO に生成キックオフ (202 が返る)。
-      const res = await api.novels[':id'].chapters[':number'].generate.$post({
-        param: { id, number: String(num) },
-        json: { model: getWriterModel() }
-      })
-      if (!res.ok) throw new Error(await readApiError(res))
+      await api.startChapterGeneration({ model: getWriterModel() }, { params: { id, number: String(num) } })
 
       // 2. SSE で進捗を購読。EventSource は自動再接続するので、ページ離脱から戻っても続きが見える。
       return await new Promise<boolean>((resolve) => {
@@ -259,7 +251,7 @@ export default function NovelDetailPage() {
         })
       })
     } catch (e) {
-      dispatch({ type: 'CHAPTER_ERR', error: e instanceof Error ? e.message : `第 ${num} 章の生成に失敗しました` })
+      dispatch({ type: 'CHAPTER_ERR', error: readApiError(e, `第 ${num} 章の生成に失敗しました`) })
       return false
     }
   }, [])
@@ -343,12 +335,10 @@ export default function NovelDetailPage() {
                   setPromptPreviewLoading(true)
                   setPromptPreviewOpen(true)
                   try {
-                    const res = await api.novels[':id'].outline.preview.$get({ param: { id } })
-                    if (!res.ok) throw new Error(await readApiError(res))
-                    const data = (await res.json()) as { prompt: string }
+                    const data = await api.previewOutlinePrompt({ params: { id } })
                     setPromptPreview(data.prompt)
                   } catch (e) {
-                    setPromptPreview(`プレビュー取得に失敗しました: ${e instanceof Error ? e.message : String(e)}`)
+                    setPromptPreview(`プレビュー取得に失敗しました: ${readApiError(e)}`)
                   } finally {
                     setPromptPreviewLoading(false)
                   }

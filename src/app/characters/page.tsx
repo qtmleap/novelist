@@ -78,12 +78,10 @@ export default function CharactersPage() {
     setLoading(true)
     setError(null)
     try {
-      const res = await api.characters.$get()
-      if (!res.ok) throw new Error(await readApiError(res))
-      const data = await res.json()
+      const data = await api.listCharacters()
       setCharacters(data)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '登場人物一覧の取得に失敗しました')
+      setError(readApiError(e, '登場人物一覧の取得に失敗しました'))
     } finally {
       setLoading(false)
     }
