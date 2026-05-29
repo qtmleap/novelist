@@ -93,8 +93,8 @@ export function AppSidebar() {
                 className='[&>svg]:size-5!'
                 disabled={auth.status === 'loading'}
               >
-                {/* CF Access の Application で /api/auth/login を Allow に設定すれば、ここで認証フローが起動する。 */}
-                <a href='/api/auth/login'>
+                {/* CF Access の Application で /login を Allow に設定すれば、このページにアクセスした時点で認証フローが起動する。 */}
+                <a href='/login'>
                   <LogIn />
                   <span>{auth.status === 'loading' ? '確認中…' : 'ログイン'}</span>
                 </a>
