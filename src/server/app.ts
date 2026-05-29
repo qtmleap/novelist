@@ -26,6 +26,7 @@ import {
   GenerateOutlineOptionsSchema,
   OutlineSchema
 } from '@/schemas/novel.dto'
+import { readAuthEmail, requireAuth } from '@/server/auth'
 
 function serializeNovel(n: {
   id: string
@@ -176,7 +177,7 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
-  .post('/novels', zValidator('json', CreateNovelSchema), async (c) => {
+  .post('/novels', requireAuth, zValidator('json', CreateNovelSchema), async (c) => {
     const input = c.req.valid('json')
     const prisma = getPrisma()
     try {
@@ -212,7 +213,7 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
-  .put('/novels/:id', zValidator('json', CreateNovelSchema), async (c) => {
+  .put('/novels/:id', requireAuth, zValidator('json', CreateNovelSchema), async (c) => {
     const id = c.req.param('id')
     const input = c.req.valid('json')
     const prisma = getPrisma()
@@ -233,7 +234,7 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
-  .delete('/novels/:id', async (c) => {
+  .delete('/novels/:id', requireAuth, async (c) => {
     const id = c.req.param('id')
     const prisma = getPrisma()
     try {
@@ -248,7 +249,7 @@ export const app = new Hono()
     }
   })
 
-  .post('/novels/:id/outline', zValidator('json', GenerateOutlineOptionsSchema), async (c) => {
+  .post('/novels/:id/outline', requireAuth, zValidator('json', GenerateOutlineOptionsSchema), async (c) => {
     const id = c.req.param('id')
     const options = c.req.valid('json')
     const prisma = getPrisma()
@@ -355,7 +356,7 @@ export const app = new Hono()
     }
   })
 
-  .post('/novels/:id/outline/:number', zValidator('json', GenerateOptionsSchema), async (c) => {
+  .post('/novels/:id/outline/:number', requireAuth, zValidator('json', GenerateOptionsSchema), async (c) => {
     const id = c.req.param('id')
     const chapterNumber = Number.parseInt(c.req.param('number'), 10)
     if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
@@ -423,7 +424,7 @@ export const app = new Hono()
   // 生成キックオフ。Durable Object に payload を渡して即座に 202 を返す。
   // 生成自体は DO 内で fire-and-forget で走り続け、ページ離脱・タブ閉じでも止まらない。
   // クライアントは下の /stream エンドポイントで SSE 経由で進捗を受け取る。
-  .post('/novels/:id/chapters/:number/generate', zValidator('json', GenerateOptionsSchema), async (c) => {
+  .post('/novels/:id/chapters/:number/generate', requireAuth, zValidator('json', GenerateOptionsSchema), async (c) => {
     const id = c.req.param('id')
     const chapterNumber = Number.parseInt(c.req.param('number'), 10)
     if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
@@ -512,7 +513,7 @@ export const app = new Hono()
   })
 
   // 章本文の削除。整合性を保つため「最新の生成済み章」しか消せない (後続を消さないと前章を消す意味がないので)。
-  .delete('/novels/:id/chapters/:number', async (c) => {
+  .delete('/novels/:id/chapters/:number', requireAuth, async (c) => {
     const id = c.req.param('id')
     const chapterNumber = Number.parseInt(c.req.param('number'), 10)
     if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
@@ -546,7 +547,7 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
-  .post('/characters', zValidator('json', CreateCharacterSchema), async (c) => {
+  .post('/characters', requireAuth, zValidator('json', CreateCharacterSchema), async (c) => {
     const input = c.req.valid('json')
     const prisma = getPrisma()
     try {
@@ -568,7 +569,7 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
-  .put('/characters/:id', zValidator('json', CreateCharacterSchema), async (c) => {
+  .put('/characters/:id', requireAuth, zValidator('json', CreateCharacterSchema), async (c) => {
     const id = c.req.param('id')
     const input = c.req.valid('json')
     const prisma = getPrisma()
@@ -583,7 +584,7 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
-  .delete('/characters/:id', async (c) => {
+  .delete('/characters/:id', requireAuth, async (c) => {
     const id = c.req.param('id')
     const prisma = getPrisma()
     try {
@@ -596,6 +597,15 @@ export const app = new Hono()
     } finally {
       await prisma.$disconnect()
     }
+  })
+
+  // ── Auth ──────────────────────────────────────────────────────────────
+  // 認証状態を返すエンドポイント。匿名 (CF Access JWT なし) なら 200 + email=null、
+  // 認証済なら 200 + email=user@example.com。401 ではなく常に 200 を返すのは、
+  // フロントが「未認証か API ダウンか」を切り分けやすくするため。
+  .get('/auth/me', async (c) => {
+    const email = await readAuthEmail(c.req.header('Cf-Access-Jwt-Assertion'))
+    return c.json({ email })
   })
 
 export type AppType = typeof app
