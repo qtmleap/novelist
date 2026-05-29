@@ -6,6 +6,7 @@ export type Env = {
   DB: D1Database
   GEMINI_API_KEY: string
   GEMINI_MODEL?: string
+  CHAPTER_GEN: DurableObjectNamespace<import('./chapter-gen-do').ChapterGenerationDO>
 }
 
 export function getPrisma(): PrismaClient {

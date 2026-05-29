@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { api, readApiError } from '@/lib/api/client'
 import { getEditorModel, getWriterModel } from '@/lib/settings'
-import { readChapterStream } from '@/lib/stream'
+import { subscribeChapterStream } from '@/lib/stream'
 import {
   type Chapter,
   type ChapterCost,
@@ -232,30 +232,33 @@ export default function NovelDetailPage() {
   const doGenerateChapter = useCallback(async (id: string, num: number, abort: AbortController): Promise<boolean> => {
     dispatch({ type: 'CHAPTER_START', chapterNumber: num })
     try {
-      // SSE エンドポイントは Response を直接読むので、hc にはオプション形だけ渡す。
-      const res = await api.novels[':id'].chapters[':number'].generate.$post(
-        {
-          param: { id, number: String(num) },
-          json: { model: getWriterModel() }
-        },
-        { init: { signal: abort.signal } }
-      )
-      if (!res.ok) throw new Error(await readApiError(res))
-      let ok = false
-      await readChapterStream(res, {
-        onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
-        onDone: ({ chapterId, title }) => {
-          dispatch({ type: 'CHAPTER_DONE', chapterNumber: num, chapterId, title })
-          ok = true
-        },
-        onError: (msg) => dispatch({ type: 'CHAPTER_ERR', error: msg })
+      // 1. DO に生成キックオフ (202 が返る)。
+      const res = await api.novels[':id'].chapters[':number'].generate.$post({
+        param: { id, number: String(num) },
+        json: { model: getWriterModel() }
       })
-      return ok
+      if (!res.ok) throw new Error(await readApiError(res))
+
+      // 2. SSE で進捗を購読。EventSource は自動再接続するので、ページ離脱から戻っても続きが見える。
+      return await new Promise<boolean>((resolve) => {
+        const sub = subscribeChapterStream(`/api/novels/${id}/chapters/${num}/stream`, {
+          onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
+          onDone: ({ chapterId, title }) => {
+            dispatch({ type: 'CHAPTER_DONE', chapterNumber: num, chapterId, title })
+            resolve(true)
+          },
+          onError: (msg) => {
+            dispatch({ type: 'CHAPTER_ERR', error: msg })
+            resolve(false)
+          }
+        })
+        abort.signal.addEventListener('abort', () => {
+          sub.close()
+          dispatch({ type: 'CANCEL' })
+          resolve(false)
+        })
+      })
     } catch (e) {
-      if ((e as { name?: string }).name === 'AbortError') {
-        dispatch({ type: 'CANCEL' })
-        return false
-      }
       dispatch({ type: 'CHAPTER_ERR', error: e instanceof Error ? e.message : `第 ${num} 章の生成に失敗しました` })
       return false
     }
