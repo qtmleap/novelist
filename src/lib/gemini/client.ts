@@ -282,12 +282,25 @@ ${extraSections ? `\n${extraSections}\n` : ''}
   const data = (await res.json()) as {
     candidates?: Array<{
       content?: { parts?: Array<{ text?: string }> }
+      finishReason?: string
+      safetyRatings?: Array<{ category: string; probability: string; blocked?: boolean }>
     }>
+    promptFeedback?: { blockReason?: string; safetyRatings?: unknown }
   }
 
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
   if (!text) {
-    throw new Error('Gemini returned empty outline response')
+    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+    const promptBlock = data.promptFeedback?.blockReason
+    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+    const detail = [
+      `finishReason=${finishReason}`,
+      promptBlock ? `promptBlockReason=${promptBlock}` : '',
+      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+    ]
+      .filter((s) => s.length > 0)
+      .join(' / ')
+    throw new Error(`Gemini returned empty outline response (${detail})`)
   }
 
   let parsed: unknown
@@ -383,10 +396,27 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
   }
 
   const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> }
+      finishReason?: string
+      safetyRatings?: Array<{ category: string; probability: string; blocked?: boolean }>
+    }>
+    promptFeedback?: { blockReason?: string; safetyRatings?: unknown }
   }
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) throw new Error('Gemini returned empty regenerateOutlineChapter response')
+  if (!text) {
+    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+    const promptBlock = data.promptFeedback?.blockReason
+    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+    const detail = [
+      `finishReason=${finishReason}`,
+      promptBlock ? `promptBlockReason=${promptBlock}` : '',
+      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+    ]
+      .filter((s) => s.length > 0)
+      .join(' / ')
+    throw new Error(`Gemini returned empty regenerateOutlineChapter response (${detail})`)
+  }
 
   let parsed: unknown
   try {
