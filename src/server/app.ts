@@ -604,7 +604,7 @@ export const app = new Hono()
   // 認証済なら 200 + email=user@example.com。401 ではなく常に 200 を返すのは、
   // フロントが「未認証か API ダウンか」を切り分けやすくするため。
   .get('/auth/me', async (c) => {
-    const email = await readAuthEmail(c.req.header('Cf-Access-Jwt-Assertion'))
+    const email = await readAuthEmail(c)
     return c.json({ email })
   })
 
