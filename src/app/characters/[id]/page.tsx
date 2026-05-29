@@ -49,15 +49,10 @@ export default function CharacterDetailPage() {
     let cancelled = false
     ;(async () => {
       try {
-        const res = await api.characters[':id'].$get({ param: { id: cid } })
-        if (!res.ok) {
-          if (res.status === 404) throw new Error('登場人物が見つかりません')
-          throw new Error(await readApiError(res))
-        }
-        const data = await res.json()
+        const data = await api.getCharacter({ params: { id: cid } })
         if (!cancelled) setCharacter(data)
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : '登場人物の取得に失敗しました')
+        if (!cancelled) setError(readApiError(e, '登場人物の取得に失敗しました'))
       } finally {
         if (!cancelled) setLoading(false)
       }
