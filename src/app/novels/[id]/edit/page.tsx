@@ -38,6 +38,7 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
     target_chars: novel.target_chars,
     pov: novel.pov,
     tone: novel.tone,
+    age_rating: novel.age_rating,
     pov_character_id: novel.pov_character_id,
     ending: novel.ending,
     character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),

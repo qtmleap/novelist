@@ -7,9 +7,13 @@ export const DEFAULT_TARGET_CHARS = 4000
 
 // 文体: 視点(POV) と 文体トーン。生成プロンプトに反映する。
 export const POV_OPTIONS = ['一人称', '三人称一元視点', '三人称多元視点', '三人称神視点'] as const
-export const TONE_OPTIONS = ['ライトノベル調', '一般文芸', '文学的', 'やさしい文体'] as const
+export const TONE_OPTIONS = ['ライトノベル調', '一般文芸', '文学的', 'やさしい文体', 'ライトな官能小説'] as const
 export const DEFAULT_POV = '一人称'
 export const DEFAULT_TONE = '一般文芸'
+
+// 想定年齢 (= 年齢指定)。生成プロンプトの表現強度に反映する。
+export const AGE_RATING_OPTIONS = ['全年齢', 'R15', 'R18'] as const
+export const DEFAULT_AGE_RATING = '全年齢'
 // 語り手(視点キャラ)を指定できる POV。一人称 / 三人称一元視点 のとき pov_character_id が有効。
 export const FOCAL_POVS: readonly string[] = ['一人称', '三人称一元視点']
 
@@ -56,6 +60,7 @@ export const CreateNovelSchema = z.object({
   target_chars: z.number().int().min(500).max(20000).default(DEFAULT_TARGET_CHARS),
   pov: z.string().max(30).default(DEFAULT_POV),
   tone: z.string().max(30).default(DEFAULT_TONE),
+  age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
   pov_character_id: z.string().max(50).default(''),
   ending: z.string().max(30).default(DEFAULT_ENDING),
   character_links: z.array(NovelCharacterLinkSchema).max(50).default([]),
@@ -101,6 +106,7 @@ export const NovelSchema = z.object({
   target_chars: z.number().int(),
   pov: z.string(),
   tone: z.string(),
+  age_rating: z.string(),
   pov_character_id: z.string(),
   ending: z.string(),
   outline: z.string().nullable(),
