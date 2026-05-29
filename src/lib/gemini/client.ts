@@ -222,24 +222,20 @@ function buildStyleInstruction(style: StyleParams): string {
   return lines.join('\n')
 }
 
-export async function generateOutline(
-  env: Env,
+// 章立て (bulk) 生成プロンプトの本文だけ組み立てる。プレビュー用にも使う。
+export function buildOutlinePrompt(
   novel: GeminiNovelParams,
   style: StyleParams,
-  modelOverride?: GeminiModel,
   cast?: CastMember[],
   relations?: CastRelation[]
-): Promise<Outline> {
-  const model = resolveModel(env, modelOverride)
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
-
+): string {
   const styleInstruction = buildStyleInstruction(style)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
   const notesSection = buildNotesSection(novel.notes)
   const extraSections = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
 
-  const prompt = `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
+  return `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
 
 タイトル: ${novel.title}
 ジャンル: ${novel.genre}
@@ -259,6 +255,20 @@ ${extraSections ? `\n${extraSections}\n` : ''}
     ...
   ]
 }`
+}
+
+export async function generateOutline(
+  env: Env,
+  novel: GeminiNovelParams,
+  style: StyleParams,
+  modelOverride?: GeminiModel,
+  cast?: CastMember[],
+  relations?: CastRelation[]
+): Promise<Outline> {
+  const model = resolveModel(env, modelOverride)
+  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
+
+  const prompt = buildOutlinePrompt(novel, style, cast, relations)
 
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
