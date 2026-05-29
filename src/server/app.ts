@@ -1,6 +1,6 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
-import { streamSSE } from 'hono/streaming'
+import type { StartChapterGenPayload } from '@/lib/chapter-gen-do'
 import {
   createCharacter,
   deleteCharacter,
@@ -10,19 +10,12 @@ import {
 } from '@/lib/character/repository'
 import { getEnv, getPrisma } from '@/lib/db'
 import type { CastMember, CastRelation } from '@/lib/gemini/client'
-import {
-  buildOutlinePrompt,
-  computeCostUsd,
-  generateOutline,
-  regenerateOutlineChapter,
-  streamChapter
-} from '@/lib/gemini/client'
+import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
 import {
   createNovel,
   deleteNovel,
   getNovelWithChapters,
   listNovels,
-  saveChapter,
   saveOutline,
   updateNovel
 } from '@/lib/novel/repository'
@@ -423,7 +416,9 @@ export const app = new Hono()
     }
   })
 
-  // SSE — response is a text/event-stream so hc client treats it as a raw Response.
+  // 生成キックオフ。Durable Object に payload を渡して即座に 202 を返す。
+  // 生成自体は DO 内で fire-and-forget で走り続け、ページ離脱・タブ閉じでも止まらない。
+  // クライアントは下の /stream エンドポイントで SSE 経由で進捗を受け取る。
   .post('/novels/:id/chapters/:number/generate', zValidator('json', GenerateOptionsSchema), async (c) => {
     const id = c.req.param('id')
     const chapterNumber = Number.parseInt(c.req.param('number'), 10)
@@ -433,66 +428,40 @@ export const app = new Hono()
 
     const options = c.req.valid('json')
     const prisma = getPrisma()
-
-    let novel: Awaited<ReturnType<typeof getNovelWithChapters>>
+    let payload: StartChapterGenPayload
     try {
-      novel = await getNovelWithChapters(prisma, id)
-    } catch {
-      await prisma.$disconnect()
-      return c.json({ error: 'db_error' }, 500)
-    }
-    if (!novel) {
-      await prisma.$disconnect()
-      return c.json({ error: 'not_found' }, 404)
-    }
-    if (!novel.outline) {
-      await prisma.$disconnect()
-      return c.json({ error: 'outline_not_generated' }, 400)
-    }
+      const novel = await getNovelWithChapters(prisma, id)
+      if (!novel) return c.json({ error: 'not_found' }, 404)
+      if (!novel.outline) return c.json({ error: 'outline_not_generated' }, 400)
 
-    let outlineParsed: ReturnType<typeof OutlineSchema.safeParse>
-    try {
-      outlineParsed = OutlineSchema.safeParse(JSON.parse(novel.outline))
-    } catch {
-      await prisma.$disconnect()
-      return c.json({ error: 'invalid_outline' }, 500)
-    }
-    if (!outlineParsed.success) {
-      await prisma.$disconnect()
-      return c.json({ error: 'invalid_outline' }, 500)
-    }
+      let outlineParsed: ReturnType<typeof OutlineSchema.safeParse>
+      try {
+        outlineParsed = OutlineSchema.safeParse(JSON.parse(novel.outline))
+      } catch {
+        return c.json({ error: 'invalid_outline' }, 500)
+      }
+      if (!outlineParsed.success) return c.json({ error: 'invalid_outline' }, 500)
 
-    const outline = outlineParsed.data
-    const targetEntry = outline.chapters.find((ch) => ch.chapter_number === chapterNumber)
-    if (!targetEntry) {
-      await prisma.$disconnect()
-      return c.json({ error: 'chapter_not_in_outline' }, 400)
-    }
+      const outline = outlineParsed.data
+      const targetEntry = outline.chapters.find((ch) => ch.chapter_number === chapterNumber)
+      if (!targetEntry) return c.json({ error: 'chapter_not_in_outline' }, 400)
 
-    const previousChapters = novel.chapters
-      .filter((ch) => ch.chapter_number < chapterNumber)
-      .sort((a, b) => a.chapter_number - b.chapter_number)
-      .slice(-2)
-      .map((ch) => ({ chapter_number: ch.chapter_number, content: ch.content }))
+      const previousChapters = novel.chapters
+        .filter((ch) => ch.chapter_number < chapterNumber)
+        .sort((a, b) => a.chapter_number - b.chapter_number)
+        .slice(-2)
+        .map((ch) => ({ chapter_number: ch.chapter_number, content: ch.content }))
 
-    const env = getEnv()
-    const povChar = novel.pov_character_id
-      ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
-      : undefined
-    const style = {
-      pov: novel.pov,
-      tone: novel.tone,
-      age_rating: novel.age_rating,
-      ending: novel.ending,
-      viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
-    }
+      const povChar = novel.pov_character_id
+        ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
+        : undefined
 
-    const cast = buildCastForGemini(novel.character_links)
-    const relations = buildRelationsForGemini(novel.relations)
-
-    let geminiResult: ReturnType<typeof streamChapter>
-    try {
-      geminiResult = streamChapter(env, {
+      payload = {
+        novelId: id,
+        chapterNumber,
+        chapterTitle: targetEntry.title,
+        targetChars: novel.target_chars,
+        model: options.model,
         novel: {
           title: novel.title,
           genre: novel.genre,
@@ -502,74 +471,40 @@ export const app = new Hono()
           notes: novel.notes
         },
         outline,
-        chapterNumber,
         previousChapters,
-        targetChars: novel.target_chars,
-        style,
-        cast,
-        relations,
-        model: options.model
-      })
-    } catch (e) {
+        style: {
+          pov: novel.pov,
+          tone: novel.tone,
+          age_rating: novel.age_rating,
+          ending: novel.ending,
+          viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
+        },
+        cast: buildCastForGemini(novel.character_links),
+        relations: buildRelationsForGemini(novel.relations)
+      }
+    } finally {
       await prisma.$disconnect()
-      const msg = e instanceof Error ? e.message : String(e)
-      return c.json({ error: msg }, 500)
     }
 
-    const { stream: geminiStream, usage: usagePromise } = geminiResult
+    const env = getEnv()
+    const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
+    const stub = env.CHAPTER_GEN.get(doId)
+    const result = await stub.start(payload)
+    return c.json(result, 202)
+  })
 
-    c.header('X-Accel-Buffering', 'no')
-    return streamSSE(c, async (stream) => {
-      const reader = geminiStream.getReader()
-      const decoder = new TextDecoder()
-      let accumulated = ''
-      try {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          const delta = decoder.decode(value, { stream: true })
-          accumulated += delta
-          await stream.writeSSE({ data: JSON.stringify({ delta }) })
-        }
-
-        const chapterTitle = targetEntry.title
-        let saved: { id: string }
-        try {
-          saved = await saveChapter(prisma, id, chapterNumber, accumulated, chapterTitle)
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          await stream.writeSSE({ data: JSON.stringify({ error: `save_failed: ${msg}` }) })
-          return
-        }
-
-        try {
-          const usage = await usagePromise
-          const costUsd = computeCostUsd(usage.model, usage.promptTokens, usage.outputTokens)
-          await prisma.chapterGenerationCost.create({
-            data: {
-              novel_id: id,
-              chapter_number: chapterNumber,
-              model: usage.model,
-              prompt_tokens: usage.promptTokens,
-              output_tokens: usage.outputTokens,
-              cost_usd: costUsd
-            }
-          })
-        } catch {
-          // cost recording is best-effort
-        }
-
-        await stream.writeSSE({
-          data: JSON.stringify({ done: true, chapterId: saved.id, title: chapterTitle })
-        })
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        await stream.writeSSE({ data: JSON.stringify({ error: msg }) })
-      } finally {
-        reader.releaseLock()
-        await prisma.$disconnect()
-      }
-    })
+  // 生成中の章本文 SSE。DO に橋渡しするだけ。EventSource で接続すると自動再接続される。
+  // 既に done/error なら最終イベントを送って閉じる。
+  .get('/novels/:id/chapters/:number/stream', async (c) => {
+    const id = c.req.param('id')
+    const chapterNumber = Number.parseInt(c.req.param('number'), 10)
+    if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
+      return c.json({ error: 'invalid_chapter_number' }, 400)
+    }
+    const env = getEnv()
+    const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
+    const stub = env.CHAPTER_GEN.get(doId)
+    return stub.openStream()
   })
 
   // 章本文の削除。整合性を保つため「最新の生成済み章」しか消せない (後続を消さないと前章を消す意味がないので)。
