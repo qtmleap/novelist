@@ -1,3 +1,4 @@
+import { getCookie } from 'hono/cookie'
 import { createMiddleware } from 'hono/factory'
 import { z } from 'zod'
 
@@ -131,26 +132,15 @@ declare module 'hono' {
   interface ContextVariableMap extends AuthVariables {}
 }
 
-// Cookie ヘッダから `CF_Authorization=...` を雑に抽出する。本格的なパーサは持ち込まない (Hono の cookie util は
-// 余計な dep が増えるのと、CF Access cookie 1 個だけ取れれば良いため)。
-function pickCfAuthCookie(cookieHeader: string | undefined): string | undefined {
-  if (cookieHeader === undefined || cookieHeader.length === 0) return undefined
-  const parts = cookieHeader.split(';')
-  for (const raw of parts) {
-    const trimmed = raw.trim()
-    if (trimmed.startsWith(`${COOKIE_JWT}=`)) {
-      return trimmed.slice(COOKIE_JWT.length + 1)
-    }
-  }
-  return undefined
-}
-
 // リクエストから JWT を取り出す。CF Access が gate した path では header に、
 // それ以外の path (= 同 host の他の URL) では cookie として届く。両方を見る。
-function pickJwt(c: { req: { header: (n: string) => string | undefined } }): string | undefined {
+// cookie のパースは hono/cookie の getCookie に任せる。
+function pickJwt(c: Parameters<typeof getCookie>[0]): string | undefined {
   const fromHeader = c.req.header(HEADER_JWT)
   if (fromHeader !== undefined && fromHeader.length > 0) return fromHeader
-  return pickCfAuthCookie(c.req.header('Cookie'))
+  const fromCookie = getCookie(c, COOKIE_JWT)
+  if (fromCookie !== undefined && fromCookie.length > 0) return fromCookie
+  return undefined
 }
 
 // 認証必須エンドポイントに装着するミドルウェア。
@@ -181,9 +171,7 @@ export const requireAuth = createMiddleware(async (c, next) => {
 // 認証 OPTIONAL なエンドポイントから email を覗くためのヘルパ。
 // 認証済みなら email、未認証 (header / cookie 無し or 失敗) なら null。
 // /api/auth/me で「今ログインしてる？」を返すのに使う。
-export async function readAuthEmail(c: {
-  req: { header: (n: string) => string | undefined }
-}): Promise<string | null> {
+export async function readAuthEmail(c: Parameters<typeof pickJwt>[0]): Promise<string | null> {
   const env = getAuthEnv()
   if (env === null) return 'dev@local'
   const jwt = pickJwt(c)
