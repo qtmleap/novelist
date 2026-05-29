@@ -4,6 +4,10 @@ import { z } from 'zod'
 // CF Access が認証済みリクエストに付与するヘッダ。app コードでは JWT を検証してから
 // email を読む (email-only ヘッダは CF を経由しないリクエストで容易に偽装できるため)。
 const HEADER_JWT = 'Cf-Access-Jwt-Assertion'
+// CF Access のセッション cookie。Access App の domain (=host) に紐付き、
+// ブラウザは同 host の **全** path に送るので、Access App が一部 path だけを gate していても
+// ログイン済みユーザのリクエストには cookie として JWT が付いてくる。
+const COOKIE_JWT = 'CF_Authorization'
 
 // 検証に使う JWKs を 1 時間キャッシュ。CF Access は鍵を頻繁に rotate しないが、
 // 一定間隔で取り直すことでローテーションに追随する。
@@ -127,6 +131,28 @@ declare module 'hono' {
   interface ContextVariableMap extends AuthVariables {}
 }
 
+// Cookie ヘッダから `CF_Authorization=...` を雑に抽出する。本格的なパーサは持ち込まない (Hono の cookie util は
+// 余計な dep が増えるのと、CF Access cookie 1 個だけ取れれば良いため)。
+function pickCfAuthCookie(cookieHeader: string | undefined): string | undefined {
+  if (cookieHeader === undefined || cookieHeader.length === 0) return undefined
+  const parts = cookieHeader.split(';')
+  for (const raw of parts) {
+    const trimmed = raw.trim()
+    if (trimmed.startsWith(`${COOKIE_JWT}=`)) {
+      return trimmed.slice(COOKIE_JWT.length + 1)
+    }
+  }
+  return undefined
+}
+
+// リクエストから JWT を取り出す。CF Access が gate した path では header に、
+// それ以外の path (= 同 host の他の URL) では cookie として届く。両方を見る。
+function pickJwt(c: { req: { header: (n: string) => string | undefined } }): string | undefined {
+  const fromHeader = c.req.header(HEADER_JWT)
+  if (fromHeader !== undefined && fromHeader.length > 0) return fromHeader
+  return pickCfAuthCookie(c.req.header('Cookie'))
+}
+
 // 認証必須エンドポイントに装着するミドルウェア。
 // - CF_ACCESS_TEAM_DOMAIN / CF_ACCESS_AUD が未設定 (= ローカル開発) なら通す + email='dev@local'
 // - 設定済みなら JWT を検証し、NG なら 401 を返す
@@ -138,8 +164,8 @@ export const requireAuth = createMiddleware(async (c, next) => {
     return
   }
 
-  const jwt = c.req.header(HEADER_JWT)
-  if (jwt === undefined || jwt.length === 0) {
+  const jwt = pickJwt(c)
+  if (jwt === undefined) {
     return c.json({ error: 'unauthenticated' }, 401)
   }
 
@@ -153,12 +179,15 @@ export const requireAuth = createMiddleware(async (c, next) => {
 })
 
 // 認証 OPTIONAL なエンドポイントから email を覗くためのヘルパ。
-// 認証済みなら email、未認証 (header 無し or 失敗) なら null。
+// 認証済みなら email、未認証 (header / cookie 無し or 失敗) なら null。
 // /api/auth/me で「今ログインしてる？」を返すのに使う。
-export async function readAuthEmail(jwt: string | undefined): Promise<string | null> {
-  if (jwt === undefined || jwt.length === 0) return null
+export async function readAuthEmail(c: {
+  req: { header: (n: string) => string | undefined }
+}): Promise<string | null> {
   const env = getAuthEnv()
   if (env === null) return 'dev@local'
+  const jwt = pickJwt(c)
+  if (jwt === undefined) return null
   const claims = await verifyAccessJwt(jwt, env.teamDomain, env.aud)
   return claims === null ? null : claims.email
 }
