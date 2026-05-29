@@ -8,6 +8,7 @@ import { NovelCard } from '@/components/novel/NovelCard'
 import { NovelSkeletonList } from '@/components/novel/NovelSkeleton'
 import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/button'
+import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import type { Novel } from '@/schemas/novel.dto'
 
@@ -15,6 +16,8 @@ export default function NovelsPage() {
   const [novels, setNovels] = useState<Novel[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const auth = useAuth()
+  const editAllowed = canEdit(auth)
 
   const fetchNovels = useCallback(async () => {
     setLoading(true)
@@ -42,12 +45,19 @@ export default function NovelsPage() {
           <h1 className='text-xl font-semibold'>小説一覧</h1>
           <p className='mt-0.5 text-sm text-muted-foreground'>AI が自動生成した小説の一覧です。</p>
         </div>
-        <Button asChild size='sm' className='[&_svg]:size-5!'>
-          <a href='/novels/new'>
+        {editAllowed ? (
+          <Button asChild size='sm' className='[&_svg]:size-5!'>
+            <a href='/novels/new'>
+              <SquarePen />
+              新規作成
+            </a>
+          </Button>
+        ) : (
+          <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
             <SquarePen />
             新規作成
-          </a>
-        </Button>
+          </Button>
+        )}
       </div>
 
       {loading && <NovelSkeletonList />}
