@@ -15,12 +15,10 @@ export default function NewNovelPage() {
     setIsSubmitting(true)
     setError(null)
     try {
-      const res = await api.novels.$post({ json: data })
-      if (!res.ok) throw new Error(await readApiError(res))
-      const novel = await res.json()
+      const novel = await api.createNovel(data)
       window.location.assign(`/novels/${novel.id}`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '小説の作成に失敗しました')
+      setError(readApiError(e, '小説の作成に失敗しました'))
       setIsSubmitting(false)
     }
   }

@@ -69,12 +69,10 @@ export default function NovelEditPage() {
     let cancelled = false
     ;(async () => {
       try {
-        const res = await api.novels[':id'].$get({ param: { id } })
-        if (!res.ok) throw new Error(await readApiError(res))
-        const novel = await res.json()
+        const novel = await api.getNovel({ params: { id } })
         if (!cancelled) setInitialValues(toFormValues(novel))
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : '小説の取得に失敗しました')
+        if (!cancelled) setError(readApiError(e, '小説の取得に失敗しました'))
       }
     })()
 
@@ -88,11 +86,10 @@ export default function NovelEditPage() {
     setIsSubmitting(true)
     setError(null)
     try {
-      const res = await api.novels[':id'].$put({ param: { id: novelId }, json: data })
-      if (!res.ok) throw new Error(await readApiError(res))
+      await api.updateNovel(data, { params: { id: novelId } })
       window.location.assign(`/novels/${novelId}`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '小説の更新に失敗しました')
+      setError(readApiError(e, '小説の更新に失敗しました'))
       setIsSubmitting(false)
     }
   }
@@ -102,13 +99,10 @@ export default function NovelEditPage() {
     setIsDeleting(true)
     setError(null)
     try {
-      const res = await api.novels[':id'].$delete({ param: { id: novelId } })
-      if (res.status !== 204 && !res.ok) {
-        throw new Error(await readApiError(res))
-      }
+      await api.deleteNovel(undefined, { params: { id: novelId } })
       window.location.assign('/novels')
     } catch (e) {
-      setError(e instanceof Error ? e.message : '削除に失敗しました')
+      setError(readApiError(e, '削除に失敗しました'))
       setIsDeleting(false)
       setDeleteDialogOpen(false)
     }
