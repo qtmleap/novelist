@@ -63,7 +63,7 @@ export const ADDRESS_STYLES = [
 ] as const
 
 export const CreateCharacterSchema = z.object({
-  name: z.string().min(1, '名前を入力してください').max(100),
+  name: z.string().nonempty('名前を入力してください').max(100),
   gender: z.string().max(20).default(''),
   age: z.string().max(50).default(''),
   occupation: z.string().max(50).default(''),
