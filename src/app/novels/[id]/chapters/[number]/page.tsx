@@ -108,9 +108,12 @@ export default function ChapterDetailPage() {
   const cost = novel?.generation_costs.find((c) => c.chapter_number === chapterNumber)
   const totalChapters = novel?.num_chapters ?? 0
   // 最新生成済み章 = この novel の chapters の最大 chapter_number。
-  // 整合性のため、最新章でしか再生成・削除はできない。
+  // 削除は後続を巻き込むので最新章のみ許可。再生成は本人だけ書き換わるので、
+  // 全章生成済み (= 後続も既にある) なら任意章でも許可する。
   const latestDoneNumber = novel?.chapters.reduce((acc, c) => Math.max(acc, c.chapter_number), 0) ?? 0
   const isLatest = chapter !== null && chapterNumber === latestDoneNumber
+  const allChaptersDone = !!novel && novel.chapters.length >= novel.num_chapters
+  const canRegenerate = chapter !== null && (isLatest || allChaptersDone)
 
   const prevHref = chapterNumber > 1 && novelId ? `/novels/${novelId}/chapters/${chapterNumber - 1}` : null
   const nextHref = chapterNumber < totalChapters && novelId ? `/novels/${novelId}/chapters/${chapterNumber + 1}` : null
@@ -241,7 +244,9 @@ export default function ChapterDetailPage() {
               <p className='mt-0.5 text-sm text-muted-foreground'>
                 {isLatest
                   ? '再生成と削除は元に戻せません。'
-                  : '整合性のため、再生成と削除は最新の生成済み章でのみ可能です。'}
+                  : allChaptersDone
+                    ? '再生成は元に戻せません。後続の章との整合性は保たれない場合があります。削除は最新章のみ可能です。'
+                    : '整合性のため、再生成と削除は最新の生成済み章でのみ可能です。'}
               </p>
             </div>
             <div className='flex flex-wrap items-center gap-2'>
@@ -251,7 +256,7 @@ export default function ChapterDetailPage() {
                     type='button'
                     variant='outline'
                     size='sm'
-                    disabled={busy || !isLatest}
+                    disabled={busy || !canRegenerate}
                     className='[&_svg]:size-5!'
                   >
                     {isRegenerating ? <Loader2 className='animate-spin' /> : <RefreshCw />}
