@@ -71,7 +71,7 @@ export default function NovelEditPage() {
       try {
         const res = await api.novels[':id'].$get({ param: { id } })
         if (!res.ok) throw new Error(await readApiError(res))
-        const novel = (await res.json()) as NovelWithChapters
+        const novel = await res.json()
         if (!cancelled) setInitialValues(toFormValues(novel))
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : '小説の取得に失敗しました')
