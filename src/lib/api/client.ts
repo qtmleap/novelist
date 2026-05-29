@@ -1,14 +1,12 @@
-import { hc } from 'hono/client'
-import type { AppType } from '@/server/app'
+import { createApiClient } from './zodios'
 
-// `AppType` は server 側で `.basePath('/api')` してあるので、hc の戻り値は
-// `{ api: { novels: ..., characters: ... } }` の形になる。利用側で `api.api.xxx`
-// と書くのを避けるため、`.api` を取り出して再 export する。
-export const api = hc<AppType>('/').api
-
-// Hono Client returns a stricter ClientResponse type that lacks `webSocket`.
-// Accept either a global Response or anything with `.status` + `.json()`.
-type ResponseLike = { status: number; json: () => Promise<unknown> }
+// Zodios クライアント。アクセスは `api.<alias>(...)` の形 (詳細は ./zodios.ts)。
+// 既存の readApiError 経由でエラー文を出す。
+// baseURL は SSR でモジュールロード時にも constructor を通すため非空が必須。
+// 実呼び出しはすべて 'use client' のイベントハンドラ内 (ブラウザ) で、
+// `/` を起点に同一オリジンの API に解決する。
+const baseURL = typeof window === 'undefined' ? 'http://localhost' : window.location.origin
+export const api = createApiClient(baseURL)
 
 // サーバーが返すエラーコードを日本語ラベルに変換する。マッピング外はコードをそのまま使う。
 const ERROR_MESSAGES: Record<string, string> = {
@@ -41,25 +39,35 @@ function translateGeminiDetail(detail: string): string | null {
   return null
 }
 
+// Zodios エラーから response.data の中身を取り出す (as 不要のナローイング)。
+function extractErrorBody(error: unknown): { error?: string; detail?: string } | null {
+  if (typeof error !== 'object' || error === null) return null
+  if (!('response' in error)) return null
+  const response = error.response
+  if (typeof response !== 'object' || response === null) return null
+  if (!('data' in response)) return null
+  const data = response.data
+  if (typeof data !== 'object' || data === null) return null
+  const body: { error?: string; detail?: string } = {}
+  if ('error' in data && typeof data.error === 'string') body.error = data.error
+  if ('detail' in data && typeof data.detail === 'string') body.detail = data.detail
+  return body
+}
+
 /**
- * Reads `{ error?: string; detail?: string }` from a non-2xx Hono Client Response.
- * `error` の既知コードを日本語に変換し、Gemini の detail がブロック理由を含めば
- * 利用者向けのガイドに置き換える。Falls back to `HTTP <status>`.
+ * Zodios のエラー (HTTP 失敗 / Zod parse 失敗) を人向け文字列に変換する。
+ * 既知の error コードを日本語に置換し、Gemini の block 理由は専用ガイドへ。
  */
-export async function readApiError(res: ResponseLike, fallback?: string): Promise<string> {
-  try {
-    const data = (await res.json()) as { error?: unknown; detail?: unknown }
-    const code = typeof data?.error === 'string' ? data.error : undefined
-    const detail = typeof data?.detail === 'string' ? data.detail : undefined
-    if (detail) {
-      const gemini = translateGeminiDetail(detail)
-      if (gemini) return gemini
-    }
-    const label = code ? (ERROR_MESSAGES[code] ?? code) : undefined
-    if (label && detail) return `${label}: ${detail}`
-    if (label) return label
-  } catch {
-    // body was not JSON
+export function readApiError(error: unknown, fallback?: string): string {
+  const body = extractErrorBody(error)
+  if (body?.detail) {
+    const gemini = translateGeminiDetail(body.detail)
+    if (gemini) return gemini
   }
-  return fallback ?? `HTTP ${res.status}`
+  const code = body?.error
+  const label = code ? (ERROR_MESSAGES[code] ?? code) : undefined
+  if (label && body?.detail) return `${label}: ${body.detail}`
+  if (label) return label
+  if (error instanceof Error) return error.message
+  return fallback ?? '通信に失敗しました'
 }
