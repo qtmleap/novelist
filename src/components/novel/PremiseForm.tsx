@@ -18,12 +18,16 @@ import {
   type CreateNovelInput,
   CreateNovelSchema,
   DEFAULT_AGE_RATING,
+  DEFAULT_EDITOR_MODEL,
   DEFAULT_ENDING,
   DEFAULT_POV,
   DEFAULT_TARGET_CHARS,
   DEFAULT_TONE,
+  DEFAULT_WRITER_MODEL,
   ENDING_OPTIONS,
   FOCAL_POVS,
+  GEMINI_MODELS,
+  GeminiModelSchema,
   POV_OPTIONS,
   RELATION_TYPES,
   TONE_OPTIONS
@@ -51,7 +55,7 @@ type Props = {
   mode?: 'create' | 'edit'
 }
 
-const EMPTY_DEFAULTS: CreateNovelInput = {
+export const EMPTY_DEFAULTS: CreateNovelInput = {
   title: '',
   genre: '',
   characters: '',
@@ -64,6 +68,8 @@ const EMPTY_DEFAULTS: CreateNovelInput = {
   pov_character_id: '',
   ending: DEFAULT_ENDING,
   notes: '',
+  editor_model: DEFAULT_EDITOR_MODEL,
+  writer_model: DEFAULT_WRITER_MODEL,
   character_links: [],
   relations: []
 }
@@ -342,6 +348,48 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                 {ENDING_OPTIONS.map((e) => (
                   <SelectItem key={e} value={e}>
                     {e}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className='space-y-2'>
+            <Label htmlFor='editor_model'>Editor モデル (章立て)</Label>
+            <Select
+              value={form.watch('editor_model')}
+              onValueChange={(v) =>
+                form.setValue('editor_model', GeminiModelSchema.parse(v), { shouldValidate: false })
+              }
+            >
+              <SelectTrigger id='editor_model' className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {GEMINI_MODELS.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className='space-y-2'>
+            <Label htmlFor='writer_model'>Writer モデル (本文)</Label>
+            <Select
+              value={form.watch('writer_model')}
+              onValueChange={(v) =>
+                form.setValue('writer_model', GeminiModelSchema.parse(v), { shouldValidate: false })
+              }
+            >
+              <SelectTrigger id='writer_model' className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {GEMINI_MODELS.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m}
                   </SelectItem>
                 ))}
               </SelectContent>
