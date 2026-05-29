@@ -209,10 +209,7 @@ export default function NovelDetailPage() {
     async (id: string, editorModel: GeminiModel, chapters?: number[]): Promise<Outline | null> => {
       dispatch({ type: 'OUTLINE_START' })
       try {
-        const body = await api.generateOutline(
-          { model: editorModel, chapters: chapters ?? [] },
-          { params: { id } }
-        )
+        const body = await api.generateOutline({ model: editorModel, chapters: chapters ?? [] }, { params: { id } })
         dispatch({ type: 'OUTLINE_OK', outline: body.outline })
         // chapters[] 指定の部分再生成では、対象章の本文も server 側で消えるので novel 全体を取り直す。
         await loadNovel(id)
