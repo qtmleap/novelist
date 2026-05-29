@@ -10,7 +10,13 @@ import {
 } from '@/lib/character/repository'
 import { getEnv, getPrisma } from '@/lib/db'
 import type { CastMember, CastRelation } from '@/lib/gemini/client'
-import { computeCostUsd, generateOutline, regenerateOutlineChapter, streamChapter } from '@/lib/gemini/client'
+import {
+  buildOutlinePrompt,
+  computeCostUsd,
+  generateOutline,
+  regenerateOutlineChapter,
+  streamChapter
+} from '@/lib/gemini/client'
 import {
   createNovel,
   deleteNovel,
@@ -312,6 +318,41 @@ export const app = new Hono()
         const msg = e instanceof Error ? e.message : String(e)
         return c.json({ error: 'generation_failed', detail: msg }, 502)
       }
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+
+  // 章立て生成プロンプトのプレビュー (Gemini に投げる前の文字列を返す。デバッグ用)
+  .get('/novels/:id/outline/preview', async (c) => {
+    const id = c.req.param('id')
+    const prisma = getPrisma()
+    try {
+      const novel = await getNovelWithChapters(prisma, id)
+      if (!novel) return c.json({ error: 'not_found' }, 404)
+
+      const povChar = novel.pov_character_id
+        ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
+        : undefined
+      const style = {
+        pov: novel.pov,
+        tone: novel.tone,
+        age_rating: novel.age_rating,
+        ending: novel.ending,
+        viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
+      }
+      const cast = buildCastForGemini(novel.character_links)
+      const relations = buildRelationsForGemini(novel.relations)
+      const params = {
+        title: novel.title,
+        genre: novel.genre,
+        characters: novel.characters,
+        setting: novel.setting,
+        num_chapters: novel.num_chapters,
+        notes: novel.notes
+      }
+      const prompt = buildOutlinePrompt(params, style, cast, relations)
+      return c.json({ prompt })
     } finally {
       await prisma.$disconnect()
     }
