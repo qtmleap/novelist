@@ -1,6 +1,5 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
-import { readAuthEmail, requireAuth } from '@/server/auth'
 import type { StartChapterGenPayload } from '@/lib/chapter-gen-do'
 import {
   createCharacter,
@@ -27,6 +26,7 @@ import {
   GenerateOutlineOptionsSchema,
   OutlineSchema
 } from '@/schemas/novel.dto'
+import { readAuthEmail, requireAuth } from '@/server/auth'
 
 function serializeNovel(n: {
   id: string
