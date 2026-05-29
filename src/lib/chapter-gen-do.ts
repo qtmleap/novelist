@@ -16,7 +16,7 @@ import type { GeminiModel, Outline } from '@/schemas/novel.dto'
 // 'STOP' 以外がここに届く前提なので 'STOP' は扱わない。
 function truncationMessage(finishReason: string): string {
   if (finishReason === 'MAX_TOKENS') {
-    return '生成が文字数上限で打ち切られました。途中までの本文は保存されています。設定で目標文字数を下げるか、章を分けて再生成してください。'
+    return '生成が出力トークン上限で打ち切られました。途中までの本文は保存されています。もう一度再生成するか、章を分割してから生成してください。'
   }
   if (finishReason === 'SAFETY') {
     return 'Gemini のセーフティ判定で生成が打ち切られました。途中までの本文は保存されています。プロンプトや設定をやや穏当な内容に調整して再生成してください。'
