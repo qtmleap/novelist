@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Novel" ADD COLUMN "notes" TEXT NOT NULL DEFAULT '';
