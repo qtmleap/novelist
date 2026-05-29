@@ -14,7 +14,8 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
       tone: input.tone,
       age_rating: input.age_rating,
       pov_character_id: input.pov_character_id,
-      ending: input.ending
+      ending: input.ending,
+      notes: input.notes
     }
   })
 
@@ -183,6 +184,7 @@ export async function listNovels(prisma: PrismaClient) {
       age_rating: true,
       pov_character_id: true,
       ending: true,
+      notes: true,
       outline: true,
       created_at: true,
       updated_at: true
@@ -207,7 +209,8 @@ export async function updateNovel(prisma: PrismaClient, id: string, input: Creat
         tone: input.tone,
         age_rating: input.age_rating,
         pov_character_id: input.pov_character_id,
-        ending: input.ending
+        ending: input.ending,
+        notes: input.notes
       }
     }),
     prisma.novelCharacterRelation.deleteMany({ where: { novel_id: id } }),

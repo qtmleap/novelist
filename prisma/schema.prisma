@@ -21,6 +21,7 @@ model Novel {
   age_rating       String                   @default("全年齢")
   pov_character_id String                   @default("")
   ending           String                   @default("未指定")
+  notes            String                   @default("")
   outline          String?
   created_at      DateTime                 @default(now())
   updated_at      DateTime                 @updatedAt
