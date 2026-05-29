@@ -74,9 +74,8 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
   const [dictionary, setDictionary] = useState<Character[]>([])
 
   useEffect(() => {
-    api.characters
-      .$get()
-      .then((r) => (r.ok ? r.json() : []))
+    api
+      .listCharacters()
       .then((data) => setDictionary(data))
       .catch(() => setDictionary([]))
   }, [])
