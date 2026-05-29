@@ -79,11 +79,12 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             {auth.status === 'authenticated' ? (
-              <SidebarMenuButton asChild tooltip='ログアウト' className='[&>svg]:size-5!'>
-                {/* CF Access のログアウトエンドポイント。Worker は介さずに CF が直接処理する。 */}
+              <SidebarMenuButton asChild tooltip={auth.email} className='[&>svg]:size-5!'>
+                {/* CF Access のログアウトエンドポイント。Worker は介さずに CF が直接処理する。
+                    ラベルは「ログアウト」固定。email は tooltip でだけ見える (ローカル開発の dev@local がそのまま出ないように)。 */}
                 <a href='/cdn-cgi/access/logout'>
                   <LogOut />
-                  <span className='truncate'>{auth.email}</span>
+                  <span>ログアウト</span>
                 </a>
               </SidebarMenuButton>
             ) : (
@@ -93,8 +94,8 @@ export function AppSidebar() {
                 className='[&>svg]:size-5!'
                 disabled={auth.status === 'loading'}
               >
-                {/* CF Access の Application で /api/auth/login を Allow に設定すれば、ここで認証フローが起動する。 */}
-                <a href='/api/auth/login'>
+                {/* CF Access の Application で /login を Allow に設定すれば、このページにアクセスした時点で認証フローが起動する。 */}
+                <a href='/login'>
                   <LogIn />
                   <span>{auth.status === 'loading' ? '確認中…' : 'ログイン'}</span>
                 </a>
