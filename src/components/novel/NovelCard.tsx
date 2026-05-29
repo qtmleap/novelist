@@ -10,8 +10,11 @@ type Props = {
 }
 
 function formatDate(iso: string): string {
-  const d = new Date(iso)
-  return d.toLocaleDateString('ja-JP', { year: 'numeric', month: 'short', day: 'numeric' })
+  // ISO 8601 文字列を直接 parse して "YYYY年M月D日" を組み立てる (Date を経由しないので
+  // タイムゾーン揺れも無く、no-new-date の運用方針 (dayjs か文字列処理) に沿う)。
+  const [datePart] = iso.split('T')
+  const [y, m, d] = datePart.split('-')
+  return `${Number(y)}年${Number(m)}月${Number(d)}日`
 }
 
 export function NovelCard({ novel }: Props) {
