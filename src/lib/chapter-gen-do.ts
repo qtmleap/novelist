@@ -173,24 +173,17 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         model: payload.model
       })
 
-      const reader = result.stream.getReader()
       const decoder = new TextDecoder()
-      try {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          const delta = decoder.decode(value, { stream: true })
-          if (!delta) continue
-          this.buffer += delta
-          // バッファは細かく書きすぎると I/O コスト高なので 256 文字ごとに flush + 完了時に flush
-          if (this.buffer.length % 256 < delta.length) {
-            await this.ctx.storage.put('buffer', this.buffer)
-          }
-          const event = encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`)
-          await this.fanout(event)
+      for await (const chunk of result.stream) {
+        const delta = decoder.decode(chunk, { stream: true })
+        if (!delta) continue
+        this.buffer += delta
+        // バッファは細かく書きすぎると I/O コスト高なので 256 文字ごとに flush + 完了時に flush
+        if (this.buffer.length % 256 < delta.length) {
+          await this.ctx.storage.put('buffer', this.buffer)
         }
-      } finally {
-        reader.releaseLock()
+        const event = encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`)
+        await this.fanout(event)
       }
 
       // 完了時 buffer flush

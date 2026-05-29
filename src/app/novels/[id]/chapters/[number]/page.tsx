@@ -85,7 +85,7 @@ export default function ChapterDetailPage() {
           if (res.status === 404) throw new Error('小説が見つかりません')
           throw new Error(await readApiError(res))
         }
-        const data = (await res.json()) as NovelWithChapters
+        const data = await res.json()
         if (!cancelled) setNovel(data)
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : '章の取得に失敗しました')
@@ -133,7 +133,7 @@ export default function ChapterDetailPage() {
           onDone: async () => {
             try {
               const refreshed = await api.novels[':id'].$get({ param: { id: novelId } })
-              if (refreshed.ok) setNovel((await refreshed.json()) as NovelWithChapters)
+              if (refreshed.ok) setNovel(await refreshed.json())
             } catch {
               // 再取得に失敗しても streaming buffer 自体は描画済み
             }
