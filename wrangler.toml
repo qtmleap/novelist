@@ -27,6 +27,15 @@ database_name = "novelist"
 database_id = "PLACEHOLDER_RUN_WRANGLER_D1_CREATE"
 migrations_dir = "prisma/migrations"
 
+# 章本文生成セッション (1 章 1 instance, SQLite-backed = Workers Free 枠で動く)
+[[durable_objects.bindings]]
+name = "CHAPTER_GEN"
+class_name = "ChapterGenerationDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChapterGenerationDO"]
+
 # ── staging (deployed on PR merge to develop) ──
 [env.staging]
 name = "novelist-staging"
@@ -49,6 +58,10 @@ database_name = "novelist-staging"
 database_id = "169253a8-8421-4de2-83ed-6ff2727768a0"
 migrations_dir = "prisma/migrations"
 
+[[env.staging.durable_objects.bindings]]
+name = "CHAPTER_GEN"
+class_name = "ChapterGenerationDO"
+
 # ── production (deployed on PR merge to master) ──
 [env.production]
 name = "novelist-production"
@@ -70,3 +83,7 @@ binding = "DB"
 database_name = "novelist-production"
 database_id = "48501a98-987a-45e6-b6e5-14144656eba0"
 migrations_dir = "prisma/migrations"
+
+[[env.production.durable_objects.bindings]]
+name = "CHAPTER_GEN"
+class_name = "ChapterGenerationDO"

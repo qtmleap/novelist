@@ -21,7 +21,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { api, readApiError } from '@/lib/api/client'
 import { getWriterModel } from '@/lib/settings'
-import { readChapterStream } from '@/lib/stream'
+import { subscribeChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
 import type { ChapterCost, NovelWithChapters } from '@/schemas/novel.dto'
 
@@ -120,33 +120,38 @@ export default function ChapterDetailPage() {
     setIsRegenerating(true)
     setBuffer('')
     setError(null)
-    const abort = new AbortController()
-    abortRef.current = abort
     try {
-      const res = await api.novels[':id'].chapters[':number'].generate.$post(
-        {
-          param: { id: novelId, number: String(chapterNumber) },
-          json: { model: getWriterModel() }
-        },
-        { init: { signal: abort.signal } }
-      )
+      const res = await api.novels[':id'].chapters[':number'].generate.$post({
+        param: { id: novelId, number: String(chapterNumber) },
+        json: { model: getWriterModel() }
+      })
       if (!res.ok) throw new Error(await readApiError(res))
-      await readChapterStream(res, {
-        onDelta: (text) => setBuffer((b) => b + text),
-        onDone: async () => {
-          try {
-            const refreshed = await api.novels[':id'].$get({ param: { id: novelId } })
-            if (refreshed.ok) setNovel((await refreshed.json()) as NovelWithChapters)
-          } catch {
-            // 再取得に失敗しても streaming buffer 自体は描画済み
+
+      await new Promise<void>((resolve) => {
+        const sub = subscribeChapterStream(`/api/novels/${novelId}/chapters/${chapterNumber}/stream`, {
+          onDelta: (text) => setBuffer((b) => b + text),
+          onDone: async () => {
+            try {
+              const refreshed = await api.novels[':id'].$get({ param: { id: novelId } })
+              if (refreshed.ok) setNovel((await refreshed.json()) as NovelWithChapters)
+            } catch {
+              // 再取得に失敗しても streaming buffer 自体は描画済み
+            }
+            resolve()
+          },
+          onError: (msg) => {
+            setError(msg)
+            resolve()
           }
-        },
-        onError: (msg) => setError(msg)
+        })
+        // 再生成中にコンポーネントが unmount されても DO 側は続行するが、ローカルの購読は止める。
+        abortRef.current?.signal.addEventListener('abort', () => {
+          sub.close()
+          resolve()
+        })
       })
     } catch (e) {
-      if ((e as { name?: string }).name !== 'AbortError') {
-        setError(e instanceof Error ? e.message : '再生成に失敗しました')
-      }
+      setError(e instanceof Error ? e.message : '再生成に失敗しました')
     } finally {
       setIsRegenerating(false)
       setBuffer('')
