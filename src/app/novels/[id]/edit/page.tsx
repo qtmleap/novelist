@@ -19,7 +19,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { api, readApiError } from '@/lib/api/client'
-import type { CreateNovelInput, NovelWithChapters } from '@/schemas/novel.dto'
+import { type CreateNovelInput, GeminiModelSchema, type NovelWithChapters } from '@/schemas/novel.dto'
 
 function getNovelId(): string {
   if (typeof window === 'undefined') return ''
@@ -42,6 +42,10 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
     pov_character_id: novel.pov_character_id,
     ending: novel.ending,
     notes: novel.notes,
+    // DB は NOT NULL default で常に有効値だが、型としては string なので parse で narrow する。
+    // 無効値が混入したら表示時点で気付かせるため throw する (Surface or throw)。
+    editor_model: GeminiModelSchema.parse(novel.editor_model),
+    writer_model: GeminiModelSchema.parse(novel.writer_model),
     character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
     relations: novel.relations.map((r) => ({
       source_character_id: r.source_character_id,

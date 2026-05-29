@@ -22,6 +22,8 @@ model Novel {
   pov_character_id String                   @default("")
   ending           String                   @default("未指定")
   notes            String                   @default("")
+  editor_model     String                   @default("gemini-3.1-flash-lite")
+  writer_model     String                   @default("gemini-3.1-flash-lite")
   outline          String?
   created_at      DateTime                 @default(now())
   updated_at      DateTime                 @updatedAt

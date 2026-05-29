@@ -13,11 +13,12 @@ import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { api, readApiError } from '@/lib/api/client'
-import { getEditorModel, getWriterModel } from '@/lib/settings'
 import { subscribeChapterStream } from '@/lib/stream'
 import {
   type Chapter,
   type ChapterCost,
+  type GeminiModel,
+  GeminiModelSchema,
   type NovelWithChapters,
   type Outline,
   OutlineSchema
@@ -205,11 +206,11 @@ export default function NovelDetailPage() {
   }, [])
 
   const doGenerateOutline = useCallback(
-    async (id: string, chapters?: number[]): Promise<Outline | null> => {
+    async (id: string, editorModel: GeminiModel, chapters?: number[]): Promise<Outline | null> => {
       dispatch({ type: 'OUTLINE_START' })
       try {
         const body = await api.generateOutline(
-          { model: getEditorModel(), chapters: chapters ?? [] },
+          { model: editorModel, chapters: chapters ?? [] },
           { params: { id } }
         )
         dispatch({ type: 'OUTLINE_OK', outline: body.outline })
@@ -224,48 +225,51 @@ export default function NovelDetailPage() {
     [loadNovel]
   )
 
-  const doGenerateChapter = useCallback(async (id: string, num: number, abort: AbortController): Promise<boolean> => {
-    dispatch({ type: 'CHAPTER_START', chapterNumber: num })
-    try {
-      // 1. DO に生成キックオフ (202 が返る)。
-      await api.startChapterGeneration({ model: getWriterModel() }, { params: { id, number: String(num) } })
+  const doGenerateChapter = useCallback(
+    async (id: string, num: number, writerModel: GeminiModel, abort: AbortController): Promise<boolean> => {
+      dispatch({ type: 'CHAPTER_START', chapterNumber: num })
+      try {
+        // 1. DO に生成キックオフ (202 が返る)。
+        await api.startChapterGeneration({ model: writerModel }, { params: { id, number: String(num) } })
 
-      // 2. SSE で進捗を購読。EventSource は自動再接続するので、ページ離脱から戻っても続きが見える。
-      return await new Promise<boolean>((resolve) => {
-        const sub = subscribeChapterStream(`/api/novels/${id}/chapters/${num}/stream`, {
-          onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
-          onDone: ({ chapterId, title }) => {
-            dispatch({ type: 'CHAPTER_DONE', chapterNumber: num, chapterId, title })
-            resolve(true)
-          },
-          onError: (msg) => {
-            dispatch({ type: 'CHAPTER_ERR', error: msg })
+        // 2. SSE で進捗を購読。EventSource は自動再接続するので、ページ離脱から戻っても続きが見える。
+        return await new Promise<boolean>((resolve) => {
+          const sub = subscribeChapterStream(`/api/novels/${id}/chapters/${num}/stream`, {
+            onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
+            onDone: ({ chapterId, title }) => {
+              dispatch({ type: 'CHAPTER_DONE', chapterNumber: num, chapterId, title })
+              resolve(true)
+            },
+            onError: (msg) => {
+              dispatch({ type: 'CHAPTER_ERR', error: msg })
+              resolve(false)
+            }
+          })
+          abort.signal.addEventListener('abort', () => {
+            sub.close()
+            dispatch({ type: 'CANCEL' })
             resolve(false)
-          }
+          })
         })
-        abort.signal.addEventListener('abort', () => {
-          sub.close()
-          dispatch({ type: 'CANCEL' })
-          resolve(false)
-        })
-      })
-    } catch (e) {
-      dispatch({ type: 'CHAPTER_ERR', error: readApiError(e, `第 ${num} 章の生成に失敗しました`) })
-      return false
-    }
-  }, [])
+      } catch (e) {
+        dispatch({ type: 'CHAPTER_ERR', error: readApiError(e, `第 ${num} 章の生成に失敗しました`) })
+        return false
+      }
+    },
+    []
+  )
 
   // 章リストを順番に流す。章立て生成は別フロー (doGenerateOutline) なのでここでは扱わない —
   // 章立て生成直後の自動本文生成を避けるため、ボタン側で 2 段階に分けている。
   const runGeneration = useCallback(
-    async (id: string, chapterNumbers: number[]) => {
+    async (id: string, chapterNumbers: number[], writerModel: GeminiModel) => {
       if (chapterNumbers.length === 0) return
       const abort = new AbortController()
       abortRef.current = abort
 
       for (const n of chapterNumbers) {
         if (abort.signal.aborted) break
-        const succeeded = await doGenerateChapter(id, n, abort)
+        const succeeded = await doGenerateChapter(id, n, writerModel, abort)
         if (!succeeded || abort.signal.aborted) break
       }
 
@@ -293,11 +297,12 @@ export default function NovelDetailPage() {
 
   const handleRetryChapter = async (num: number) => {
     const id = novelIdRef.current
-    if (!id) return
+    const currentNovel = state.novel
+    if (!id || !currentNovel) return
     dispatch({ type: 'RETRY_CLEAR' })
     const abort = new AbortController()
     abortRef.current = abort
-    await doGenerateChapter(id, num, abort)
+    await doGenerateChapter(id, num, GeminiModelSchema.parse(currentNovel.writer_model), abort)
   }
 
   const isGenerating = state.status === 'generatingOutline' || state.status === 'generatingChapter'
@@ -440,7 +445,7 @@ export default function NovelDetailPage() {
           outline={outline}
           onConfirm={(targets) => {
             const id = novelIdRef.current
-            if (id && targets.length > 0) doGenerateOutline(id, targets)
+            if (id && targets.length > 0) doGenerateOutline(id, GeminiModelSchema.parse(novel.editor_model), targets)
           }}
         />
       )}
@@ -468,7 +473,7 @@ export default function NovelDetailPage() {
           chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
           onConfirm={(targets) => {
             const id = novelIdRef.current
-            if (id && targets.length > 0) runGeneration(id, targets)
+            if (id && targets.length > 0) runGeneration(id, targets, GeminiModelSchema.parse(novel.writer_model))
           }}
         />
       )}
