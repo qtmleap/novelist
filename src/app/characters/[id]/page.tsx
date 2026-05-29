@@ -6,6 +6,7 @@ import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import type { Character } from '@/schemas/character.dto'
 
@@ -40,6 +41,8 @@ export default function CharacterDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [id, setId] = useState<string>('')
+  const auth = useAuth()
+  const editAllowed = canEdit(auth)
 
   useEffect(() => {
     const cid = getCharacterId()
@@ -76,12 +79,19 @@ export default function CharacterDetailPage() {
               <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>登場人物</p>
               <h1 className='mt-1 text-xl font-semibold'>{character.name}</h1>
             </div>
-            <Button asChild size='sm' className='[&_svg]:size-5!'>
-              <a href={`/characters/${id}/edit`}>
+            {editAllowed ? (
+              <Button asChild size='sm' className='[&_svg]:size-5!'>
+                <a href={`/characters/${id}/edit`}>
+                  <Pencil />
+                  編集
+                </a>
+              </Button>
+            ) : (
+              <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
                 <Pencil />
                 編集
-              </a>
-            </Button>
+              </Button>
+            )}
           </div>
 
           <div className='divide-y border-y'>
