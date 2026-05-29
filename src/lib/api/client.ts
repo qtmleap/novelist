@@ -34,7 +34,7 @@ function translateGeminiDetail(detail: string): string | null {
     return 'Gemini のセーフティ判定で拒否されました。プロンプトや設定をやや穏当な内容に調整して再試行してください。'
   }
   if (detail.includes('MAX_TOKENS')) {
-    return 'Gemini の出力上限に達しました。目標文字数を下げるか、章を分けてください。'
+    return 'Gemini の出力トークン上限に達しました。もう一度再生成するか、章を分割してから生成してください。'
   }
   if (detail.includes('RECITATION')) {
     return 'Gemini が引用拒否で停止しました。具体的な固有名詞や台詞をプロンプトから減らして再試行してください。'

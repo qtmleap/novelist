@@ -110,16 +110,6 @@ type StreamChapterParams = {
   model?: GeminiModel
 }
 
-const OUTPUT_TOKEN_CAP: Record<string, number> = {
-  'gemini-3.5-flash': 65536,
-  'gemini-3.1-pro-preview': 65536,
-  'gemini-3-flash-preview': 65536,
-  'gemini-3.1-flash-lite': 65536,
-  'gemini-2.5-pro': 65536,
-  'gemini-2.5-flash': 65536,
-  'gemini-2.5-flash-lite': 65536
-}
-
 type ModelPricing = { input: number; output: number }
 const MODEL_PRICING_USD_PER_M_TOKENS: Record<string, ModelPricing> = {
   'gemini-3.5-flash': { input: 1.5, output: 9.0 },
@@ -140,10 +130,10 @@ export function computeCostUsd(model: string, promptTokens: number, outputTokens
   return (promptTokens * pricing.input + outputTokens * pricing.output) / 1_000_000
 }
 
-function maxOutputTokens(model: string, targetChars: number): number {
-  const cap = OUTPUT_TOKEN_CAP[model] ?? 8192
-  return Math.min(targetChars * 2 + 1024, cap)
-}
+// maxOutputTokens は意図的に指定しない: prompt 側で「約 N 文字」と指示しているし、模型自体は
+// 自然完了するので人工的な cap を被せると却って MAX_TOKENS の原因になる。
+// thinking もデフォルト動作に任せる (品質を取る) — 出力 cap を外したので thinking がトークン枠を
+// 食い潰す問題は起きない。
 
 // 小説生成では Gemini の安全フィルタを無効化する (Gemini 2.0+ は threshold='OFF' に対応)。
 // 旧 API の BLOCK_NONE と違い、フィルタ評価自体を行わないため安全ブロックで途切れない。
@@ -544,8 +534,7 @@ ${sections.join('\n\n')}
     contents: [{ parts: [{ text: prompt }] }],
     safetySettings: SAFETY_SETTINGS_OFF,
     generationConfig: {
-      temperature: 0.9,
-      maxOutputTokens: maxOutputTokens(model, targetChars)
+      temperature: 0.9
     }
   }
 
