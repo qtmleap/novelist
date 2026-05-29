@@ -1,0 +1,294 @@
+import { DurableObject } from 'cloudflare:workers'
+import { PrismaD1 } from '@prisma/adapter-d1'
+import { PrismaClient } from '@/generated/prisma/client'
+import type { Env } from '@/lib/db'
+import {
+  type CastMember,
+  type CastRelation,
+  computeCostUsd,
+  type StreamChapterUsage,
+  streamChapter
+} from '@/lib/gemini/client'
+import { saveChapter } from '@/lib/novel/repository'
+import type { GeminiModel, Outline } from '@/schemas/novel.dto'
+
+// DO 起動時に worker から渡されるペイロード。プロンプト合成に必要な小説 + outline 情報を全部含む
+// (DO 側で D1 を読みに行かない: 起動時の novel スナップショットを使うほうが冪等で扱いやすい)。
+export type StartChapterGenPayload = {
+  novelId: string
+  chapterNumber: number
+  chapterTitle: string
+  targetChars: number
+  model?: GeminiModel
+  novel: {
+    title: string
+    genre: string
+    characters: string
+    setting: string
+    num_chapters: number
+    notes: string
+  }
+  outline: Outline
+  previousChapters: Array<{ chapter_number: number; content: string }>
+  style: {
+    pov: string
+    tone: string
+    age_rating?: string
+    ending?: string
+    viewpointChar?: { name: string; first_person: string }
+  }
+  cast?: CastMember[]
+  relations?: CastRelation[]
+}
+
+type Phase = 'idle' | 'streaming' | 'done' | 'error'
+
+type Subscriber = {
+  writer: WritableStreamDefaultWriter<Uint8Array>
+}
+
+export class ChapterGenerationDO extends DurableObject<Env> {
+  private subscribers: Set<Subscriber> = new Set()
+
+  // 永続化される状態 (DO がハイバネートしても保持)。
+  private phase: Phase = 'idle'
+  private buffer = ''
+  private errMsg: string | null = null
+  private chapterId: string | null = null
+  private chapterTitle: string | null = null
+
+  // この DO がいま属している (novel, chapter) — start 時に決まる。再起動時に payload を覚えていないと
+  // run() を完走できないので、payload も storage に格納する。
+  private payload: StartChapterGenPayload | null = null
+
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env)
+    void state.blockConcurrencyWhile(async () => {
+      this.phase = (await state.storage.get<Phase>('phase')) ?? 'idle'
+      this.buffer = (await state.storage.get<string>('buffer')) ?? ''
+      this.errMsg = (await state.storage.get<string | null>('errMsg')) ?? null
+      this.chapterId = (await state.storage.get<string | null>('chapterId')) ?? null
+      this.chapterTitle = (await state.storage.get<string | null>('chapterTitle')) ?? null
+      this.payload = (await state.storage.get<StartChapterGenPayload>('payload')) ?? null
+    })
+  }
+
+  // 生成開始 (idempotent: streaming 中なら no-op、done なら新しい生成で上書き)
+  async start(payload: StartChapterGenPayload): Promise<{ status: 'started' | 'already_streaming' }> {
+    if (this.phase === 'streaming') {
+      return { status: 'already_streaming' }
+    }
+    this.phase = 'streaming'
+    this.buffer = ''
+    this.errMsg = null
+    this.chapterId = null
+    this.chapterTitle = null
+    this.payload = payload
+    await this.persistAll()
+    this.ctx.waitUntil(this.run())
+    return { status: 'started' }
+  }
+
+  // SSE で接続する。現バッファ replay → 以降の差分を fan-out。
+  async openStream(): Promise<Response> {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
+    const writer = writable.getWriter()
+    const sub: Subscriber = { writer }
+    this.subscribers.add(sub)
+
+    const encoder = new TextEncoder()
+    const send = async (data: unknown) => {
+      try {
+        await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+      } catch {
+        this.subscribers.delete(sub)
+      }
+    }
+
+    // 現バッファをまとめて 1 イベントで replay
+    if (this.buffer.length > 0) await send({ delta: this.buffer })
+
+    // 既に終わっている場合は最終イベントを送って閉じる
+    if (this.phase === 'done') {
+      await send({ done: true, chapterId: this.chapterId, title: this.chapterTitle })
+      try {
+        await writer.close()
+      } catch {
+        /* already closed */
+      }
+      this.subscribers.delete(sub)
+    } else if (this.phase === 'error') {
+      await send({ error: this.errMsg ?? 'unknown_error' })
+      try {
+        await writer.close()
+      } catch {
+        /* already closed */
+      }
+      this.subscribers.delete(sub)
+    }
+
+    return new Response(readable, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no'
+      }
+    })
+  }
+
+  // 現在状態の照会 (debug 用)
+  async status(): Promise<{
+    phase: Phase
+    bufferLen: number
+    chapterId: string | null
+    title: string | null
+    error: string | null
+  }> {
+    return {
+      phase: this.phase,
+      bufferLen: this.buffer.length,
+      chapterId: this.chapterId,
+      title: this.chapterTitle,
+      error: this.errMsg
+    }
+  }
+
+  private async run() {
+    const encoder = new TextEncoder()
+    const payload = this.payload
+    if (!payload) {
+      await this.transitionError('payload_missing')
+      return
+    }
+    try {
+      const result = streamChapter(this.env, {
+        novel: payload.novel,
+        outline: payload.outline,
+        chapterNumber: payload.chapterNumber,
+        previousChapters: payload.previousChapters,
+        targetChars: payload.targetChars,
+        style: payload.style,
+        cast: payload.cast,
+        relations: payload.relations,
+        model: payload.model
+      })
+
+      const reader = result.stream.getReader()
+      const decoder = new TextDecoder()
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const delta = decoder.decode(value, { stream: true })
+          if (!delta) continue
+          this.buffer += delta
+          // バッファは細かく書きすぎると I/O コスト高なので 256 文字ごとに flush + 完了時に flush
+          if (this.buffer.length % 256 < delta.length) {
+            await this.ctx.storage.put('buffer', this.buffer)
+          }
+          const event = encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`)
+          await this.fanout(event)
+        }
+      } finally {
+        reader.releaseLock()
+      }
+
+      // 完了時 buffer flush
+      await this.ctx.storage.put('buffer', this.buffer)
+
+      // D1 へ章本文を保存
+      const prisma = this.makePrisma()
+      let saved: { id: string }
+      try {
+        saved = await saveChapter(prisma, payload.novelId, payload.chapterNumber, this.buffer, payload.chapterTitle)
+      } catch (e) {
+        await prisma.$disconnect()
+        const msg = e instanceof Error ? e.message : String(e)
+        await this.transitionError(`save_failed: ${msg}`)
+        return
+      }
+
+      // コスト記録 (best-effort)
+      try {
+        const usage: StreamChapterUsage = await result.usage
+        const costUsd = computeCostUsd(usage.model, usage.promptTokens, usage.outputTokens)
+        await prisma.chapterGenerationCost.create({
+          data: {
+            novel_id: payload.novelId,
+            chapter_number: payload.chapterNumber,
+            model: usage.model,
+            prompt_tokens: usage.promptTokens,
+            output_tokens: usage.outputTokens,
+            cost_usd: costUsd
+          }
+        })
+      } catch {
+        /* best-effort */
+      }
+      await prisma.$disconnect()
+
+      this.phase = 'done'
+      this.chapterId = saved.id
+      this.chapterTitle = payload.chapterTitle
+      await this.persistAll()
+
+      const event = encoder.encode(
+        `data: ${JSON.stringify({ done: true, chapterId: saved.id, title: payload.chapterTitle })}\n\n`
+      )
+      await this.fanout(event)
+      await this.closeAll()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      await this.transitionError(msg)
+    }
+  }
+
+  private async transitionError(msg: string) {
+    this.phase = 'error'
+    this.errMsg = msg
+    await this.persistAll()
+    const encoder = new TextEncoder()
+    const event = encoder.encode(`data: ${JSON.stringify({ error: msg })}\n\n`)
+    await this.fanout(event)
+    await this.closeAll()
+  }
+
+  private async fanout(event: Uint8Array) {
+    const dead: Subscriber[] = []
+    for (const sub of this.subscribers) {
+      try {
+        await sub.writer.write(event)
+      } catch {
+        dead.push(sub)
+      }
+    }
+    for (const d of dead) this.subscribers.delete(d)
+  }
+
+  private async closeAll() {
+    for (const sub of this.subscribers) {
+      try {
+        await sub.writer.close()
+      } catch {
+        /* already closed */
+      }
+    }
+    this.subscribers.clear()
+  }
+
+  private async persistAll() {
+    await Promise.all([
+      this.ctx.storage.put('phase', this.phase),
+      this.ctx.storage.put('buffer', this.buffer),
+      this.ctx.storage.put('errMsg', this.errMsg),
+      this.ctx.storage.put('chapterId', this.chapterId),
+      this.ctx.storage.put('chapterTitle', this.chapterTitle),
+      this.ctx.storage.put('payload', this.payload)
+    ])
+  }
+
+  private makePrisma(): PrismaClient {
+    const adapter = new PrismaD1(this.env.DB)
+    return new PrismaClient({ adapter })
+  }
+}
