@@ -201,8 +201,8 @@ function buildStyleInstruction(style: StyleParams): string {
   // age_rating で描写の踏み込み度合いを制御する (tone とは独立)。
   const ratingMap: Record<string, string> = {
     全年齢: '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること',
-    R15: '性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
-    R18: '成人向け。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
+    R15: '物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
+    R18: '成人向け。物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
   }
   const ratingLine = age_rating ? ratingMap[age_rating] : undefined
 
@@ -222,24 +222,20 @@ function buildStyleInstruction(style: StyleParams): string {
   return lines.join('\n')
 }
 
-export async function generateOutline(
-  env: Env,
+// 章立て (bulk) 生成プロンプトの本文だけ組み立てる。プレビュー用にも使う。
+export function buildOutlinePrompt(
   novel: GeminiNovelParams,
   style: StyleParams,
-  modelOverride?: GeminiModel,
   cast?: CastMember[],
   relations?: CastRelation[]
-): Promise<Outline> {
-  const model = resolveModel(env, modelOverride)
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
-
+): string {
   const styleInstruction = buildStyleInstruction(style)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
   const notesSection = buildNotesSection(novel.notes)
   const extraSections = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
 
-  const prompt = `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
+  return `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
 
 タイトル: ${novel.title}
 ジャンル: ${novel.genre}
@@ -259,6 +255,20 @@ ${extraSections ? `\n${extraSections}\n` : ''}
     ...
   ]
 }`
+}
+
+export async function generateOutline(
+  env: Env,
+  novel: GeminiNovelParams,
+  style: StyleParams,
+  modelOverride?: GeminiModel,
+  cast?: CastMember[],
+  relations?: CastRelation[]
+): Promise<Outline> {
+  const model = resolveModel(env, modelOverride)
+  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
+
+  const prompt = buildOutlinePrompt(novel, style, cast, relations)
 
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -282,12 +292,25 @@ ${extraSections ? `\n${extraSections}\n` : ''}
   const data = (await res.json()) as {
     candidates?: Array<{
       content?: { parts?: Array<{ text?: string }> }
+      finishReason?: string
+      safetyRatings?: Array<{ category: string; probability: string; blocked?: boolean }>
     }>
+    promptFeedback?: { blockReason?: string; safetyRatings?: unknown }
   }
 
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
   if (!text) {
-    throw new Error('Gemini returned empty outline response')
+    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+    const promptBlock = data.promptFeedback?.blockReason
+    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+    const detail = [
+      `finishReason=${finishReason}`,
+      promptBlock ? `promptBlockReason=${promptBlock}` : '',
+      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+    ]
+      .filter((s) => s.length > 0)
+      .join(' / ')
+    throw new Error(`Gemini returned empty outline response (${detail})`)
   }
 
   let parsed: unknown
@@ -383,10 +406,27 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
   }
 
   const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> }
+      finishReason?: string
+      safetyRatings?: Array<{ category: string; probability: string; blocked?: boolean }>
+    }>
+    promptFeedback?: { blockReason?: string; safetyRatings?: unknown }
   }
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) throw new Error('Gemini returned empty regenerateOutlineChapter response')
+  if (!text) {
+    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+    const promptBlock = data.promptFeedback?.blockReason
+    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+    const detail = [
+      `finishReason=${finishReason}`,
+      promptBlock ? `promptBlockReason=${promptBlock}` : '',
+      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+    ]
+      .filter((s) => s.length > 0)
+      .join(' / ')
+    throw new Error(`Gemini returned empty regenerateOutlineChapter response (${detail})`)
+  }
 
   let parsed: unknown
   try {
