@@ -90,7 +90,7 @@ export default function EditCharacterPage() {
           if (res.status === 404) throw new Error('登場人物が見つかりません')
           throw new Error(await readApiError(res))
         }
-        const data = (await res.json()) as Character
+        const data = await res.json()
         setCharacter(data)
       } catch (e) {
         setError(e instanceof Error ? e.message : '登場人物の取得に失敗しました')

@@ -22,7 +22,7 @@ export default function NovelsPage() {
     try {
       const res = await api.novels.$get()
       if (!res.ok) throw new Error(await readApiError(res))
-      const data = (await res.json()) as Novel[]
+      const data = await res.json()
       setNovels(data)
     } catch (e) {
       setError(e instanceof Error ? e.message : '小説一覧の取得に失敗しました')
