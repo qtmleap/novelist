@@ -245,7 +245,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
           <p className='mt-0.5 text-sm text-muted-foreground'>視点・文体トーン・エンディングを選択してください。</p>
         </div>
 
-        <div className='flex flex-wrap gap-4'>
+        <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'>
           <div className='space-y-2'>
             <Label htmlFor='pov'>視点</Label>
             <Select
@@ -257,7 +257,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                 }
               }}
             >
-              <SelectTrigger id='pov' className='w-48'>
+              <SelectTrigger id='pov' className='w-full'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -276,7 +276,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               value={form.watch('tone')}
               onValueChange={(v) => form.setValue('tone', v, { shouldValidate: false })}
             >
-              <SelectTrigger id='tone' className='w-48'>
+              <SelectTrigger id='tone' className='w-full'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -295,7 +295,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               value={form.watch('age_rating')}
               onValueChange={(v) => form.setValue('age_rating', v, { shouldValidate: false })}
             >
-              <SelectTrigger id='age_rating' className='w-32'>
+              <SelectTrigger id='age_rating' className='w-full'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -314,7 +314,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               value={form.watch('ending')}
               onValueChange={(v) => form.setValue('ending', v, { shouldValidate: false })}
             >
-              <SelectTrigger id='ending' className='w-52'>
+              <SelectTrigger id='ending' className='w-full'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -589,7 +589,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
         )}
       </div>
 
-      <Button type='submit' disabled={isSubmitting} className='w-full [&_svg]:size-5!'>
+      <Button type='submit' size='sm' disabled={isSubmitting} className='[&_svg]:size-5!'>
         {isSubmitting ? (
           <>
             <Loader2 className='animate-spin' />
