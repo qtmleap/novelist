@@ -202,7 +202,7 @@ function buildStyleInstruction(style: StyleParams): string {
   const ratingMap: Record<string, string> = {
     全年齢: '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること',
     R15: '性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
-    R18: '成人向け。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
+    R18: '成人向け。物語の登場人物はすべて 18 歳以上の成人とし、性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
   }
   const ratingLine = age_rating ? ratingMap[age_rating] : undefined
 
