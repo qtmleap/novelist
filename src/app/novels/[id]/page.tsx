@@ -197,7 +197,7 @@ export default function NovelDetailPage() {
     try {
       const res = await api.novels[':id'].$get({ param: { id } })
       if (!res.ok) throw new Error(await readApiError(res))
-      const novel = (await res.json()) as NovelWithChapters
+      const novel = await res.json()
       const outline = parseOutline(novel.outline)
       dispatch({ type: 'LOAD_OK', novel, outline })
       return { novel, outline }

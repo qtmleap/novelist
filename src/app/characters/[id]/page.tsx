@@ -54,7 +54,7 @@ export default function CharacterDetailPage() {
           if (res.status === 404) throw new Error('登場人物が見つかりません')
           throw new Error(await readApiError(res))
         }
-        const data = (await res.json()) as Character
+        const data = await res.json()
         if (!cancelled) setCharacter(data)
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : '登場人物の取得に失敗しました')
