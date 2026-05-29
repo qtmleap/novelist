@@ -62,6 +62,10 @@ type Subscriber = {
   writer: WritableStreamDefaultWriter<Uint8Array>
 }
 
+// 生成中に進捗が止まったと見なすしきい値 (ミリ秒)。DO の eviction や Gemini の sub-request kill で
+// run() が静かに死ぬケースを救う: 進捗がこの時間以上更新されていなければ stale とみなして再起動を許可する。
+const STALE_STREAMING_MS = 60_000
+
 export class ChapterGenerationDO extends DurableObject<Env> {
   private subscribers: Set<Subscriber> = new Set()
 
@@ -71,6 +75,8 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   private errMsg: string | null = null
   private chapterId: string | null = null
   private chapterTitle: string | null = null
+  // 最後に「進捗 (delta 受信や phase 遷移)」があった unix ms。stale 判定に使う。
+  private lastProgressAt = 0
 
   // この DO がいま属している (novel, chapter) — start 時に決まる。再起動時に payload を覚えていないと
   // run() を完走できないので、payload も storage に格納する。
@@ -85,13 +91,20 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.chapterId = (await state.storage.get<string | null>('chapterId')) ?? null
       this.chapterTitle = (await state.storage.get<string | null>('chapterTitle')) ?? null
       this.payload = (await state.storage.get<StartChapterGenPayload>('payload')) ?? null
+      this.lastProgressAt = (await state.storage.get<number>('lastProgressAt')) ?? 0
     })
   }
 
   // 生成開始 (idempotent: streaming 中なら no-op、done なら新しい生成で上書き)
   async start(payload: StartChapterGenPayload): Promise<{ status: 'started' | 'already_streaming' }> {
     if (this.phase === 'streaming') {
-      return { status: 'already_streaming' }
+      // DO が evict されると run() の Promise が静かに失われ、phase だけ 'streaming' のまま残ることがある。
+      // 一定時間進捗が無いものは stale 扱いで再起動させる。生きてる run() がたまたま残っていた場合は
+      // run() 側が新しい storage.put で上書きされても気付けないが、結局そのまま死ぬので問題なし。
+      const sinceProgress = Date.now() - this.lastProgressAt
+      if (sinceProgress < STALE_STREAMING_MS) {
+        return { status: 'already_streaming' }
+      }
     }
     this.phase = 'streaming'
     this.buffer = ''
@@ -99,6 +112,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     this.chapterId = null
     this.chapterTitle = null
     this.payload = payload
+    this.lastProgressAt = Date.now()
     await this.persistAll()
     this.ctx.waitUntil(this.run())
     return { status: 'started' }
@@ -195,7 +209,9 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         this.buffer += delta
         // バッファは細かく書きすぎると I/O コスト高なので 256 文字ごとに flush + 完了時に flush
         if (this.buffer.length % 256 < delta.length) {
+          this.lastProgressAt = Date.now()
           await this.ctx.storage.put('buffer', this.buffer)
+          await this.ctx.storage.put('lastProgressAt', this.lastProgressAt)
         }
         const event = encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`)
         await this.fanout(event)
@@ -315,7 +331,8 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.ctx.storage.put('errMsg', this.errMsg),
       this.ctx.storage.put('chapterId', this.chapterId),
       this.ctx.storage.put('chapterTitle', this.chapterTitle),
-      this.ctx.storage.put('payload', this.payload)
+      this.ctx.storage.put('payload', this.payload),
+      this.ctx.storage.put('lastProgressAt', this.lastProgressAt)
     ])
   }
 
