@@ -180,40 +180,21 @@ function buildStyleInstruction(style: StyleParams): string {
     povLine = '全知の三人称(神視点)'
   }
 
-  // tone × age_rating の組み合わせで官能描写の許容度を決める。
-  // 官能小説トーンのときは age_rating 行を別出ししない (toneLine に統合)。
-  let toneLine: string
-  let ratingLine: string | undefined
-  if (tone === 'ライトな官能小説') {
-    if (age_rating === 'R18') {
-      toneLine = '官能小説の文体。性的な行為・身体描写・直接的な語彙を制限なく用いてよく、踏み込んだ表現を許容する'
-      ratingLine = undefined
-    } else if (age_rating === 'R15') {
-      toneLine =
-        '官能小説の文体。性的な行為や描写そのものは許容するが、性器・性行為そのものを指す直接的な語彙 (露骨な俗語など) は禁止し、比喩・暗喩・身体反応・感覚 (息遣い・体温・触れ合い) で示唆すること'
-      ratingLine = undefined
-    } else {
-      // 全年齢 + 官能トーン: 仄めかしレベルに抑制。
-      toneLine =
-        '官能的な雰囲気のある文体。性的な部位や行為の直接的描写は避け、ロマンスや身体的緊張・距離感の揺らぎを仄めかす程度に留めること'
-      ratingLine = undefined
-    }
-  } else {
-    const toneMap: Record<string, string> = {
-      ライトノベル調: '口語的で軽快なライトノベル調の文体',
-      一般文芸: '標準的な一般文芸の文体',
-      文学的: '硬質で描写を重視した文学的な文体',
-      やさしい文体: '平易でやさしい童話風の文体'
-    }
-    toneLine = toneMap[tone] ?? '標準的な一般文芸の文体'
-
-    const ratingMap: Record<string, string> = {
-      全年齢: '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること',
-      R15: '思春期向け。性的描写は仄めかし程度に留め、直接的な描写は避けること',
-      R18: '成人向け。必要に応じて踏み込んだ描写を可能とするが、本作の文体トーンの範囲を超えないこと'
-    }
-    ratingLine = age_rating ? ratingMap[age_rating] : undefined
+  const toneMap: Record<string, string> = {
+    ライトノベル調: '口語的で軽快なライトノベル調の文体',
+    一般文芸: '標準的な一般文芸の文体',
+    文学的: '硬質で描写を重視した文学的な文体',
+    やさしい文体: '平易でやさしい童話風の文体'
   }
+  const toneLine = toneMap[tone] ?? '標準的な一般文芸の文体'
+
+  // age_rating で描写の踏み込み度合いを制御する (tone とは独立)。
+  const ratingMap: Record<string, string> = {
+    全年齢: '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること',
+    R15: '性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
+    R18: '成人向け。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
+  }
+  const ratingLine = age_rating ? ratingMap[age_rating] : undefined
 
   const endingMap: Record<string, string> = {
     ハッピーエンド: '主要な葛藤が解決し、登場人物が報われる前向きな結末へ向けて構成すること',

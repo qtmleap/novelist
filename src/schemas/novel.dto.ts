@@ -7,7 +7,7 @@ export const DEFAULT_TARGET_CHARS = 4000
 
 // 文体: 視点(POV) と 文体トーン。生成プロンプトに反映する。
 export const POV_OPTIONS = ['一人称', '三人称一元視点', '三人称多元視点', '三人称神視点'] as const
-export const TONE_OPTIONS = ['ライトノベル調', '一般文芸', '文学的', 'やさしい文体', 'ライトな官能小説'] as const
+export const TONE_OPTIONS = ['ライトノベル調', '一般文芸', '文学的', 'やさしい文体'] as const
 export const DEFAULT_POV = '一人称'
 export const DEFAULT_TONE = '一般文芸'
 
