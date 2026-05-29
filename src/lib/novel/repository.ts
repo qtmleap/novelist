@@ -12,6 +12,7 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
       target_chars: input.target_chars,
       pov: input.pov,
       tone: input.tone,
+      age_rating: input.age_rating,
       pov_character_id: input.pov_character_id,
       ending: input.ending
     }
@@ -179,6 +180,7 @@ export async function listNovels(prisma: PrismaClient) {
       target_chars: true,
       pov: true,
       tone: true,
+      age_rating: true,
       pov_character_id: true,
       ending: true,
       outline: true,
@@ -203,6 +205,7 @@ export async function updateNovel(prisma: PrismaClient, id: string, input: Creat
         target_chars: input.target_chars,
         pov: input.pov,
         tone: input.tone,
+        age_rating: input.age_rating,
         pov_character_id: input.pov_character_id,
         ending: input.ending
       }
