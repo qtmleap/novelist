@@ -63,6 +63,8 @@ export const CreateNovelSchema = z.object({
   age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
   pov_character_id: z.string().max(50).default(''),
   ending: z.string().max(30).default(DEFAULT_ENDING),
+  // プロンプトに追加で混ぜる自由記述 (口調の傾向、固有名詞表記、避けたい展開など)
+  notes: z.string().max(2000).default(''),
   character_links: z.array(NovelCharacterLinkSchema).max(50).default([]),
   relations: z.array(NovelCharacterRelationInputSchema).max(100).default([])
 })
@@ -109,6 +111,7 @@ export const NovelSchema = z.object({
   age_rating: z.string(),
   pov_character_id: z.string(),
   ending: z.string(),
+  notes: z.string(),
   outline: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string()
