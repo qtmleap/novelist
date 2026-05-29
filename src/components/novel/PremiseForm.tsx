@@ -13,9 +13,11 @@ import { api } from '@/lib/api/client'
 import type { Character } from '@/schemas/character.dto'
 import { ADDRESS_STYLES, CHARACTER_ROLES } from '@/schemas/character.dto'
 import {
+  AGE_RATING_OPTIONS,
   CHAPTER_LENGTH_OPTIONS,
   type CreateNovelInput,
   CreateNovelSchema,
+  DEFAULT_AGE_RATING,
   DEFAULT_ENDING,
   DEFAULT_POV,
   DEFAULT_TARGET_CHARS,
@@ -58,6 +60,7 @@ const EMPTY_DEFAULTS: CreateNovelInput = {
   target_chars: DEFAULT_TARGET_CHARS,
   pov: DEFAULT_POV,
   tone: DEFAULT_TONE,
+  age_rating: DEFAULT_AGE_RATING,
   pov_character_id: '',
   ending: DEFAULT_ENDING,
   character_links: [],
@@ -280,6 +283,25 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                 {TONE_OPTIONS.map((t) => (
                   <SelectItem key={t} value={t}>
                     {t}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className='space-y-2'>
+            <Label htmlFor='age_rating'>年齢指定</Label>
+            <Select
+              value={form.watch('age_rating')}
+              onValueChange={(v) => form.setValue('age_rating', v, { shouldValidate: false })}
+            >
+              <SelectTrigger id='age_rating' className='w-32'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {AGE_RATING_OPTIONS.map((r) => (
+                  <SelectItem key={r} value={r}>
+                    {r}
                   </SelectItem>
                 ))}
               </SelectContent>
