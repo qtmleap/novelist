@@ -1,5 +1,6 @@
 'use client'
 
+import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 import { CharacterForm } from '@/components/character/CharacterForm'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
@@ -8,6 +9,7 @@ import { api, readApiError } from '@/lib/api/client'
 import type { CreateCharacterInput } from '@/schemas/character.dto'
 
 export default function NewCharacterPage() {
+  const router = useRouter()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -16,7 +18,7 @@ export default function NewCharacterPage() {
     setError(null)
     try {
       await api.createCharacter(data)
-      window.location.assign('/characters')
+      router.push('/characters')
     } catch (e) {
       setError(readApiError(e, '登場人物の登録に失敗しました'))
       setIsSubmitting(false)
