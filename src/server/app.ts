@@ -1,5 +1,6 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
+import { z } from 'zod'
 import type { StartChapterGenPayload } from '@/lib/chapter-gen-do'
 import {
   createCharacter,
@@ -316,6 +317,22 @@ export const app = new Hono()
         const msg = e instanceof Error ? e.message : String(e)
         return c.json({ error: 'generation_failed', detail: msg }, 502)
       }
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+
+  // 章立ての手動編集。AI 生成ではなくユーザーが直接 title/summary を書き換える経路。
+  // 既存章本文には触らない (本文と outline がズレた場合は別途章本文を再生成する想定)。
+  .put('/novels/:id/outline', requireAuth, zValidator('json', z.object({ outline: OutlineSchema })), async (c) => {
+    const id = c.req.param('id')
+    const { outline } = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      const existing = await prisma.novel.findUnique({ where: { id }, select: { id: true } })
+      if (!existing) return c.json({ error: 'not_found' }, 404)
+      await saveOutline(prisma, id, JSON.stringify(outline))
+      return c.json({ outline })
     } finally {
       await prisma.$disconnect()
     }
