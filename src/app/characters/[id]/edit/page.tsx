@@ -1,6 +1,7 @@
 'use client'
 
 import { Loader2, Trash2 } from 'lucide-react'
+import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { CharacterForm } from '@/components/character/CharacterForm'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
@@ -69,6 +70,7 @@ function EditSkeleton() {
 }
 
 export default function EditCharacterPage() {
+  const router = useRouter()
   const [characterId, setCharacterId] = useState<string>('')
   const [character, setCharacter] = useState<Character | null>(null)
   const [loading, setLoading] = useState(true)
@@ -103,7 +105,7 @@ export default function EditCharacterPage() {
     setSubmitError(null)
     try {
       await api.updateCharacter(data, { params: { id: characterId } })
-      window.location.assign(`/characters/${characterId}`)
+      router.push(`/characters/${characterId}`)
     } catch (e) {
       setSubmitError(readApiError(e, '登場人物の更新に失敗しました'))
       setIsSubmitting(false)
@@ -116,7 +118,7 @@ export default function EditCharacterPage() {
     setSubmitError(null)
     try {
       await api.deleteCharacter(undefined, { params: { id: characterId } })
-      window.location.assign('/characters')
+      router.push('/characters')
     } catch (e) {
       setSubmitError(readApiError(e, '削除に失敗しました'))
       setIsDeleting(false)

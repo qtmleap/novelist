@@ -1,5 +1,6 @@
 'use client'
 
+import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { EMPTY_DEFAULTS, PremiseForm } from '@/components/novel/PremiseForm'
@@ -9,6 +10,7 @@ import { getEditorModel, getWriterModel } from '@/lib/settings'
 import type { CreateNovelInput } from '@/schemas/novel.dto'
 
 export default function NewNovelPage() {
+  const router = useRouter()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -25,7 +27,7 @@ export default function NewNovelPage() {
     setError(null)
     try {
       const novel = await api.createNovel(data)
-      window.location.assign(`/novels/${novel.id}`)
+      router.push(`/novels/${novel.id}`)
     } catch (e) {
       setError(readApiError(e, '小説の作成に失敗しました'))
       setIsSubmitting(false)
