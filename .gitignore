@@ -247,3 +247,7 @@ docs/references/*.pdf
 # Prisma local SQLite for migrate diff (D1 itself uses .wrangler/state/)
 prisma/db.sqlite
 prisma/db.sqlite-journal
+
+# Vinext / Next-style generated files
+.vinext/
+next-env.d.ts
