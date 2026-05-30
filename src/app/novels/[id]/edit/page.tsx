@@ -1,6 +1,7 @@
 'use client'
 
 import { Loader2, Trash2 } from 'lucide-react'
+import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
@@ -58,6 +59,7 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
 }
 
 export default function NovelEditPage() {
+  const router = useRouter()
   const [novelId, setNovelId] = useState<string | null>(null)
   const [initialValues, setInitialValues] = useState<CreateNovelInput | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -91,7 +93,7 @@ export default function NovelEditPage() {
     setError(null)
     try {
       await api.updateNovel(data, { params: { id: novelId } })
-      window.location.assign(`/novels/${novelId}`)
+      router.push(`/novels/${novelId}`)
     } catch (e) {
       setError(readApiError(e, '小説の更新に失敗しました'))
       setIsSubmitting(false)
@@ -104,7 +106,7 @@ export default function NovelEditPage() {
     setError(null)
     try {
       await api.deleteNovel(undefined, { params: { id: novelId } })
-      window.location.assign('/novels')
+      router.push('/novels')
     } catch (e) {
       setError(readApiError(e, '削除に失敗しました'))
       setIsDeleting(false)

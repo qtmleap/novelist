@@ -1,6 +1,7 @@
 'use client'
 
 import { Copy, Loader2, Pencil } from 'lucide-react'
+import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { PageHeader } from '@/components/PageHeader'
@@ -37,6 +38,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 export default function CharacterDetailPage() {
+  const router = useRouter()
   const [character, setCharacter] = useState<Character | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -62,7 +64,7 @@ export default function CharacterDetailPage() {
         speech_examples: character.speech_examples,
         description: character.description
       })
-      window.location.assign(`/characters/${created.id}/edit`)
+      router.push(`/characters/${created.id}/edit`)
     } catch (e) {
       setError(readApiError(e, '登場人物のコピーに失敗しました'))
       setIsCopying(false)
