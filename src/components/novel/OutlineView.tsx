@@ -1,9 +1,12 @@
 'use client'
 
-import { BookMarked, Check, ChevronRight, Loader2 } from 'lucide-react'
+import { BookMarked, Check, ChevronRight, Loader2, Pencil, X } from 'lucide-react'
 import Link from 'next/link'
-import type { ReactNode } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import type { ChapterCost, Outline } from '@/schemas/novel.dto'
 
@@ -20,6 +23,11 @@ type Props = {
   // novel.num_chapters。outline がまだ無い章や、outline 枠を上回る章数を持つ novel でも
   // 全章ぶんの枠を表示するため、明示で渡してもらう。
   expectedTotal?: number
+  // 手動編集のセーブ。未指定なら編集ボタンは出さない。
+  // 既存 chapter_number の集合は維持し、title/summary だけ変更される。
+  onSaveOutline?: (outline: Outline) => Promise<void>
+  // 編集を許可するか (= 認証済かつ生成中でない)。
+  canEdit?: boolean
 }
 
 function fmtTokens(n: number): string {
@@ -34,8 +42,21 @@ export function OutlineView({
   costs,
   streamingIndex = null,
   novelId,
-  expectedTotal = 0
+  expectedTotal = 0,
+  onSaveOutline,
+  canEdit = false
 }: Props) {
+  // 編集モード中だけ使う一時 outline。読み取り専用ビューと、保存中の loading 状態を別途持つ。
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<Outline['chapters']>([])
+  const [saving, setSaving] = useState(false)
+
+  // outline (prop) が外から変わったら draft も追従させる (再生成後など)。
+  // 編集中の差分は捨てる: 衝突するくらいなら最新を採用する方針。
+  useEffect(() => {
+    setDraft(outline?.chapters ?? [])
+  }, [outline])
+
   const chapterByNumber = new Map<number, ChapterData>()
   for (const c of chapters ?? []) chapterByNumber.set(c.number, c)
   const costByNumber = new Map<number, ChapterCost>()
@@ -49,6 +70,30 @@ export function OutlineView({
   if (maxNumber === 0 && !isGenerating) return null
   const slots = Array.from({ length: maxNumber }, (_, i) => i + 1)
 
+  const editableSaveable = onSaveOutline !== undefined && canEdit && !isGenerating
+
+  const handleStartEdit = () => {
+    setDraft(outline?.chapters ?? [])
+    setEditing(true)
+  }
+  const handleCancelEdit = () => {
+    setDraft(outline?.chapters ?? [])
+    setEditing(false)
+  }
+  const handleSave = async () => {
+    if (onSaveOutline === undefined) return
+    setSaving(true)
+    try {
+      await onSaveOutline({ chapters: draft })
+      setEditing(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+  const updateDraft = (number: number, patch: Partial<Outline['chapters'][number]>) => {
+    setDraft((prev) => prev.map((c) => (c.chapter_number === number ? { ...c, ...patch } : c)))
+  }
+
   return (
     <div className='space-y-3'>
       <div className='flex items-center justify-between gap-2'>
@@ -56,7 +101,41 @@ export function OutlineView({
           <BookMarked className='size-5 text-primary' />
           {isGenerating && !outline ? '章立て生成中...' : '章立て'}
         </div>
-        {regenerateSlot}
+        {editing ? (
+          <div className='flex items-center gap-2'>
+            <Button
+              type='button'
+              size='sm'
+              variant='ghost'
+              className='[&_svg]:size-5!'
+              disabled={saving}
+              onClick={handleCancelEdit}
+            >
+              <X />
+              キャンセル
+            </Button>
+            <Button
+              type='button'
+              size='sm'
+              className='[&_svg]:size-5!'
+              disabled={saving || draft.length === 0}
+              onClick={handleSave}
+            >
+              {saving ? <Loader2 className='animate-spin' /> : <Check />}
+              保存
+            </Button>
+          </div>
+        ) : (
+          <div className='flex items-center gap-2'>
+            {editableSaveable && outline !== null && outline.chapters.length > 0 && (
+              <Button type='button' size='sm' variant='outline' className='[&_svg]:size-5!' onClick={handleStartEdit}>
+                <Pencil />
+                編集
+              </Button>
+            )}
+            {regenerateSlot}
+          </div>
+        )}
       </div>
       <ol className='divide-y border-y'>
         {slots.map((n) => {
@@ -64,9 +143,36 @@ export function OutlineView({
           const chapterData = chapterByNumber.get(n)
           const done = chapterData?.done === true
           const isStreaming = streamingIndex === n
-          const linkable = done && novelId !== undefined
+          const linkable = done && novelId !== undefined && !editing
           const cost = costByNumber.get(n)
           const hasOutlineEntry = ch !== undefined
+          const draftChapter = draft.find((d) => d.chapter_number === n)
+          // 編集モードでは draft のエントリだけを並べる (outline.chapters の中身を直接いじる)。
+          // outline 未生成の slot は編集対象に含めない (= 章立て生成側で増やす流れ)。
+          if (editing && draftChapter !== undefined) {
+            return (
+              <li key={n} className='flex items-start gap-3 px-4 py-3'>
+                <span className='mt-1 flex size-6 shrink-0 items-center justify-center rounded bg-muted text-xs font-semibold tabular-nums text-muted-foreground'>
+                  {n}
+                </span>
+                <div className='min-w-0 flex-1 space-y-2'>
+                  <Input
+                    value={draftChapter.title}
+                    onChange={(e) => updateDraft(n, { title: e.target.value })}
+                    placeholder='章タイトル'
+                    className='text-sm'
+                  />
+                  <Textarea
+                    value={draftChapter.summary}
+                    onChange={(e) => updateDraft(n, { summary: e.target.value })}
+                    placeholder='章の概要'
+                    rows={3}
+                    className='resize-none text-xs leading-relaxed'
+                  />
+                </div>
+              </li>
+            )
+          }
           const rowContent = (
             <>
               <span className='flex size-6 shrink-0 items-center justify-center rounded bg-muted text-xs font-semibold tabular-nums text-muted-foreground'>
