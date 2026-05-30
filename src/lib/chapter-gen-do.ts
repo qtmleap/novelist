@@ -66,6 +66,11 @@ type Subscriber = {
 // run() が静かに死ぬケースを救う: 進捗がこの時間以上更新されていなければ stale とみなして再起動を許可する。
 const STALE_STREAMING_MS = 60_000
 
+// DO の keep-alive alarm の間隔。次の alarm までの時間。CF DO は active alarm が future にある間は
+// hibernate されないので、streaming 中は alarm を chain して常に in-memory に保つ。
+// SSE subscriber が居なくなっても (= ブラウザ閉じても) run() の Promise が evict で消えない。
+const KEEPALIVE_INTERVAL_MS = 30_000
+
 export class ChapterGenerationDO extends DurableObject<Env> {
   private subscribers: Set<Subscriber> = new Set()
 
@@ -114,8 +119,31 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     this.payload = payload
     this.lastProgressAt = Date.now()
     await this.persistAll()
+    // alarm を将来時刻に立てると DO が hibernate されない。run() が evict で消えても、
+    // alarm() ハンドラ内で stale 判定 → 再起動できる。
+    await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_INTERVAL_MS)
     this.ctx.waitUntil(this.run())
     return { status: 'started' }
+  }
+
+  // DO の keep-alive 兼 watchdog。CF DO はこのメソッドを setAlarm で予約した時刻に呼ぶ。
+  // - phase=streaming が続いている限り次の alarm を立てて keep-alive
+  // - 進捗が停止 (lastProgressAt が stale) してたら run() を再起動
+  // - phase=done/error/idle なら alarm chain を終わらせて DO は自然に hibernate へ
+  async alarm() {
+    if (this.phase !== 'streaming') return
+    const sinceProgress = Date.now() - this.lastProgressAt
+    if (sinceProgress > STALE_STREAMING_MS && this.payload !== null) {
+      // run() の Promise が消えているはずなので新しく起動。buffer 等は start() と同じ初期化を行う。
+      this.buffer = ''
+      this.errMsg = null
+      this.chapterId = null
+      this.chapterTitle = null
+      this.lastProgressAt = Date.now()
+      await this.persistAll()
+      this.ctx.waitUntil(this.run())
+    }
+    await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_INTERVAL_MS)
   }
 
   // SSE で接続する。現バッファ replay → 以降の差分を fan-out。
@@ -207,9 +235,11 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         const delta = decoder.decode(chunk, { stream: true })
         if (!delta) continue
         this.buffer += delta
+        // lastProgressAt は delta ごとに更新する (in-memory のみ)。
+        // alarm() の stale 判定や、後続の persist のタイミングに使う。
+        this.lastProgressAt = Date.now()
         // バッファは細かく書きすぎると I/O コスト高なので 256 文字ごとに flush + 完了時に flush
         if (this.buffer.length % 256 < delta.length) {
-          this.lastProgressAt = Date.now()
           await this.ctx.storage.put('buffer', this.buffer)
           await this.ctx.storage.put('lastProgressAt', this.lastProgressAt)
         }
