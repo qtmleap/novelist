@@ -81,6 +81,15 @@ export const api = makeApi([
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   {
+    method: 'put',
+    path: '/api/novels/:id/outline',
+    alias: 'updateOutline',
+    description: '章立てを手動で上書き保存',
+    parameters: [{ name: 'body', type: 'Body', schema: z.object({ outline: OutlineSchema }) }],
+    response: OutlineWrapperSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
     method: 'get',
     path: '/api/novels/:id/outline/preview',
     alias: 'previewOutlinePrompt',
