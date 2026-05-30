@@ -1,6 +1,7 @@
 'use client'
 
-import { Loader2, Pencil, RefreshCw, Sparkles } from 'lucide-react'
+import { Copy, Loader2, Pencil, RefreshCw, Sparkles } from 'lucide-react'
+import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { ChapterSelectionDialog } from '@/components/novel/ChapterSelectionDialog'
@@ -195,6 +196,7 @@ function NovelTotals({
 }
 
 export default function NovelDetailPage() {
+  const router = useRouter()
   const [state, dispatch] = useReducer(reducer, INITIAL)
   const abortRef = useRef<AbortController | null>(null)
   const novelIdRef = useRef<string | null>(null)
@@ -203,8 +205,45 @@ export default function NovelDetailPage() {
   const [promptPreviewOpen, setPromptPreviewOpen] = useState(false)
   const [promptPreview, setPromptPreview] = useState<string | null>(null)
   const [promptPreviewLoading, setPromptPreviewLoading] = useState(false)
+  const [isCopying, setIsCopying] = useState(false)
   const auth = useAuth()
   const editAllowed = canEdit(auth)
+
+  // 小説 (設定) のコピー。cast / relations までは複製するが、outline / 章本文 / コスト履歴は持ち越さない。
+  // 新しい novel に遷移して編集ページから細かい修正を始められるようにする。
+  const handleCopy = async (novel: NovelWithChapters) => {
+    setIsCopying(true)
+    try {
+      const created = await api.createNovel({
+        title: `${novel.title} (コピー)`,
+        genre: novel.genre,
+        characters: novel.characters,
+        setting: novel.setting,
+        num_chapters: novel.num_chapters,
+        target_chars: novel.target_chars,
+        pov: novel.pov,
+        tone: novel.tone,
+        age_rating: novel.age_rating,
+        pov_character_id: novel.pov_character_id,
+        ending: novel.ending,
+        notes: novel.notes,
+        editor_model: GeminiModelSchema.parse(novel.editor_model),
+        writer_model: GeminiModelSchema.parse(novel.writer_model),
+        character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
+        relations: novel.relations.map((r) => ({
+          source_character_id: r.source_character_id,
+          target_character_id: r.target_character_id,
+          relation: r.relation,
+          description: r.description,
+          address_override: r.address_override
+        }))
+      })
+      router.push(`/novels/${created.id}/edit`)
+    } catch (e) {
+      dispatch({ type: 'LOAD_ERR', error: readApiError(e, '小説のコピーに失敗しました') })
+      setIsCopying(false)
+    }
+  }
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
     try {
@@ -381,6 +420,18 @@ export default function NovelDetailPage() {
                 {outline && outline.chapters.length >= novel.num_chapters ? '章立てを再生成' : '章立てを生成'}
               </Button>
             )}
+            <Button
+              type='button'
+              size='sm'
+              variant='outline'
+              className='[&_svg]:size-5!'
+              disabled={!editAllowed || isCopying || isGenerating}
+              title={!editAllowed ? 'ログインが必要です' : undefined}
+              onClick={() => handleCopy(novel)}
+            >
+              {isCopying ? <Loader2 className='animate-spin' /> : <Copy />}
+              コピー
+            </Button>
             {editAllowed ? (
               <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
                 <a href={`/novels/${novel.id}/edit`}>
