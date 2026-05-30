@@ -479,6 +479,19 @@ export default function NovelDetailPage() {
           streamingIndex={streamingIndex}
           novelId={novel.id}
           expectedTotal={novel.num_chapters}
+          canEdit={editAllowed}
+          onSaveOutline={async (next) => {
+            const id = novelIdRef.current
+            if (id === null) return
+            try {
+              const res = await api.updateOutline({ outline: next }, { params: { id } })
+              // server レスポンスを正として state を更新する。loadNovel まで叩くと SSE 再接続でフラッシュされるので避ける。
+              dispatch({ type: 'OUTLINE_OK', outline: res.outline })
+            } catch (e) {
+              dispatch({ type: 'OUTLINE_ERR', error: readApiError(e, '章立ての保存に失敗しました') })
+              throw e
+            }
+          }}
         />
       )}
 
