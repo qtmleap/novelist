@@ -1,5 +1,6 @@
 'use client'
 
+import { useRouter } from 'next/navigation'
 import { useEffect } from 'react'
 import { PageHeader } from '@/components/PageHeader'
 import { useAuth } from '@/hooks/useAuth'
@@ -11,12 +12,13 @@ import { useAuth } from '@/hooks/useAuth'
 // 認証済みになったら novels 一覧へ遷移する。匿名のままここに居る状況は CF Access の reload 待ち。
 export default function LoginPage() {
   const auth = useAuth()
+  const router = useRouter()
 
   useEffect(() => {
     if (auth.status === 'authenticated') {
-      window.location.replace('/novels')
+      router.replace('/novels')
     }
-  }, [auth.status])
+  }, [auth.status, router])
 
   return (
     <div className='space-y-6'>

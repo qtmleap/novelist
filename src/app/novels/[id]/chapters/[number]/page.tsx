@@ -2,7 +2,7 @@
 
 import { Loader2, RefreshCw, Trash2 } from 'lucide-react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
@@ -58,6 +58,7 @@ function ChapterMeta({ chars, cost }: { chars: number; cost?: ChapterCost }) {
 
 export default function ChapterDetailPage() {
   const pathname = usePathname()
+  const router = useRouter()
   const { novelId, chapterNumber } = useMemo(() => parseRoute(pathname), [pathname])
   const [novel, setNovel] = useState<NovelWithChapters | null>(null)
   const [loading, setLoading] = useState(true)
@@ -162,7 +163,7 @@ export default function ChapterDetailPage() {
     setIsDeleting(true)
     try {
       await api.deleteChapter(undefined, { params: { id: novelId, number: String(chapterNumber) } })
-      window.location.assign(`/novels/${novelId}`)
+      router.push(`/novels/${novelId}`)
     } catch (e) {
       setError(readApiError(e, '削除に失敗しました'))
       setIsDeleting(false)

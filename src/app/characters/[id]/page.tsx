@@ -1,6 +1,7 @@
 'use client'
 
-import { Pencil } from 'lucide-react'
+import { Copy, Loader2, Pencil } from 'lucide-react'
+import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { PageHeader } from '@/components/PageHeader'
@@ -37,12 +38,38 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 export default function CharacterDetailPage() {
+  const router = useRouter()
   const [character, setCharacter] = useState<Character | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [id, setId] = useState<string>('')
+  const [isCopying, setIsCopying] = useState(false)
   const auth = useAuth()
   const editAllowed = canEdit(auth)
+
+  const handleCopy = async () => {
+    if (!character) return
+    setIsCopying(true)
+    setError(null)
+    try {
+      const created = await api.createCharacter({
+        // name にだけ `(コピー)` を付けて識別。残りはそのまま複製。
+        name: `${character.name} (コピー)`,
+        gender: character.gender,
+        age: character.age,
+        occupation: character.occupation,
+        appearance: character.appearance,
+        first_person: character.first_person,
+        address_others: character.address_others,
+        speech_examples: character.speech_examples,
+        description: character.description
+      })
+      router.push(`/characters/${created.id}/edit`)
+    } catch (e) {
+      setError(readApiError(e, '登場人物のコピーに失敗しました'))
+      setIsCopying(false)
+    }
+  }
 
   useEffect(() => {
     const cid = getCharacterId()
@@ -79,19 +106,33 @@ export default function CharacterDetailPage() {
               <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>登場人物</p>
               <h1 className='mt-1 text-xl font-semibold'>{character.name}</h1>
             </div>
-            {editAllowed ? (
-              <Button asChild size='sm' className='[&_svg]:size-5!'>
-                <a href={`/characters/${id}/edit`}>
+            <div className='flex shrink-0 items-center gap-2'>
+              <Button
+                type='button'
+                size='sm'
+                variant='outline'
+                className='[&_svg]:size-5!'
+                disabled={!editAllowed || isCopying}
+                title={!editAllowed ? 'ログインが必要です' : undefined}
+                onClick={handleCopy}
+              >
+                {isCopying ? <Loader2 className='animate-spin' /> : <Copy />}
+                コピー
+              </Button>
+              {editAllowed ? (
+                <Button asChild size='sm' className='[&_svg]:size-5!'>
+                  <a href={`/characters/${id}/edit`}>
+                    <Pencil />
+                    編集
+                  </a>
+                </Button>
+              ) : (
+                <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
                   <Pencil />
                   編集
-                </a>
-              </Button>
-            ) : (
-              <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
-                <Pencil />
-                編集
-              </Button>
-            )}
+                </Button>
+              )}
+            </div>
           </div>
 
           <div className='divide-y border-y'>
