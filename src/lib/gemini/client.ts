@@ -1,8 +1,47 @@
+import { z } from 'zod'
 import type { Env } from '@/lib/db'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
 import { type GeminiModel, type Outline, type OutlineChapter, OutlineSchema } from '@/schemas/novel.dto'
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
+
+// generateContent / streamGenerateContent 共通レスポンス。任意フィールドが多いので
+// すべて optional で受けて safeParse する (壊れたチャンクは無視 = 既存挙動)。
+const GeminiCandidateSchema = z.object({
+  content: z
+    .object({
+      parts: z.array(z.object({ text: z.string().optional() })).optional()
+    })
+    .optional(),
+  finishReason: z.string().optional(),
+  safetyRatings: z
+    .array(
+      z.object({
+        category: z.string(),
+        probability: z.string(),
+        blocked: z.boolean().optional()
+      })
+    )
+    .optional()
+})
+
+const GeminiUsageMetadataSchema = z.object({
+  promptTokenCount: z.number().optional(),
+  candidatesTokenCount: z.number().optional(),
+  totalTokenCount: z.number().optional()
+})
+
+const GeminiResponseSchema = z.object({
+  candidates: z.array(GeminiCandidateSchema).optional(),
+  promptFeedback: z
+    .object({
+      blockReason: z.string().optional(),
+      safetyRatings: z.unknown().optional()
+    })
+    .optional(),
+  usageMetadata: GeminiUsageMetadataSchema.optional()
+})
+type GeminiResponse = z.infer<typeof GeminiResponseSchema>
 
 type GeminiNovelParams = {
   title: string
@@ -10,6 +49,16 @@ type GeminiNovelParams = {
   characters: string
   setting: string
   num_chapters: number
+  // ユーザーが PremiseForm の備考欄に書いた追加指示 (任意)。
+  notes?: string
+}
+
+// 章立て生成時にのみ参照する「物語に取り込みたい要素」セクション。
+// 箇条書きで何個でも記述された自由テキストを、AI が物語の自然な箇所に振り分けて
+// outline の構成 (各章の summary) に反映することを期待する。
+function buildNotesSection(notes: string | undefined): string {
+  if (!notes || notes.trim().length === 0) return ''
+  return `【物語に取り込みたい要素】\n${notes.trim()}\n上記の各項目を、物語のどこかに自然に組み込むよう章立て (各章の概要) に反映してください。配置や順序は AI 側で判断して構いません。`
 }
 
 type ViewpointChar = {
@@ -45,6 +94,7 @@ type StyleParams = {
   pov: string
   tone: string
   ending?: string
+  age_rating?: string
   viewpointChar?: ViewpointChar
 }
 
@@ -58,16 +108,6 @@ type StreamChapterParams = {
   cast?: CastMember[]
   relations?: CastRelation[]
   model?: GeminiModel
-}
-
-const OUTPUT_TOKEN_CAP: Record<string, number> = {
-  'gemini-3.5-flash': 65536,
-  'gemini-3.1-pro-preview': 65536,
-  'gemini-3-flash-preview': 65536,
-  'gemini-3.1-flash-lite': 65536,
-  'gemini-2.5-pro': 65536,
-  'gemini-2.5-flash': 65536,
-  'gemini-2.5-flash-lite': 65536
 }
 
 type ModelPricing = { input: number; output: number }
@@ -90,10 +130,10 @@ export function computeCostUsd(model: string, promptTokens: number, outputTokens
   return (promptTokens * pricing.input + outputTokens * pricing.output) / 1_000_000
 }
 
-function maxOutputTokens(model: string, targetChars: number): number {
-  const cap = OUTPUT_TOKEN_CAP[model] ?? 8192
-  return Math.min(targetChars * 2 + 1024, cap)
-}
+// maxOutputTokens は意図的に指定しない: prompt 側で「約 N 文字」と指示しているし、模型自体は
+// 自然完了するので人工的な cap を被せると却って MAX_TOKENS の原因になる。
+// thinking もデフォルト動作に任せる (品質を取る) — 出力 cap を外したので thinking がトークン枠を
+// 食い潰す問題は起きない。
 
 // 小説生成では Gemini の安全フィルタを無効化する (Gemini 2.0+ は threshold='OFF' に対応)。
 // 旧 API の BLOCK_NONE と違い、フィルタ評価自体を行わないため安全ブロックで途切れない。
@@ -160,7 +200,7 @@ function buildWritingRules(cast: CastMember[] | undefined): string {
 }
 
 function buildStyleInstruction(style: StyleParams): string {
-  const { pov, tone, ending, viewpointChar: vc } = style
+  const { pov, tone, ending, age_rating, viewpointChar: vc } = style
 
   let povLine: string
   if (pov === '一人称') {
@@ -187,6 +227,14 @@ function buildStyleInstruction(style: StyleParams): string {
   }
   const toneLine = toneMap[tone] ?? '標準的な一般文芸の文体'
 
+  // age_rating で描写の踏み込み度合いを制御する (tone とは独立)。
+  const ratingMap: Record<string, string> = {
+    全年齢: '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること',
+    R15: '物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
+    R18: '成人向け。物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
+  }
+  const ratingLine = age_rating ? ratingMap[age_rating] : undefined
+
   const endingMap: Record<string, string> = {
     ハッピーエンド: '主要な葛藤が解決し、登場人物が報われる前向きな結末へ向けて構成すること',
     バッドエンド: '救いの少ない悲劇的な結末へ向けて構成し、終章で喪失や敗北を直視すること',
@@ -197,26 +245,26 @@ function buildStyleInstruction(style: StyleParams): string {
   }
   const endingLine = ending && ending !== '未指定' ? endingMap[ending] : undefined
 
-  return endingLine ? `視点: ${povLine}\n文体: ${toneLine}\n結末: ${endingLine}` : `視点: ${povLine}\n文体: ${toneLine}`
+  const lines = [`視点: ${povLine}`, `文体: ${toneLine}`]
+  if (ratingLine) lines.push(`年齢指定: ${ratingLine}`)
+  if (endingLine) lines.push(`結末: ${endingLine}`)
+  return lines.join('\n')
 }
 
-export async function generateOutline(
-  env: Env,
+// 章立て (bulk) 生成プロンプトの本文だけ組み立てる。プレビュー用にも使う。
+export function buildOutlinePrompt(
   novel: GeminiNovelParams,
   style: StyleParams,
-  modelOverride?: GeminiModel,
   cast?: CastMember[],
   relations?: CastRelation[]
-): Promise<Outline> {
-  const model = resolveModel(env, modelOverride)
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
-
+): string {
   const styleInstruction = buildStyleInstruction(style)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
-  const extraSections = [castSection, relationsSection].filter((s) => s.length > 0).join('\n\n')
+  const notesSection = buildNotesSection(novel.notes)
+  const extraSections = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
 
-  const prompt = `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
+  return `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
 
 タイトル: ${novel.title}
 ジャンル: ${novel.genre}
@@ -236,6 +284,20 @@ ${extraSections ? `\n${extraSections}\n` : ''}
     ...
   ]
 }`
+}
+
+export async function generateOutline(
+  env: Env,
+  novel: GeminiNovelParams,
+  style: StyleParams,
+  modelOverride?: GeminiModel,
+  cast?: CastMember[],
+  relations?: CastRelation[]
+): Promise<Outline> {
+  const model = resolveModel(env, modelOverride)
+  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
+
+  const prompt = buildOutlinePrompt(novel, style, cast, relations)
 
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -256,15 +318,21 @@ ${extraSections ? `\n${extraSections}\n` : ''}
     throw new Error(`Gemini generateOutline failed: ${res.status} ${err}`)
   }
 
-  const data = (await res.json()) as {
-    candidates?: Array<{
-      content?: { parts?: Array<{ text?: string }> }
-    }>
-  }
+  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
 
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
   if (!text) {
-    throw new Error('Gemini returned empty outline response')
+    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+    const promptBlock = data.promptFeedback?.blockReason
+    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+    const detail = [
+      `finishReason=${finishReason}`,
+      promptBlock ? `promptBlockReason=${promptBlock}` : '',
+      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+    ]
+      .filter((s) => s.length > 0)
+      .join(' / ')
+    throw new Error(`Gemini returned empty outline response (${detail})`)
   }
 
   let parsed: unknown
@@ -294,9 +362,11 @@ export async function regenerateOutlineChapter(
   cast?: CastMember[],
   relations?: CastRelation[]
 ): Promise<OutlineChapter> {
-  const target = existing.chapters.find((c) => c.chapter_number === chapterNumber)
-  if (!target) {
-    throw new Error(`Chapter ${chapterNumber} not found in outline`)
+  // 既存に当該章が無い場合 (= 後から num_chapters を増やした) も生成できるよう、無ければ空のテンプレを充てる。
+  const target = existing.chapters.find((c) => c.chapter_number === chapterNumber) ?? {
+    chapter_number: chapterNumber,
+    title: '',
+    summary: ''
   }
 
   const model = resolveModel(env, modelOverride)
@@ -305,7 +375,8 @@ export async function regenerateOutlineChapter(
   const styleInstruction = buildStyleInstruction(style)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
-  const extra = [castSection, relationsSection].filter((s) => s.length > 0).join('\n\n')
+  const notesSection = buildNotesSection(novel.notes)
+  const extra = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
 
   const otherChapters = existing.chapters
     .filter((c) => c.chapter_number !== chapterNumber)
@@ -356,11 +427,21 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
     throw new Error(`Gemini regenerateOutlineChapter failed: ${res.status} ${err}`)
   }
 
-  const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
-  }
+  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) throw new Error('Gemini returned empty regenerateOutlineChapter response')
+  if (!text) {
+    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+    const promptBlock = data.promptFeedback?.blockReason
+    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+    const detail = [
+      `finishReason=${finishReason}`,
+      promptBlock ? `promptBlockReason=${promptBlock}` : '',
+      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+    ]
+      .filter((s) => s.length > 0)
+      .join(' / ')
+    throw new Error(`Gemini returned empty regenerateOutlineChapter response (${detail})`)
+  }
 
   let parsed: unknown
   try {
@@ -381,6 +462,10 @@ export type StreamChapterUsage = {
   promptTokens: number
   outputTokens: number
   totalTokens: number
+  // Gemini が報告する finishReason。'STOP' = 自然完了、それ以外 (MAX_TOKENS/SAFETY/RECITATION/OTHER) は
+  // 途中で打ち切られたサインなので DO 側で警告として通知する。chunk が finishReason を送ってこなかった
+  // 場合は 'STOP' として扱う (= 正常終了とみなす)。
+  finishReason: string
 }
 
 export type StreamChapterResult = {
@@ -415,6 +500,13 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
   const writingRules = buildWritingRules(cast)
+  // notes は章立て生成時にのみ使う (outline.summary に既に振り分けが乗っているため、
+  // 本文生成では全体リストを再注入しない)。
+
+  // 結末への寄せ方は章の現在位置から自然に決まるはず (序盤=展開、終盤=収束、最終章=結末到達)。
+  // 過剰に「結末を温存せよ/直接示せ」と指示せず、進行度だけ渡してモデルに任せる。
+  const totalChapters = Math.max(...outline.chapters.map((c) => c.chapter_number))
+  const positionLine = `現在執筆中: 第${chapterNumber}章 / 全${totalChapters}章`
 
   const sections: string[] = [
     `【作品情報】\nタイトル: ${novel.title}\nジャンル: ${novel.genre}\n登場人物: ${novel.characters}\n世界観・設定: ${novel.setting}`,
@@ -424,6 +516,7 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
     writingRules,
     `【全体の章立て（概要）】\n${allChapterSummaries}`,
     prevChaptersText ? `【直前の章の本文（参考）】\n${prevChaptersText}` : '',
+    `【執筆位置】\n${positionLine}`,
     `【執筆対象】\n第${chapterNumber}章「${targetEntry.title}」\n概要: ${targetEntry.summary}`
   ].filter((s) => s.length > 0)
 
@@ -441,8 +534,7 @@ ${sections.join('\n\n')}
     contents: [{ parts: [{ text: prompt }] }],
     safetySettings: SAFETY_SETTINGS_OFF,
     generationConfig: {
-      temperature: 0.9,
-      maxOutputTokens: maxOutputTokens(model, targetChars)
+      temperature: 0.9
     }
   }
 
@@ -479,15 +571,15 @@ ${sections.join('\n\n')}
       return
     }
 
-    const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
-    let lastUsage: StreamChapterUsage | undefined
+    let lastUsage: Omit<StreamChapterUsage, 'finishReason'> | undefined
+    // finishReason は最終 chunk にのみ乗ることが多いので、流れる度に上書き。
+    // 終了時にこれを見て途中打ち切り (MAX_TOKENS/SAFETY/RECITATION) を検出する。
+    let lastFinishReason: string | undefined
 
     try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
+      for await (const value of res.body) {
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
@@ -508,13 +600,15 @@ ${sections.join('\n\n')}
           }
           const meta = extractUsage(chunk, model)
           if (meta) lastUsage = meta
+          const fr = extractFinishReason(chunk)
+          if (fr) lastFinishReason = fr
         }
       }
     } finally {
-      reader.releaseLock()
       await writer.close()
       if (lastUsage) {
-        resolveUsage(lastUsage)
+        const finishReason = lastFinishReason === undefined ? 'STOP' : lastFinishReason
+        resolveUsage({ ...lastUsage, finishReason })
       } else {
         rejectUsage(new Error('Gemini stream ended without usageMetadata'))
       }
@@ -533,28 +627,26 @@ ${sections.join('\n\n')}
   return { stream: readable, usage }
 }
 
-function extractUsage(chunk: unknown, model: string): StreamChapterUsage | undefined {
-  if (typeof chunk !== 'object' || chunk === null) return undefined
-  const c = chunk as Record<string, unknown>
-  const meta = c.usageMetadata
-  if (typeof meta !== 'object' || meta === null) return undefined
-  const m = meta as Record<string, unknown>
-  const promptTokens = typeof m.promptTokenCount === 'number' ? m.promptTokenCount : 0
-  const outputTokens = typeof m.candidatesTokenCount === 'number' ? m.candidatesTokenCount : 0
-  const totalTokens = typeof m.totalTokenCount === 'number' ? m.totalTokenCount : promptTokens + outputTokens
+function extractUsage(chunk: unknown, model: string): Omit<StreamChapterUsage, 'finishReason'> | undefined {
+  const parsed = GeminiResponseSchema.safeParse(chunk)
+  if (!parsed.success) return undefined
+  const meta = parsed.data.usageMetadata
+  if (!meta) return undefined
+  const promptTokens = meta.promptTokenCount ?? 0
+  const outputTokens = meta.candidatesTokenCount ?? 0
+  const totalTokens = meta.totalTokenCount ?? promptTokens + outputTokens
   return { model, promptTokens, outputTokens, totalTokens }
 }
 
 function extractText(chunk: unknown): string {
-  if (typeof chunk !== 'object' || chunk === null) return ''
-  const c = chunk as Record<string, unknown>
-  const candidates = c.candidates
-  if (!Array.isArray(candidates) || candidates.length === 0) return ''
-  const first = candidates[0] as Record<string, unknown>
-  const content = first.content as Record<string, unknown> | undefined
-  if (!content) return ''
-  const parts = content.parts
-  if (!Array.isArray(parts) || parts.length === 0) return ''
-  const part = parts[0] as Record<string, unknown>
-  return typeof part.text === 'string' ? part.text : ''
+  const parsed = GeminiResponseSchema.safeParse(chunk)
+  if (!parsed.success) return ''
+  return parsed.data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+}
+
+// chunk に乗っていれば finishReason を取り出す。最終 chunk にだけ含まれることが多い。
+function extractFinishReason(chunk: unknown): string | undefined {
+  const parsed = GeminiResponseSchema.safeParse(chunk)
+  if (!parsed.success) return undefined
+  return parsed.data.candidates?.[0]?.finishReason
 }

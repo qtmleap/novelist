@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { AppShell } from '@/components/AppShell'
+import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import '../index.css'
 
@@ -15,6 +16,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body>
         <TooltipProvider>
           <AppShell>{children}</AppShell>
+          <Toaster richColors closeButton />
         </TooltipProvider>
       </body>
     </html>

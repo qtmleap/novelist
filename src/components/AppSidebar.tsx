@@ -1,10 +1,12 @@
 'use client'
 
-import { Library, Settings, Users } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Library, LogIn, LogOut, Settings, Users } from 'lucide-react'
+import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -12,38 +14,45 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarRail
+  SidebarRail,
+  useSidebar
 } from '@/components/ui/sidebar'
+import { useAuth } from '@/hooks/useAuth'
+import { routes } from '@/lib/routes'
+import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
-  { label: '小説一覧', href: '/novels', icon: Library },
-  { label: '登場人物一覧', href: '/characters', icon: Users },
-  { label: '設定', href: '/settings', icon: Settings }
+  { label: '小説一覧', href: routes.novels.list, icon: Library },
+  { label: '登場人物一覧', href: routes.characters.list, icon: Users },
+  { label: '設定', href: routes.settings, icon: Settings }
 ]
 
 export function AppSidebar() {
-  const [pathname, setPathname] = useState('')
-
-  useEffect(() => {
-    setPathname(window.location.pathname)
-  }, [])
+  const pathname = usePathname()
+  const { isMobile, setOpenMobile } = useSidebar()
+  const auth = useAuth()
 
   const activeHref = NAV_ITEMS.map((item) => item.href)
     .filter((href) => pathname === href || pathname.startsWith(`${href}/`))
     .sort((a, b) => b.length - a.length)[0]
 
+  const closeIfMobile = () => {
+    if (isMobile) setOpenMobile(false)
+  }
+
   return (
     <Sidebar collapsible='icon'>
       <SidebarHeader className='h-16 justify-center border-b'>
-        <SidebarMenu>
-          <SidebarMenuItem className='group-data-[collapsible=icon]:hidden'>
-            <SidebarMenuButton size='lg' asChild>
-              <a href='/novels'>
-                <span className='font-semibold tracking-widest'>NOVELIST</span>
-              </a>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+        <Link
+          href={routes.novels.list}
+          onClick={closeIfMobile}
+          className={cn(
+            'group-data-[collapsible=icon]:hidden',
+            'inline-flex items-center px-3 text-sm font-semibold tracking-widest text-sidebar-foreground transition-colors hover:text-sidebar-accent-foreground'
+          )}
+        >
+          NOVELIST
+        </Link>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
@@ -55,10 +64,10 @@ export function AppSidebar() {
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild isActive={isActive} tooltip={item.label} className='[&>svg]:size-5!'>
-                      <a href={item.href}>
+                      <Link href={item.href} onClick={closeIfMobile}>
                         <item.icon />
                         <span>{item.label}</span>
-                      </a>
+                      </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 )
@@ -67,6 +76,35 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+      <SidebarFooter className='border-t'>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            {auth.status === 'authenticated' ? (
+              <SidebarMenuButton asChild tooltip={auth.email} className='[&>svg]:size-5!'>
+                {/* CF Access のログアウトエンドポイント。Worker は介さずに CF が直接処理する。
+                    ラベルは「ログアウト」固定。email は tooltip でだけ見える (ローカル開発の dev@local がそのまま出ないように)。 */}
+                <a href='/cdn-cgi/access/logout'>
+                  <LogOut />
+                  <span>ログアウト</span>
+                </a>
+              </SidebarMenuButton>
+            ) : (
+              <SidebarMenuButton
+                asChild
+                tooltip={auth.status === 'loading' ? '確認中…' : 'ログイン'}
+                className='[&>svg]:size-5!'
+                disabled={auth.status === 'loading'}
+              >
+                {/* CF Access の Application で /login を Allow に設定すれば、このページにアクセスした時点で認証フローが起動する。 */}
+                <a href={routes.login}>
+                  <LogIn />
+                  <span>{auth.status === 'loading' ? '確認中…' : 'ログイン'}</span>
+                </a>
+              </SidebarMenuButton>
+            )}
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarFooter>
       <SidebarRail />
     </Sidebar>
   )
