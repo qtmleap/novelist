@@ -1,11 +1,13 @@
 'use client'
 
+import { useMutation, useSuspenseQuery } from '@tanstack/react-query'
 import { Loader2, Trash2 } from 'lucide-react'
-import { useRouter } from 'next/navigation'
-import { useEffect, useState } from 'react'
+import { useParams, useRouter } from 'next/navigation'
+import { useState } from 'react'
+import { toast } from 'sonner'
 import { CharacterForm } from '@/components/character/CharacterForm'
-import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { PageHeader } from '@/components/PageHeader'
+import { QueryBoundary } from '@/components/QueryBoundary'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,14 +22,8 @@ import {
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { api, readApiError } from '@/lib/api/client'
+import { routes } from '@/lib/routes'
 import type { Character, CreateCharacterInput } from '@/schemas/character.dto'
-
-function getCharacterId(): string {
-  if (typeof window === 'undefined') return ''
-  const parts = window.location.pathname.split('/')
-  const idx = parts.indexOf('characters')
-  return idx !== -1 ? (parts[idx + 1] ?? '') : ''
-}
 
 function characterToInput(c: Character): CreateCharacterInput {
   return {
@@ -69,132 +65,103 @@ function EditSkeleton() {
   )
 }
 
-export default function EditCharacterPage() {
+function CharacterEditContent({ id }: { id: string }) {
   const router = useRouter()
-  const [characterId, setCharacterId] = useState<string>('')
-  const [character, setCharacter] = useState<Character | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [submitError, setSubmitError] = useState<string | null>(null)
-  const [isDeleting, setIsDeleting] = useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
-  useEffect(() => {
-    const id = getCharacterId()
-    if (!id) return
-    setCharacterId(id)
+  const { data: character } = useSuspenseQuery({
+    queryKey: ['character', id],
+    queryFn: () => api.getCharacter({ params: { id } })
+  })
 
-    const load = async () => {
-      try {
-        const data = await api.getCharacter({ params: { id } })
-        setCharacter(data)
-      } catch (e) {
-        setError(readApiError(e, '登場人物の取得に失敗しました'))
-      } finally {
-        setLoading(false)
-      }
-    }
+  const updateMutation = useMutation({
+    mutationFn: (data: CreateCharacterInput) => api.updateCharacter(data, { params: { id } }),
+    onSuccess: () => router.push(routes.characters.detail(id)),
+    onError: (e) => toast.error(readApiError(e, '登場人物の更新に失敗しました'))
+  })
 
-    load()
-  }, [])
-
-  const handleSubmit = async (data: CreateCharacterInput) => {
-    if (!characterId) return
-    setIsSubmitting(true)
-    setSubmitError(null)
-    try {
-      await api.updateCharacter(data, { params: { id: characterId } })
-      router.push(`/characters/${characterId}`)
-    } catch (e) {
-      setSubmitError(readApiError(e, '登場人物の更新に失敗しました'))
-      setIsSubmitting(false)
-    }
-  }
-
-  const handleDelete = async () => {
-    if (!characterId) return
-    setIsDeleting(true)
-    setSubmitError(null)
-    try {
-      await api.deleteCharacter(undefined, { params: { id: characterId } })
-      router.push('/characters')
-    } catch (e) {
-      setSubmitError(readApiError(e, '削除に失敗しました'))
-      setIsDeleting(false)
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteCharacter(undefined, { params: { id } }),
+    onSuccess: () => router.push(routes.characters.list),
+    onError: (e) => {
+      toast.error(readApiError(e, '削除に失敗しました'))
       setDeleteDialogOpen(false)
     }
-  }
+  })
 
+  return (
+    <>
+      <CharacterForm
+        defaultValues={characterToInput(character)}
+        submitLabel='保存する'
+        onSubmit={async (data) => {
+          await updateMutation.mutateAsync(data)
+        }}
+        isSubmitting={updateMutation.isPending}
+      />
+
+      <div className='border-t pt-6'>
+        <div className='mb-2'>
+          <h2 className='text-sm font-semibold text-destructive'>危険な操作</h2>
+          <p className='mt-0.5 text-sm text-muted-foreground'>
+            この登場人物を辞典から削除します。小説への登場リンクや関係も合わせて消えます。元には戻せません。
+          </p>
+        </div>
+        <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+          <AlertDialogTrigger asChild>
+            <Button type='button' variant='destructive' size='sm' className='[&_svg]:size-5!'>
+              <Trash2 />
+              この登場人物を削除
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>この登場人物を削除しますか？</AlertDialogTitle>
+              <AlertDialogDescription>
+                「{character.name}
+                」を辞典から削除します。小説への登場リンクや関係も合わせて消えます。元には戻せません。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={deleteMutation.isPending}>キャンセル</AlertDialogCancel>
+              <AlertDialogAction
+                variant='destructive'
+                disabled={deleteMutation.isPending}
+                onClick={(e) => {
+                  e.preventDefault()
+                  deleteMutation.mutate()
+                }}
+                className='[&_svg]:size-5!'
+              >
+                {deleteMutation.isPending ? <Loader2 className='animate-spin' /> : <Trash2 />}
+                {deleteMutation.isPending ? '削除中…' : '削除する'}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    </>
+  )
+}
+
+export default function EditCharacterPage() {
+  const { id } = useParams<{ id: string }>()
   return (
     <div className='space-y-6'>
       <PageHeader
         crumbs={[
-          { label: '登場人物一覧', href: '/characters' },
-          { label: character?.name ?? '詳細', href: characterId ? `/characters/${characterId}` : undefined },
+          { label: '登場人物一覧', href: routes.characters.list },
+          { label: '詳細', href: routes.characters.detail(id) },
           { label: '編集' }
         ]}
       />
-
       <div>
         <h1 className='text-xl font-semibold'>編集</h1>
         <p className='mt-0.5 text-sm text-muted-foreground'>登場人物の情報を編集します。</p>
       </div>
-
-      {loading && <EditSkeleton />}
-      {!loading && error && <ErrorAlert message={error} />}
-      {!loading && !error && character && (
-        <>
-          {submitError && <ErrorAlert message={submitError} onRetry={() => setSubmitError(null)} />}
-          <CharacterForm
-            defaultValues={characterToInput(character)}
-            submitLabel='保存する'
-            onSubmit={handleSubmit}
-            isSubmitting={isSubmitting}
-          />
-
-          <div className='border-t pt-6'>
-            <div className='mb-2'>
-              <h2 className='text-sm font-semibold text-destructive'>危険な操作</h2>
-              <p className='mt-0.5 text-sm text-muted-foreground'>
-                この登場人物を辞典から削除します。小説への登場リンクや関係も合わせて消えます。元には戻せません。
-              </p>
-            </div>
-            <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-              <AlertDialogTrigger asChild>
-                <Button type='button' variant='destructive' size='sm' className='[&_svg]:size-5!'>
-                  <Trash2 />
-                  この登場人物を削除
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>この登場人物を削除しますか？</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    「{character.name}
-                    」を辞典から削除します。小説への登場リンクや関係も合わせて消えます。元には戻せません。
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel disabled={isDeleting}>キャンセル</AlertDialogCancel>
-                  <AlertDialogAction
-                    variant='destructive'
-                    disabled={isDeleting}
-                    onClick={(e) => {
-                      e.preventDefault()
-                      handleDelete()
-                    }}
-                    className='[&_svg]:size-5!'
-                  >
-                    {isDeleting ? <Loader2 className='animate-spin' /> : <Trash2 />}
-                    {isDeleting ? '削除中…' : '削除する'}
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </div>
-        </>
-      )}
+      <QueryBoundary fallback={<EditSkeleton />}>
+        <CharacterEditContent id={id} />
+      </QueryBoundary>
     </div>
   )
 }
