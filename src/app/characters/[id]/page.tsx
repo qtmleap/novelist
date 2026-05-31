@@ -1,20 +1,17 @@
 'use client'
 
-import { Pencil } from 'lucide-react'
-import { useEffect, useState } from 'react'
-import { ErrorAlert } from '@/components/novel/ErrorAlert'
+import { useMutation, useSuspenseQuery } from '@tanstack/react-query'
+import { Copy, Loader2, Pencil } from 'lucide-react'
+import { useParams, useRouter } from 'next/navigation'
+import { toast } from 'sonner'
 import { PageHeader } from '@/components/PageHeader'
+import { QueryBoundary } from '@/components/QueryBoundary'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import { routes } from '@/lib/routes'
 import type { Character } from '@/schemas/character.dto'
-
-function getCharacterId(): string {
-  if (typeof window === 'undefined') return ''
-  const parts = window.location.pathname.split('/')
-  const idx = parts.indexOf('characters')
-  return idx !== -1 ? (parts[idx + 1] ?? '') : ''
-}
 
 function DetailSkeleton() {
   return (
@@ -35,83 +32,102 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-export default function CharacterDetailPage() {
-  const [character, setCharacter] = useState<Character | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [id, setId] = useState<string>('')
+function CharacterDetailContent({ id }: { id: string }) {
+  const router = useRouter()
+  const auth = useAuth()
+  const editAllowed = canEdit(auth)
+  const { data: character } = useSuspenseQuery({
+    queryKey: ['character', id],
+    queryFn: () => api.getCharacter({ params: { id } })
+  })
 
-  useEffect(() => {
-    const cid = getCharacterId()
-    setId(cid)
-    if (!cid) return
-
-    let cancelled = false
-    ;(async () => {
-      try {
-        const res = await api.characters[':id'].$get({ param: { id: cid } })
-        if (!res.ok) {
-          if (res.status === 404) throw new Error('登場人物が見つかりません')
-          throw new Error(await readApiError(res))
-        }
-        const data = (await res.json()) as Character
-        if (!cancelled) setCharacter(data)
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : '登場人物の取得に失敗しました')
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const copyMutation = useMutation({
+    mutationFn: (c: Character) =>
+      api.createCharacter({
+        // name にだけ `(コピー)` を付けて識別。残りはそのまま複製。
+        name: `${c.name} (コピー)`,
+        gender: c.gender,
+        age: c.age,
+        occupation: c.occupation,
+        appearance: c.appearance,
+        first_person: c.first_person,
+        address_others: c.address_others,
+        speech_examples: c.speech_examples,
+        description: c.description
+      }),
+    onSuccess: (created) => router.push(routes.characters.edit(created.id)),
+    onError: (e) => toast.error(readApiError(e, '登場人物のコピーに失敗しました'))
+  })
 
   return (
-    <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '登場人物一覧', href: '/characters' }, { label: character?.name ?? '詳細' }]} />
-
-      {loading && <DetailSkeleton />}
-      {!loading && error && <ErrorAlert message={error} />}
-      {!loading && !error && character && (
-        <>
-          <div className='flex items-start justify-between gap-3'>
-            <div className='min-w-0'>
-              <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>登場人物</p>
-              <h1 className='mt-1 text-xl font-semibold'>{character.name}</h1>
-            </div>
+    <>
+      <div className='flex items-start justify-between gap-3'>
+        <div className='min-w-0'>
+          <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>登場人物</p>
+          <h1 className='mt-1 text-xl font-semibold'>{character.name}</h1>
+        </div>
+        <div className='flex shrink-0 items-center gap-2'>
+          <Button
+            type='button'
+            size='sm'
+            variant='outline'
+            className='[&_svg]:size-5!'
+            disabled={!editAllowed || copyMutation.isPending}
+            title={!editAllowed ? 'ログインが必要です' : undefined}
+            onClick={() => copyMutation.mutate(character)}
+          >
+            {copyMutation.isPending ? <Loader2 className='animate-spin' /> : <Copy />}
+            コピー
+          </Button>
+          {editAllowed ? (
             <Button asChild size='sm' className='[&_svg]:size-5!'>
-              <a href={`/characters/${id}/edit`}>
+              <a href={routes.characters.edit(id)}>
                 <Pencil />
                 編集
               </a>
             </Button>
-          </div>
+          ) : (
+            <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
+              <Pencil />
+              編集
+            </Button>
+          )}
+        </div>
+      </div>
 
-          <div className='divide-y border-y'>
-            {character.gender && <Field label='性別'>{character.gender}</Field>}
-            {character.age && <Field label='年齢'>{character.age}</Field>}
-            {character.occupation && <Field label='職業'>{character.occupation}</Field>}
-            {character.appearance && <Field label='外見'>{character.appearance}</Field>}
-            {character.first_person && <Field label='一人称'>{character.first_person}</Field>}
-            {character.address_others && <Field label='他者の呼び方'>{character.address_others}</Field>}
-            {character.speech_examples.length > 0 && (
-              <Field label='口調の例'>
-                <ul className='space-y-1'>
-                  {character.speech_examples.map((s, i) => (
-                    // biome-ignore lint/suspicious/noArrayIndexKey: 口調の例は表示専用で順序固定のため index で十分
-                    <li key={i} className='text-foreground/90'>
-                      「{s}」
-                    </li>
-                  ))}
-                </ul>
-              </Field>
-            )}
-            {character.description && <Field label='説明'>{character.description}</Field>}
-          </div>
-        </>
-      )}
+      <div className='divide-y border-y'>
+        {character.gender && <Field label='性別'>{character.gender}</Field>}
+        {character.age && <Field label='年齢'>{character.age}</Field>}
+        {character.occupation && <Field label='職業'>{character.occupation}</Field>}
+        {character.appearance && <Field label='外見'>{character.appearance}</Field>}
+        {character.first_person && <Field label='一人称'>{character.first_person}</Field>}
+        {character.address_others && <Field label='他者の呼び方'>{character.address_others}</Field>}
+        {character.speech_examples.length > 0 && (
+          <Field label='口調の例'>
+            <ul className='space-y-1'>
+              {character.speech_examples.map((s, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: 口調の例は表示専用で順序固定のため index で十分
+                <li key={i} className='text-foreground/90'>
+                  「{s}」
+                </li>
+              ))}
+            </ul>
+          </Field>
+        )}
+        {character.description && <Field label='説明'>{character.description}</Field>}
+      </div>
+    </>
+  )
+}
+
+export default function CharacterDetailPage() {
+  const { id } = useParams<{ id: string }>()
+  return (
+    <div className='space-y-6'>
+      <PageHeader crumbs={[{ label: '登場人物一覧', href: routes.characters.list }, { label: '詳細' }]} />
+      <QueryBoundary fallback={<DetailSkeleton />}>
+        <CharacterDetailContent id={id} />
+      </QueryBoundary>
     </div>
   )
 }

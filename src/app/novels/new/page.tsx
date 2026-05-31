@@ -1,33 +1,36 @@
 'use client'
 
-import { useState } from 'react'
-import { ErrorAlert } from '@/components/novel/ErrorAlert'
-import { PremiseForm } from '@/components/novel/PremiseForm'
+import { useMutation } from '@tanstack/react-query'
+import { useAtomValue } from 'jotai'
+import { useRouter } from 'next/navigation'
+import { toast } from 'sonner'
+import { EMPTY_DEFAULTS, PremiseForm } from '@/components/novel/PremiseForm'
 import { PageHeader } from '@/components/PageHeader'
 import { api, readApiError } from '@/lib/api/client'
+import { routes } from '@/lib/routes'
 import type { CreateNovelInput } from '@/schemas/novel.dto'
+import { editorModelAtom, writerModelAtom } from '@/store/atoms'
 
 export default function NewNovelPage() {
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const router = useRouter()
+  const editorModel = useAtomValue(editorModelAtom)
+  const writerModel = useAtomValue(writerModelAtom)
 
-  const handleSubmit = async (data: CreateNovelInput) => {
-    setIsSubmitting(true)
-    setError(null)
-    try {
-      const res = await api.novels.$post({ json: data })
-      if (!res.ok) throw new Error(await readApiError(res))
-      const novel = await res.json()
-      window.location.assign(`/novels/${novel.id}`)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '小説の作成に失敗しました')
-      setIsSubmitting(false)
-    }
+  const defaults: CreateNovelInput = {
+    ...EMPTY_DEFAULTS,
+    editor_model: editorModel,
+    writer_model: writerModel
   }
+
+  const createMutation = useMutation({
+    mutationFn: (data: CreateNovelInput) => api.createNovel(data),
+    onSuccess: (novel) => router.push(routes.novels.detail(novel.id)),
+    onError: (e) => toast.error(readApiError(e, '小説の作成に失敗しました'))
+  })
 
   return (
     <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '小説一覧', href: '/novels' }, { label: '新規作成' }]} />
+      <PageHeader crumbs={[{ label: '小説一覧', href: routes.novels.list }, { label: '新規作成' }]} />
 
       <div>
         <h1 className='text-xl font-semibold'>新規作成</h1>
@@ -36,9 +39,13 @@ export default function NewNovelPage() {
         </p>
       </div>
 
-      {error && <ErrorAlert message={error} onRetry={() => setError(null)} />}
-
-      <PremiseForm onSubmit={handleSubmit} isSubmitting={isSubmitting} />
+      <PremiseForm
+        onSubmit={async (data) => {
+          await createMutation.mutateAsync(data)
+        }}
+        isSubmitting={createMutation.isPending}
+        defaultValues={defaults}
+      />
     </div>
   )
 }

@@ -18,8 +18,12 @@ model Novel {
   target_chars     Int                      @default(4000)
   pov              String                   @default("一人称")
   tone             String                   @default("一般文芸")
+  age_rating       String                   @default("全年齢")
   pov_character_id String                   @default("")
   ending           String                   @default("未指定")
+  notes            String                   @default("")
+  editor_model     String                   @default("gemini-3.1-flash-lite")
+  writer_model     String                   @default("gemini-3.1-flash-lite")
   outline          String?
   created_at      DateTime                 @default(now())
   updated_at      DateTime                 @updatedAt

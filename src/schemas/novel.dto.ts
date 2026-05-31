@@ -10,6 +10,10 @@ export const POV_OPTIONS = ['一人称', '三人称一元視点', '三人称多�
 export const TONE_OPTIONS = ['ライトノベル調', '一般文芸', '文学的', 'やさしい文体'] as const
 export const DEFAULT_POV = '一人称'
 export const DEFAULT_TONE = '一般文芸'
+
+// 想定年齢 (= 年齢指定)。生成プロンプトの表現強度に反映する。
+export const AGE_RATING_OPTIONS = ['全年齢', 'R15', 'R18'] as const
+export const DEFAULT_AGE_RATING = '全年齢'
 // 語り手(視点キャラ)を指定できる POV。一人称 / 三人称一元視点 のとき pov_character_id が有効。
 export const FOCAL_POVS: readonly string[] = ['一人称', '三人称一元視点']
 
@@ -29,35 +33,75 @@ export const RELATION_TYPES = ['家族', '恋愛', '友人', '幼馴染', '仲�
 
 // 小説に登場するキャラ (辞典のキャラ + その小説での役割)
 export const NovelCharacterLinkSchema = z.object({
-  character_id: z.string().min(1),
+  character_id: z.string().nonempty(),
   role: z.string().max(50).default('')
 })
 export type NovelCharacterLink = z.infer<typeof NovelCharacterLinkSchema>
 
 // 小説内の キャラ A → キャラ B の関係 (有向)
 export const NovelCharacterRelationInputSchema = z.object({
-  source_character_id: z.string().min(1),
-  target_character_id: z.string().min(1),
-  relation: z.string().min(1, '関係を入力してください').max(50),
+  source_character_id: z.string().nonempty(),
+  target_character_id: z.string().nonempty(),
+  relation: z.string().nonempty('関係を入力してください').max(50),
   description: z.string().max(500).default(''),
   // source が target を呼ぶときの呼び方の上書き (ADDRESS_STYLES, 空=本人の既定)
   address_override: z.string().max(20).default('')
 })
 export type NovelCharacterRelationInput = z.infer<typeof NovelCharacterRelationInputSchema>
 
+// ---------------------- AI モデル設定 ----------------------
+// Editor = 章立て(outline)生成, Writer = 本文生成。
+// 端末の設定 (localStorage) は新規 novel 作成時の初期値として使うだけ。
+// 作成後は novel.editor_model / writer_model が真実 (DB は NOT NULL default あり)。
+// model はサーバー側で Gemini の URL パスに入るため、必ず enum で検証する。
+
+// 公式 (ai.google.dev/gemini-api/docs/models) 準拠。2.0 系は 2026-06-01 停止のため除外。
+export const GEMINI_MODELS = [
+  'gemini-3.5-flash',
+  'gemini-3.1-pro-preview',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite'
+] as const
+export const GeminiModelSchema = z.enum(GEMINI_MODELS)
+export type GeminiModel = z.infer<typeof GeminiModelSchema>
+
+export const DEFAULT_EDITOR_MODEL: GeminiModel = 'gemini-3.1-flash-lite'
+export const DEFAULT_WRITER_MODEL: GeminiModel = 'gemini-3.1-flash-lite'
+
+// 設定画面の ☆ 表示用。各 1〜5 (多いほど良い)。price は「安さ」(多いほど安価)。
+export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; price: number }> = {
+  'gemini-3.5-flash': { quality: 4, speed: 4, price: 2 },
+  'gemini-3.1-pro-preview': { quality: 5, speed: 2, price: 1 },
+  'gemini-3-flash-preview': { quality: 4, speed: 4, price: 3 },
+  'gemini-3.1-flash-lite': { quality: 3, speed: 5, price: 4 },
+  'gemini-2.5-pro': { quality: 5, speed: 2, price: 2 },
+  'gemini-2.5-flash': { quality: 3, speed: 4, price: 4 },
+  'gemini-2.5-flash-lite': { quality: 2, speed: 5, price: 5 }
+}
+
 // ---------------------- あらすじ入力 ----------------------
 
 export const CreateNovelSchema = z.object({
-  title: z.string().min(1, 'タイトルを入力してください').max(100),
-  genre: z.string().min(1, 'ジャンルを入力してください').max(50),
+  title: z.string().nonempty('タイトルを入力してください').max(100),
+  genre: z.string().nonempty('ジャンルを入力してください').max(50),
   characters: z.string().max(2000),
   setting: z.string().max(4000),
   num_chapters: z.number().int().min(1).max(30),
   target_chars: z.number().int().min(500).max(20000).default(DEFAULT_TARGET_CHARS),
   pov: z.string().max(30).default(DEFAULT_POV),
   tone: z.string().max(30).default(DEFAULT_TONE),
+  age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
   pov_character_id: z.string().max(50).default(''),
   ending: z.string().max(30).default(DEFAULT_ENDING),
+  // プロンプトに追加で混ぜる自由記述 (口調の傾向、固有名詞表記、避けたい展開など)
+  notes: z.string().max(2000).default(''),
+  // novel 単位の AI モデル。新規作成時は端末の設定 (localStorage) からコピー、編集時は既存値。
+  // DB も NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値が入っている前提。
+  editor_model: GeminiModelSchema,
+  writer_model: GeminiModelSchema,
   character_links: z.array(NovelCharacterLinkSchema).max(50).default([]),
   relations: z.array(NovelCharacterRelationInputSchema).max(100).default([])
 })
@@ -101,8 +145,15 @@ export const NovelSchema = z.object({
   target_chars: z.number().int(),
   pov: z.string(),
   tone: z.string(),
+  age_rating: z.string(),
   pov_character_id: z.string(),
   ending: z.string(),
+  notes: z.string(),
+  // DB は NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値だが、
+  // 既知の enum 以外も将来に向けて受けられるよう output schema は string で持つ。
+  // フォーム入力 (CreateNovelSchema) 側は厳密に GeminiModelSchema を要求している。
+  editor_model: z.string(),
+  writer_model: z.string(),
   outline: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string()
@@ -165,40 +216,14 @@ export const ChapterStreamEventSchema = z.union([
 ])
 export type ChapterStreamEvent = z.infer<typeof ChapterStreamEventSchema>
 
-// ---------------------- AI モデル設定 ----------------------
-// Editor = 章立て(outline)生成, Writer = 本文生成。
-// 設定は端末の localStorage に保存し、生成リクエストの body でサーバーへ渡す。
-// model はサーバー側で Gemini の URL パスに入るため、必ず enum で検証する。
-
-// 公式 (ai.google.dev/gemini-api/docs/models) 準拠。2.0 系は 2026-06-01 停止のため除外。
-export const GEMINI_MODELS = [
-  'gemini-3.5-flash',
-  'gemini-3.1-pro-preview',
-  'gemini-3-flash-preview',
-  'gemini-3.1-flash-lite',
-  'gemini-2.5-pro',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite'
-] as const
-export const GeminiModelSchema = z.enum(GEMINI_MODELS)
-export type GeminiModel = z.infer<typeof GeminiModelSchema>
-
-export const DEFAULT_EDITOR_MODEL: GeminiModel = 'gemini-2.5-flash'
-export const DEFAULT_WRITER_MODEL: GeminiModel = 'gemini-2.5-flash'
-
-// 設定画面の ☆ 表示用。各 1〜5 (多いほど良い)。price は「安さ」(多いほど安価)。
-export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; price: number }> = {
-  'gemini-3.5-flash': { quality: 4, speed: 4, price: 2 },
-  'gemini-3.1-pro-preview': { quality: 5, speed: 2, price: 1 },
-  'gemini-3-flash-preview': { quality: 4, speed: 4, price: 3 },
-  'gemini-3.1-flash-lite': { quality: 3, speed: 5, price: 4 },
-  'gemini-2.5-pro': { quality: 5, speed: 2, price: 2 },
-  'gemini-2.5-flash': { quality: 3, speed: 4, price: 4 },
-  'gemini-2.5-flash-lite': { quality: 2, speed: 5, price: 5 }
-}
-
 // outline / chapter 生成エンドポイント共通の body (model 上書き; 省略時はサーバー既定)
 export const GenerateOptionsSchema = z.object({
   model: GeminiModelSchema.optional()
 })
 export type GenerateOptions = z.infer<typeof GenerateOptionsSchema>
+
+// outline 生成時のみ使える追加オプション: 章の指定セットだけ (既存 outline ありの場合のみ意味を持つ)。
+export const GenerateOutlineOptionsSchema = GenerateOptionsSchema.extend({
+  chapters: z.array(z.number().int().min(1)).default([])
+})
+export type GenerateOutlineOptions = z.infer<typeof GenerateOutlineOptionsSchema>
