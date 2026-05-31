@@ -167,10 +167,10 @@ export class ChapterGenerationDO extends DurableObject<Env> {
 
     // 既に終わっている場合は最終イベントを送って閉じる
     if (this.phase === 'done') {
-      // chapterTitle は persistAll() で保存されるが、DO evict のタイミングによっては
-      // storage から null で復元される場合がある。payload (同じく storage 永続) からフォールバック。
-      const title = this.chapterTitle ?? this.payload?.chapterTitle ?? ''
-      await send({ done: true, chapterId: this.chapterId, title })
+      // phase=done のとき chapterTitle は run() が必ず設定して persistAll() で保存する。
+      // null になるのは不変条件の破壊なので隠さず null のまま送り、
+      // クライアント側の schema validation で onDone を呼ばずに表面化させる。
+      await send({ done: true, chapterId: this.chapterId, title: this.chapterTitle })
       try {
         await writer.close()
       } catch {
