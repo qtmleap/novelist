@@ -2,22 +2,16 @@
 
 import { useAtom } from 'jotai'
 import { Moon, Sun } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { themeAtom } from '@/store/atoms'
 
 export function ThemeToggle() {
   const [theme, setTheme] = useAtom(themeAtom)
-  const [mounted, setMounted] = useState(false)
-  const isDark = theme === 'dark'
 
   useEffect(() => {
-    setMounted(true)
-  }, [])
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', isDark)
-  }, [isDark])
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+  }, [theme])
 
   return (
     <Button
@@ -25,10 +19,11 @@ export function ThemeToggle() {
       variant='ghost'
       size='icon'
       aria-label='テーマ切替'
-      onClick={() => setTheme(isDark ? 'light' : 'dark')}
+      onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
       className='[&_svg]:size-5!'
     >
-      {mounted ? (isDark ? <Sun /> : <Moon />) : <Moon />}
+      <Moon className='dark:hidden' />
+      <Sun className='hidden dark:block' />
     </Button>
   )
 }
