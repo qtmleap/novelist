@@ -39,7 +39,9 @@ type Props = {
 // SSR returns the skeleton; the client mounts and fetches.
 export function QueryBoundary({ children, fallback }: Props) {
   const [mounted, setMounted] = useState(false)
-  useEffect(() => { setMounted(true) }, [])
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   if (!mounted) return <>{fallback}</>
 
