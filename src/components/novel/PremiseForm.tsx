@@ -3,6 +3,7 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2, PenLine, Plus, Save, Trash2, UserPlus } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import type { DefaultValues } from 'react-hook-form'
 import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,18 +11,25 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api/client'
+import { routes } from '@/lib/routes'
 import type { Character } from '@/schemas/character.dto'
 import { ADDRESS_STYLES, CHARACTER_ROLES } from '@/schemas/character.dto'
 import {
+  AGE_RATING_OPTIONS,
   CHAPTER_LENGTH_OPTIONS,
   type CreateNovelInput,
   CreateNovelSchema,
+  DEFAULT_AGE_RATING,
+  DEFAULT_EDITOR_MODEL,
   DEFAULT_ENDING,
   DEFAULT_POV,
   DEFAULT_TARGET_CHARS,
   DEFAULT_TONE,
+  DEFAULT_WRITER_MODEL,
   ENDING_OPTIONS,
   FOCAL_POVS,
+  GEMINI_MODELS,
+  GeminiModelSchema,
   POV_OPTIONS,
   RELATION_TYPES,
   TONE_OPTIONS
@@ -45,11 +53,11 @@ const CHAPTER_COUNT_OPTIONS = Array.from({ length: 30 }, (_, i) => i + 1)
 type Props = {
   onSubmit: (data: CreateNovelInput) => Promise<void>
   isSubmitting: boolean
-  defaultValues?: CreateNovelInput
+  defaultValues?: DefaultValues<CreateNovelInput>
   mode?: 'create' | 'edit'
 }
 
-const EMPTY_DEFAULTS: CreateNovelInput = {
+export const EMPTY_DEFAULTS: CreateNovelInput = {
   title: '',
   genre: '',
   characters: '',
@@ -58,20 +66,25 @@ const EMPTY_DEFAULTS: CreateNovelInput = {
   target_chars: DEFAULT_TARGET_CHARS,
   pov: DEFAULT_POV,
   tone: DEFAULT_TONE,
+  age_rating: DEFAULT_AGE_RATING,
   pov_character_id: '',
   ending: DEFAULT_ENDING,
+  notes: '',
+  editor_model: DEFAULT_EDITOR_MODEL,
+  writer_model: DEFAULT_WRITER_MODEL,
   character_links: [],
   relations: []
 }
 
 export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'create' }: Props) {
+  // 編集モードでは章数を減らせない (= 既に生成済みの章本文が宙ぶらりんになるため)。
+  const minChapterCount = mode === 'edit' ? (defaultValues?.num_chapters ?? 1) : 1
   const [dictionary, setDictionary] = useState<Character[]>([])
 
   useEffect(() => {
-    api.characters
-      .$get()
-      .then((r) => (r.ok ? r.json() : []))
-      .then((data) => setDictionary(data as Character[]))
+    api
+      .listCharacters()
+      .then((data) => setDictionary(data))
       .catch(() => setDictionary([]))
   }, [])
 
@@ -180,6 +193,27 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
           )}
         </div>
 
+        <div className='space-y-2'>
+          <Label htmlFor='notes'>
+            物語に入れたいシーン・展開 <span className='text-muted-foreground font-normal'>（任意）</span>
+          </Label>
+          <Textarea
+            id='notes'
+            placeholder={
+              '例:\n- 主人公とヒロインがカラオケで歌う場面\n- 親友がさり気なく主人公を励ますシーン\n- ラスト近くで雨が降る'
+            }
+            rows={4}
+            {...form.register('notes')}
+            className='resize-none'
+          />
+          <p className='text-xs text-muted-foreground'>
+            章立ての (再)生成時に AI が各章へ振り分けて反映します。本文生成時は章立て側に乗っているので再注入しません。
+          </p>
+          {form.formState.errors.notes && (
+            <p className='text-xs text-destructive'>{form.formState.errors.notes.message}</p>
+          )}
+        </div>
+
         <div className='flex flex-wrap gap-4'>
           <div className='space-y-2'>
             <Label htmlFor='num_chapters'>章数</Label>
@@ -191,13 +225,16 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {CHAPTER_COUNT_OPTIONS.map((n) => (
+                {CHAPTER_COUNT_OPTIONS.filter((n) => n >= minChapterCount).map((n) => (
                   <SelectItem key={n} value={String(n)}>
                     {n} 章
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            {mode === 'edit' && (
+              <p className='text-xs text-muted-foreground'>整合性のため、章数は減らせません (増やすのは可)。</p>
+            )}
             {form.formState.errors.num_chapters && (
               <p className='text-xs text-destructive'>{form.formState.errors.num_chapters.message}</p>
             )}
@@ -237,7 +274,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
           <p className='mt-0.5 text-sm text-muted-foreground'>視点・文体トーン・エンディングを選択してください。</p>
         </div>
 
-        <div className='flex flex-wrap gap-4'>
+        <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'>
           <div className='space-y-2'>
             <Label htmlFor='pov'>視点</Label>
             <Select
@@ -249,7 +286,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                 }
               }}
             >
-              <SelectTrigger id='pov' className='w-48'>
+              <SelectTrigger id='pov' className='w-full'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -268,7 +305,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               value={form.watch('tone')}
               onValueChange={(v) => form.setValue('tone', v, { shouldValidate: false })}
             >
-              <SelectTrigger id='tone' className='w-48'>
+              <SelectTrigger id='tone' className='w-full'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -282,18 +319,79 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
           </div>
 
           <div className='space-y-2'>
+            <Label htmlFor='age_rating'>年齢指定</Label>
+            <Select
+              value={form.watch('age_rating')}
+              onValueChange={(v) => form.setValue('age_rating', v, { shouldValidate: false })}
+            >
+              <SelectTrigger id='age_rating' className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {AGE_RATING_OPTIONS.map((r) => (
+                  <SelectItem key={r} value={r}>
+                    {r}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className='space-y-2'>
             <Label htmlFor='ending'>エンディング</Label>
             <Select
               value={form.watch('ending')}
               onValueChange={(v) => form.setValue('ending', v, { shouldValidate: false })}
             >
-              <SelectTrigger id='ending' className='w-52'>
+              <SelectTrigger id='ending' className='w-full'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {ENDING_OPTIONS.map((e) => (
                   <SelectItem key={e} value={e}>
                     {e}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className='space-y-2'>
+            <Label htmlFor='editor_model'>Editor モデル (章立て)</Label>
+            <Select
+              value={form.watch('editor_model')}
+              onValueChange={(v) =>
+                form.setValue('editor_model', GeminiModelSchema.parse(v), { shouldValidate: false })
+              }
+            >
+              <SelectTrigger id='editor_model' className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {GEMINI_MODELS.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className='space-y-2'>
+            <Label htmlFor='writer_model'>Writer モデル (本文)</Label>
+            <Select
+              value={form.watch('writer_model')}
+              onValueChange={(v) =>
+                form.setValue('writer_model', GeminiModelSchema.parse(v), { shouldValidate: false })
+              }
+            >
+              <SelectTrigger id='writer_model' className='w-full'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {GEMINI_MODELS.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -336,7 +434,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
         {dictionary.length === 0 ? (
           <p className='text-sm text-muted-foreground'>
             登場人物がまだ登録されていません。{' '}
-            <a href='/characters/new' className='underline underline-offset-2'>
+            <a href={routes.characters.new} className='underline underline-offset-2'>
               辞典に追加する
             </a>
           </p>
@@ -562,7 +660,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
         )}
       </div>
 
-      <Button type='submit' disabled={isSubmitting} className='w-full [&_svg]:size-5!'>
+      <Button type='submit' size='sm' disabled={isSubmitting} className='[&_svg]:size-5!'>
         {isSubmitting ? (
           <>
             <Loader2 className='animate-spin' />

@@ -1,5 +1,6 @@
 import { BookOpen, SquarePen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { routes } from '@/lib/routes'
 
 export function EmptyNovels() {
   return (
@@ -12,7 +13,7 @@ export function EmptyNovels() {
         </p>
       </div>
       <Button asChild size='sm' className='[&_svg]:size-5!'>
-        <a href='/novels/new'>
+        <a href={routes.novels.new}>
           <SquarePen />
           新しい小説を書く
         </a>

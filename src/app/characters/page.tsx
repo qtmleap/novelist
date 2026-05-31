@@ -1,12 +1,14 @@
 'use client'
 
+import { useSuspenseQuery } from '@tanstack/react-query'
 import { ChevronRight, UserPlus, Users } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
-import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { PageHeader } from '@/components/PageHeader'
+import { QueryBoundary } from '@/components/QueryBoundary'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { api, readApiError } from '@/lib/api/client'
+import { canEdit, useAuth } from '@/hooks/useAuth'
+import { api } from '@/lib/api/client'
+import { routes } from '@/lib/routes'
 import type { Character } from '@/schemas/character.dto'
 
 function CharacterSkeletonRow() {
@@ -41,7 +43,7 @@ function EmptyCharacters() {
         <p className='max-w-[28ch] text-sm text-muted-foreground'>登場人物を登録して、小説の生成に活かしましょう。</p>
       </div>
       <Button asChild size='sm' className='[&_svg]:size-5!'>
-        <a href='/characters/new'>
+        <a href={routes.characters.new}>
           <UserPlus />
           登場人物を登録
         </a>
@@ -52,7 +54,10 @@ function EmptyCharacters() {
 
 function CharacterRow({ character }: { character: Character }) {
   return (
-    <a href={`/characters/${character.id}`} className='flex items-center gap-3 px-4 py-3 transition hover:bg-muted/50'>
+    <a
+      href={routes.characters.detail(character.id)}
+      className='flex items-center gap-3 px-4 py-3 transition hover:bg-muted/50'
+    >
       <div className='min-w-0 flex-1'>
         <span className='truncate font-medium text-sm'>{character.name}</span>
         {(character.gender || character.age) && (
@@ -69,57 +74,56 @@ function CharacterRow({ character }: { character: Character }) {
   )
 }
 
-export default function CharactersPage() {
-  const [characters, setCharacters] = useState<Character[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
-  const fetchCharacters = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const res = await api.characters.$get()
-      if (!res.ok) throw new Error(await readApiError(res))
-      const data = (await res.json()) as Character[]
-      setCharacters(data)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '登場人物一覧の取得に失敗しました')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchCharacters()
-  }, [fetchCharacters])
+function CharacterListContent() {
+  const auth = useAuth()
+  const editAllowed = canEdit(auth)
+  const { data: characters } = useSuspenseQuery({
+    queryKey: ['characters'],
+    queryFn: () => api.listCharacters()
+  })
 
   return (
-    <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '登場人物一覧' }]} />
-
+    <>
       <div className='flex items-center justify-between'>
         <div>
           <h1 className='text-xl font-semibold'>登場人物一覧</h1>
           <p className='mt-0.5 text-sm text-muted-foreground'>登場人物の情報を管理します。</p>
         </div>
-        <Button asChild size='sm' className='[&_svg]:size-5!'>
-          <a href='/characters/new'>
+        {editAllowed ? (
+          <Button asChild size='sm' className='[&_svg]:size-5!'>
+            <a href={routes.characters.new}>
+              <UserPlus />
+              新規登録
+            </a>
+          </Button>
+        ) : (
+          <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
             <UserPlus />
             新規登録
-          </a>
-        </Button>
+          </Button>
+        )}
       </div>
 
-      {loading && <CharacterSkeletonList />}
-      {!loading && error && <ErrorAlert message={error} onRetry={fetchCharacters} />}
-      {!loading && !error && characters.length === 0 && <EmptyCharacters />}
-      {!loading && !error && characters.length > 0 && (
+      {characters.length === 0 ? (
+        <EmptyCharacters />
+      ) : (
         <div className='divide-y border-y'>
           {characters.map((c) => (
             <CharacterRow key={c.id} character={c} />
           ))}
         </div>
       )}
+    </>
+  )
+}
+
+export default function CharactersPage() {
+  return (
+    <div className='space-y-6'>
+      <PageHeader crumbs={[{ label: '登場人物一覧' }]} />
+      <QueryBoundary fallback={<CharacterSkeletonList />}>
+        <CharacterListContent />
+      </QueryBoundary>
     </div>
   )
 }

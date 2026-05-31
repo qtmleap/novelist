@@ -1,45 +1,31 @@
 'use client'
 
-import { Pencil, RefreshCw, Sparkles } from 'lucide-react'
+import { Copy, Loader2, Pencil, RefreshCw, Sparkles } from 'lucide-react'
+import { useParams, useRouter } from 'next/navigation'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
-import { ChapterReader } from '@/components/novel/ChapterReader'
+import { ChapterSelectionDialog } from '@/components/novel/ChapterSelectionDialog'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { GenerationStatus } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
+import { OutlineSelectionDialog } from '@/components/novel/OutlineSelectionDialog'
 import { OutlineView } from '@/components/novel/OutlineView'
 import { PageHeader } from '@/components/PageHeader'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger
-} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
-import { getEditorModel, getWriterModel } from '@/lib/settings'
-import { readChapterStream } from '@/lib/stream'
+import { routes } from '@/lib/routes'
+import { subscribeChapterStream } from '@/lib/stream'
 import {
   type Chapter,
   type ChapterCost,
+  type GeminiModel,
+  GeminiModelSchema,
   type NovelWithChapters,
   type Outline,
   OutlineSchema
 } from '@/schemas/novel.dto'
-
-// Module-level helpers (never recreated, safe as effect deps)
-
-function getNovelId(): string {
-  if (typeof window === 'undefined') return ''
-  const parts = window.location.pathname.split('/')
-  const idx = parts.indexOf('novels')
-  return idx !== -1 ? (parts[idx + 1] ?? '') : ''
-}
 
 function parseOutline(raw: string | null): Outline | null {
   if (!raw) return null
@@ -145,40 +131,28 @@ const INITIAL: State = {
   error: null
 }
 
-function StartGenerationButton({
-  hasOutline,
-  chaptersDone,
-  totalChapters,
-  status,
-  onStart
+function GenerateChaptersButton({
+  hasUndoneChapter,
+  disabled,
+  onOpen
 }: {
-  hasOutline: boolean
-  chaptersDone: number
-  totalChapters: number
-  status: Status
-  onStart: () => void
+  // 章立てが完成済みなら常に出す。未生成残りがあれば「生成」、全章生成済みなら「再生成」のラベル。
+  hasUndoneChapter: boolean
+  // 未認証など押せない状態。disabled 時は tooltip でその旨を伝える。
+  disabled: boolean
+  onOpen: () => void
 }) {
-  // 章数 0 (= novel ロード未完) や 全章生成済み のときは何も出さない。
-  const allDone = hasOutline && totalChapters > 0 && chaptersDone >= totalChapters
-  if (allDone) return null
-
-  let label: string
-  let Icon: typeof Sparkles
-  if (!hasOutline) {
-    label = '章立てから生成開始'
-    Icon = Sparkles
-  } else if (status === 'cancelled') {
-    label = '続きから再開'
-    Icon = RefreshCw
-  } else {
-    label = '未生成の章を生成'
-    Icon = Sparkles
-  }
-
   return (
-    <Button type='button' size='sm' className='[&_svg]:size-5!' onClick={onStart}>
-      <Icon />
-      {label}
+    <Button
+      type='button'
+      size='sm'
+      className='[&_svg]:size-5!'
+      onClick={onOpen}
+      disabled={disabled}
+      title={disabled ? 'ログインが必要です' : undefined}
+    >
+      {hasUndoneChapter ? <Sparkles /> : <RefreshCw />}
+      {hasUndoneChapter ? '本文を生成' : '本文を再生成'}
     </Button>
   )
 }
@@ -214,112 +188,144 @@ function NovelTotals({
 }
 
 export default function NovelDetailPage() {
+  const router = useRouter()
+  const { id } = useParams<{ id: string }>()
   const [state, dispatch] = useReducer(reducer, INITIAL)
   const abortRef = useRef<AbortController | null>(null)
-  const novelIdRef = useRef<string | null>(null)
-  const [outlineRegenOpen, setOutlineRegenOpen] = useState(false)
-  const [regeneratingOutlineChapter, setRegeneratingOutlineChapter] = useState<number | null>(null)
+  const [outlineDialogOpen, setOutlineDialogOpen] = useState(false)
+  const [chapterDialogOpen, setChapterDialogOpen] = useState(false)
+  const [promptPreviewOpen, setPromptPreviewOpen] = useState(false)
+  const [promptPreview, setPromptPreview] = useState<string | null>(null)
+  const [promptPreviewLoading, setPromptPreviewLoading] = useState(false)
+  const [isCopying, setIsCopying] = useState(false)
+  const auth = useAuth()
+  const editAllowed = canEdit(auth)
 
+  // 小説 (設定) のコピー。cast / relations までは複製するが、outline / 章本文 / コスト履歴は持ち越さない。
+  // 新しい novel に遷移して編集ページから細かい修正を始められるようにする。
+  const handleCopy = async (novel: NovelWithChapters) => {
+    setIsCopying(true)
+    try {
+      const created = await api.createNovel({
+        title: `${novel.title} (コピー)`,
+        genre: novel.genre,
+        characters: novel.characters,
+        setting: novel.setting,
+        num_chapters: novel.num_chapters,
+        target_chars: novel.target_chars,
+        pov: novel.pov,
+        tone: novel.tone,
+        age_rating: novel.age_rating,
+        pov_character_id: novel.pov_character_id,
+        ending: novel.ending,
+        notes: novel.notes,
+        editor_model: GeminiModelSchema.parse(novel.editor_model),
+        writer_model: GeminiModelSchema.parse(novel.writer_model),
+        character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
+        relations: novel.relations.map((r) => ({
+          source_character_id: r.source_character_id,
+          target_character_id: r.target_character_id,
+          relation: r.relation,
+          description: r.description,
+          address_override: r.address_override
+        }))
+      })
+      router.push(routes.novels.edit(created.id))
+    } catch (e) {
+      dispatch({ type: 'LOAD_ERR', error: readApiError(e, '小説のコピーに失敗しました') })
+      setIsCopying(false)
+    }
+  }
   const loadNovel = useCallback(async (id: string) => {
     dispatch({ type: 'LOAD_START' })
     try {
-      const res = await api.novels[':id'].$get({ param: { id } })
-      if (!res.ok) throw new Error(await readApiError(res))
-      const novel = (await res.json()) as NovelWithChapters
+      const novel = await api.getNovel({ params: { id } })
       const outline = parseOutline(novel.outline)
       dispatch({ type: 'LOAD_OK', novel, outline })
       return { novel, outline }
     } catch (e) {
-      dispatch({ type: 'LOAD_ERR', error: e instanceof Error ? e.message : '小説の取得に失敗しました' })
+      dispatch({ type: 'LOAD_ERR', error: readApiError(e, '小説の取得に失敗しました') })
       return null
     }
   }, [])
 
-  const doGenerateOutline = useCallback(async (id: string): Promise<Outline | null> => {
-    dispatch({ type: 'OUTLINE_START' })
-    try {
-      const res = await api.novels[':id'].outline.$post({
-        param: { id },
-        json: { model: getEditorModel() }
-      })
-      if (!res.ok) throw new Error(await readApiError(res))
-      const body = (await res.json()) as { outline: Outline }
-      dispatch({ type: 'OUTLINE_OK', outline: body.outline })
-      return body.outline
-    } catch (e) {
-      dispatch({ type: 'OUTLINE_ERR', error: e instanceof Error ? e.message : '章立て生成に失敗しました' })
-      return null
-    }
-  }, [])
+  const doGenerateOutline = useCallback(
+    async (id: string, editorModel: GeminiModel, chapters?: number[]): Promise<Outline | null> => {
+      dispatch({ type: 'OUTLINE_START' })
+      try {
+        const body = await api.generateOutline({ model: editorModel, chapters: chapters ?? [] }, { params: { id } })
+        dispatch({ type: 'OUTLINE_OK', outline: body.outline })
+        // chapters[] 指定の部分再生成では、対象章の本文も server 側で消えるので novel 全体を取り直す。
+        await loadNovel(id)
+        return body.outline
+      } catch (e) {
+        dispatch({ type: 'OUTLINE_ERR', error: readApiError(e, '章立て生成に失敗しました') })
+        return null
+      }
+    },
+    [loadNovel]
+  )
 
-  const doGenerateChapter = useCallback(async (id: string, num: number, abort: AbortController): Promise<boolean> => {
-    dispatch({ type: 'CHAPTER_START', chapterNumber: num })
-    try {
-      // SSE エンドポイントは Response を直接読むので、hc にはオプション形だけ渡す。
-      const res = await api.novels[':id'].chapters[':number'].generate.$post(
-        {
-          param: { id, number: String(num) },
-          json: { model: getWriterModel() }
-        },
-        { init: { signal: abort.signal } }
-      )
-      if (!res.ok) throw new Error(await readApiError(res))
-      let ok = false
-      await readChapterStream(res, {
-        onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
-        onDone: ({ chapterId, title }) => {
-          dispatch({ type: 'CHAPTER_DONE', chapterNumber: num, chapterId, title })
-          ok = true
-        },
-        onError: (msg) => dispatch({ type: 'CHAPTER_ERR', error: msg })
-      })
-      return ok
-    } catch (e) {
-      if ((e as { name?: string }).name === 'AbortError') {
-        dispatch({ type: 'CANCEL' })
+  const doGenerateChapter = useCallback(
+    async (id: string, num: number, writerModel: GeminiModel, abort: AbortController): Promise<boolean> => {
+      dispatch({ type: 'CHAPTER_START', chapterNumber: num })
+      try {
+        // 1. DO に生成キックオフ (202 が返る)。
+        await api.startChapterGeneration({ model: writerModel }, { params: { id, number: String(num) } })
+
+        // 2. SSE で進捗を購読。EventSource は自動再接続するので、ページ離脱から戻っても続きが見える。
+        return await new Promise<boolean>((resolve) => {
+          const sub = subscribeChapterStream(`/api/novels/${id}/chapters/${num}/stream`, {
+            onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
+            onDone: ({ chapterId, title }) => {
+              dispatch({ type: 'CHAPTER_DONE', chapterNumber: num, chapterId, title })
+              resolve(true)
+            },
+            onError: (msg) => {
+              dispatch({ type: 'CHAPTER_ERR', error: msg })
+              resolve(false)
+            }
+          })
+          abort.signal.addEventListener('abort', () => {
+            sub.close()
+            dispatch({ type: 'CANCEL' })
+            resolve(false)
+          })
+        })
+      } catch (e) {
+        dispatch({ type: 'CHAPTER_ERR', error: readApiError(e, `第 ${num} 章の生成に失敗しました`) })
         return false
       }
-      dispatch({ type: 'CHAPTER_ERR', error: e instanceof Error ? e.message : `第 ${num} 章の生成に失敗しました` })
-      return false
-    }
-  }, [])
+    },
+    []
+  )
 
+  // 章リストを順番に流す。章立て生成は別フロー (doGenerateOutline) なのでここでは扱わない —
+  // 章立て生成直後の自動本文生成を避けるため、ボタン側で 2 段階に分けている。
   const runGeneration = useCallback(
-    async (id: string, existingOutline: Outline | null, existingChapters: ChapterData[]) => {
+    async (id: string, chapterNumbers: number[], writerModel: GeminiModel) => {
+      if (chapterNumbers.length === 0) return
       const abort = new AbortController()
       abortRef.current = abort
 
-      let outline = existingOutline
-      if (!outline) {
-        outline = await doGenerateOutline(id)
-        if (!outline || abort.signal.aborted) return
-      }
-
-      const total = outline.chapters.length
-      const done = new Set(existingChapters.filter((c) => c.done).map((c) => c.number))
-      for (let n = 1; n <= total; n++) {
+      for (const n of chapterNumbers) {
         if (abort.signal.aborted) break
-        if (done.has(n)) continue
-        const succeeded = await doGenerateChapter(id, n, abort)
+        const succeeded = await doGenerateChapter(id, n, writerModel, abort)
         if (!succeeded || abort.signal.aborted) break
       }
 
       if (!abort.signal.aborted) dispatch({ type: 'CANCEL' })
     },
-    [doGenerateOutline, doGenerateChapter]
+    [doGenerateChapter]
   )
 
   // Mount effect — runs once. 生成は明示的なボタン操作からのみ開始する (新規作成直後の自動実行は無し)。
   useEffect(() => {
-    const id = getNovelId()
-    if (!id) return
-    novelIdRef.current = id
     loadNovel(id)
-
     return () => {
       abortRef.current?.abort()
     }
-  }, [loadNovel])
+  }, [id, loadNovel])
 
   const handleCancel = () => {
     abortRef.current?.abort()
@@ -327,75 +333,110 @@ export default function NovelDetailPage() {
   }
 
   const handleRetryChapter = async (num: number) => {
-    const id = novelIdRef.current
-    if (!id) return
+    const currentNovel = state.novel
+    if (!currentNovel) return
     dispatch({ type: 'RETRY_CLEAR' })
     const abort = new AbortController()
     abortRef.current = abort
-    await doGenerateChapter(id, num, abort)
-  }
-
-  const handleRegenerateOutline = async () => {
-    const id = novelIdRef.current
-    if (!id) return
-    setOutlineRegenOpen(false)
-    await doGenerateOutline(id)
-  }
-
-  const handleRegenerateOutlineChapter = async (num: number) => {
-    const id = novelIdRef.current
-    if (!id) return
-    setRegeneratingOutlineChapter(num)
-    try {
-      const res = await api.novels[':id'].outline[':number'].$post({
-        param: { id, number: String(num) },
-        json: { model: getEditorModel() }
-      })
-      if (!res.ok) throw new Error(await readApiError(res))
-      const body = (await res.json()) as { outline: Outline }
-      dispatch({ type: 'OUTLINE_OK', outline: body.outline })
-    } catch (e) {
-      dispatch({ type: 'OUTLINE_ERR', error: e instanceof Error ? e.message : '章立ての再生成に失敗しました' })
-    } finally {
-      setRegeneratingOutlineChapter(null)
-    }
+    await doGenerateChapter(id, num, GeminiModelSchema.parse(currentNovel.writer_model), abort)
   }
 
   const isGenerating = state.status === 'generatingOutline' || state.status === 'generatingChapter'
-  const { novel, outline, chapters, streamingIndex, buffer, status, error } = state
+  const { novel, outline, chapters, streamingIndex, status, error } = state
   const totalChapters = outline ? outline.chapters.length : (novel?.num_chapters ?? 0)
   const currentChapter = streamingIndex ?? chapters.filter((c) => c.done).length + 1
 
   return (
     <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '小説一覧', href: '/novels' }, { label: novel?.title ?? '詳細' }]} />
+      <PageHeader crumbs={[{ label: '小説一覧', href: routes.novels.list }, { label: novel?.title ?? '詳細' }]} />
 
       {novel && (
-        <div className='flex items-start justify-between gap-3'>
+        <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
           <div className='min-w-0'>
             <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>{novel.genre}</p>
             <h1 className='mt-1 text-xl font-semibold'>{novel.title}</h1>
+            <p className='mt-0.5 text-sm text-muted-foreground'>
+              <span className='tabular-nums'>{chapters.filter((c) => c.done).length}</span>
+              {' / '}
+              <span className='tabular-nums'>{novel.num_chapters}</span>
+              {' 章 生成済み'}
+            </p>
           </div>
-          <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
-            <a href={`/novels/${novel.id}/edit`}>
-              <Pencil />
-              編集
-            </a>
-          </Button>
+          <div className='flex flex-wrap items-center gap-2 sm:shrink-0'>
+            {status !== 'loading' && (
+              <Button
+                type='button'
+                size='sm'
+                variant='outline'
+                disabled={isGenerating}
+                onClick={async () => {
+                  setPromptPreviewLoading(true)
+                  setPromptPreviewOpen(true)
+                  try {
+                    const data = await api.previewOutlinePrompt({ params: { id } })
+                    setPromptPreview(data.prompt)
+                  } catch (e) {
+                    setPromptPreview(`プレビュー取得に失敗しました: ${readApiError(e)}`)
+                  } finally {
+                    setPromptPreviewLoading(false)
+                  }
+                }}
+              >
+                プロンプト確認
+              </Button>
+            )}
+            {status !== 'loading' && (
+              <Button
+                type='button'
+                size='sm'
+                variant={outline && outline.chapters.length >= novel.num_chapters ? 'outline' : 'default'}
+                disabled={isGenerating || !editAllowed}
+                title={!editAllowed ? 'ログインが必要です' : undefined}
+                className='[&_svg]:size-5!'
+                onClick={() => setOutlineDialogOpen(true)}
+              >
+                {status === 'generatingOutline' ? (
+                  <Loader2 className='animate-spin' />
+                ) : outline && outline.chapters.length >= novel.num_chapters ? (
+                  <RefreshCw />
+                ) : (
+                  <Sparkles />
+                )}
+                {outline && outline.chapters.length >= novel.num_chapters ? '章立てを再生成' : '章立てを生成'}
+              </Button>
+            )}
+            <Button
+              type='button'
+              size='sm'
+              variant='outline'
+              className='[&_svg]:size-5!'
+              disabled={!editAllowed || isCopying || isGenerating}
+              title={!editAllowed ? 'ログインが必要です' : undefined}
+              onClick={() => handleCopy(novel)}
+            >
+              {isCopying ? <Loader2 className='animate-spin' /> : <Copy />}
+              コピー
+            </Button>
+            {editAllowed ? (
+              <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
+                <a href={routes.novels.edit(novel.id)}>
+                  <Pencil />
+                  編集
+                </a>
+              </Button>
+            ) : (
+              <Button size='sm' variant='outline' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
+                <Pencil />
+                編集
+              </Button>
+            )}
+          </div>
         </div>
       )}
 
       {status === 'loading' && <NovelSkeleton />}
 
-      {status === 'error' && error && (
-        <ErrorAlert
-          message={error}
-          onRetry={() => {
-            const id = novelIdRef.current
-            if (id) loadNovel(id)
-          }}
-        />
-      )}
+      {status === 'error' && error && <ErrorAlert message={error} onRetry={() => loadNovel(id)} />}
 
       {isGenerating && (
         <GenerationStatus
@@ -405,61 +446,28 @@ export default function NovelDetailPage() {
         />
       )}
 
-      {(outline || status === 'generatingOutline') && (
+      {novel && (
         <OutlineView
           outline={outline}
           isGenerating={status === 'generatingOutline'}
-          onRegenerateChapter={handleRegenerateOutlineChapter}
-          regeneratingChapter={regeneratingOutlineChapter}
-          isBusy={isGenerating || regeneratingOutlineChapter !== null}
-          regenerateSlot={
-            outline && !isGenerating ? (
-              <AlertDialog open={outlineRegenOpen} onOpenChange={setOutlineRegenOpen}>
-                <AlertDialogTrigger asChild>
-                  <Button type='button' variant='ghost' size='sm' className='[&_svg]:size-5!'>
-                    <RefreshCw />
-                    章立てを再生成
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>章立てを再生成しますか？</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      章立てを上書きします。既存の本文はそのまま残りますが、新しい章立てとタイトル・要約がずれる可能性があります。
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>キャンセル</AlertDialogCancel>
-                    <AlertDialogAction
-                      onClick={(e) => {
-                        e.preventDefault()
-                        handleRegenerateOutline()
-                      }}
-                      className='[&_svg]:size-5!'
-                    >
-                      <RefreshCw />
-                      再生成する
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
-            ) : null
-          }
+          isBusy={isGenerating}
+          chapters={chapters}
+          costs={novel.generation_costs ?? []}
+          streamingIndex={streamingIndex}
+          novelId={novel.id}
+          expectedTotal={novel.num_chapters}
+          canEdit={editAllowed}
+          onSaveOutline={async (next) => {
+            try {
+              const res = await api.updateOutline({ outline: next }, { params: { id } })
+              // server レスポンスを正として state を更新する。loadNovel まで叩くと SSE 再接続でフラッシュされるので避ける。
+              dispatch({ type: 'OUTLINE_OK', outline: res.outline })
+            } catch (e) {
+              dispatch({ type: 'OUTLINE_ERR', error: readApiError(e, '章立ての保存に失敗しました') })
+              throw e
+            }
+          }}
         />
-      )}
-
-      {(chapters.length > 0 || streamingIndex !== null) && (
-        <div className='space-y-3'>
-          <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>本文</p>
-          <ChapterReader
-            chapters={chapters}
-            streamingIndex={streamingIndex}
-            buffer={buffer}
-            costs={novel?.generation_costs ?? []}
-            onRegenerate={handleRetryChapter}
-            isBusy={isGenerating}
-          />
-        </div>
       )}
 
       {status === 'error' && streamingIndex !== null && (
@@ -474,15 +482,54 @@ export default function NovelDetailPage() {
         </Button>
       )}
 
-      {novel && !isGenerating && status !== 'loading' && status !== 'error' && (
-        <StartGenerationButton
-          hasOutline={outline !== null}
-          chaptersDone={chapters.filter((c) => c.done).length}
-          totalChapters={totalChapters}
-          status={status}
-          onStart={() => {
-            const id = novelIdRef.current
-            if (id) runGeneration(id, outline, chapters)
+      {novel &&
+        !isGenerating &&
+        status !== 'loading' &&
+        status !== 'error' &&
+        outline &&
+        outline.chapters.length >= novel.num_chapters && (
+          <GenerateChaptersButton
+            hasUndoneChapter={chapters.filter((c) => c.done).length < novel.num_chapters}
+            disabled={!editAllowed}
+            onOpen={() => setChapterDialogOpen(true)}
+          />
+        )}
+
+      {novel && (
+        <OutlineSelectionDialog
+          open={outlineDialogOpen}
+          onOpenChange={setOutlineDialogOpen}
+          totalChapters={novel.num_chapters}
+          outline={outline}
+          onConfirm={(targets) => {
+            if (targets.length > 0) doGenerateOutline(id, GeminiModelSchema.parse(novel.editor_model), targets)
+          }}
+        />
+      )}
+
+      <Dialog open={promptPreviewOpen} onOpenChange={setPromptPreviewOpen}>
+        <DialogContent className='sm:max-w-3xl'>
+          <DialogHeader>
+            <DialogTitle>章立てを生成するときに Gemini に送るプロンプト</DialogTitle>
+            <DialogDescription>そのまま送信しても block されないかを確認するためのプレビューです。</DialogDescription>
+          </DialogHeader>
+          {promptPreviewLoading && <p className='text-sm text-muted-foreground'>取得中…</p>}
+          {!promptPreviewLoading && promptPreview !== null && (
+            <pre className='max-h-[60vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap'>
+              {promptPreview}
+            </pre>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {novel && outline && (
+        <ChapterSelectionDialog
+          open={chapterDialogOpen}
+          onOpenChange={setChapterDialogOpen}
+          outline={outline}
+          chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
+          onConfirm={(targets) => {
+            if (targets.length > 0) runGeneration(id, targets, GeminiModelSchema.parse(novel.writer_model))
           }}
         />
       )}
