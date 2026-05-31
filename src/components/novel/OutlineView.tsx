@@ -7,6 +7,7 @@ import type { ChapterData } from '@/components/novel/ChapterReader'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
 import type { ChapterCost, Outline } from '@/schemas/novel.dto'
 
@@ -228,7 +229,7 @@ export function OutlineView({
           return (
             <li key={n} className='contents'>
               {linkable ? (
-                <Link href={`/novels/${novelId}/chapters/${n}`} className={className}>
+                <Link href={routes.novels.chapter(novelId, n)} className={className}>
                   {rowContent}
                 </Link>
               ) : (

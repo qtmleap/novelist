@@ -21,6 +21,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
 import { type ChapterCost, GeminiModelSchema, type NovelWithChapters } from '@/schemas/novel.dto'
@@ -113,8 +114,8 @@ export default function ChapterDetailPage() {
   const allChaptersDone = !!novel && novel.chapters.length >= novel.num_chapters
   const canRegenerate = chapter !== null && (isLatest || allChaptersDone)
 
-  const prevHref = chapterNumber > 1 && novelId ? `/novels/${novelId}/chapters/${chapterNumber - 1}` : null
-  const nextHref = chapterNumber < totalChapters && novelId ? `/novels/${novelId}/chapters/${chapterNumber + 1}` : null
+  const prevHref = chapterNumber > 1 && novelId ? routes.novels.chapter(novelId, chapterNumber - 1) : null
+  const nextHref = chapterNumber < totalChapters && novelId ? routes.novels.chapter(novelId, chapterNumber + 1) : null
 
   const handleRegenerate = async () => {
     if (!novelId || chapterNumber <= 0 || !novel) return
@@ -163,7 +164,7 @@ export default function ChapterDetailPage() {
     setIsDeleting(true)
     try {
       await api.deleteChapter(undefined, { params: { id: novelId, number: String(chapterNumber) } })
-      router.push(`/novels/${novelId}`)
+      router.push(routes.novels.detail(novelId))
     } catch (e) {
       setError(readApiError(e, '削除に失敗しました'))
       setIsDeleting(false)
@@ -178,8 +179,8 @@ export default function ChapterDetailPage() {
     <div className='space-y-6'>
       <PageHeader
         crumbs={[
-          { label: '小説一覧', href: '/novels' },
-          { label: novel?.title ?? '詳細', href: novelId ? `/novels/${novelId}` : undefined },
+          { label: '小説一覧', href: routes.novels.list },
+          { label: novel?.title ?? '詳細', href: novelId ? routes.novels.detail(novelId) : undefined },
           { label: `第 ${chapterNumber} 章` }
         ]}
       />
