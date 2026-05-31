@@ -167,7 +167,10 @@ export class ChapterGenerationDO extends DurableObject<Env> {
 
     // 既に終わっている場合は最終イベントを送って閉じる
     if (this.phase === 'done') {
-      await send({ done: true, chapterId: this.chapterId, title: this.chapterTitle })
+      // chapterTitle は persistAll() で保存されるが、DO evict のタイミングによっては
+      // storage から null で復元される場合がある。payload (同じく storage 永続) からフォールバック。
+      const title = this.chapterTitle ?? this.payload?.chapterTitle ?? ''
+      await send({ done: true, chapterId: this.chapterId, title })
       try {
         await writer.close()
       } catch {
@@ -244,6 +247,16 @@ export class ChapterGenerationDO extends DurableObject<Env> {
           await this.ctx.storage.put('lastProgressAt', this.lastProgressAt)
         }
         const event = encoder.encode(`data: ${JSON.stringify({ delta })}\n\n`)
+        await this.fanout(event)
+      }
+
+      // stream: true で保持されたマルチバイト末尾バイトをフラッシュする。
+      // 最後のチャンクが不完全な UTF-8 シーケンスで終わっていた場合、decode() を
+      // stream オプションなしで呼ぶことで残りのバイトを文字列に確定させる。
+      const tail = decoder.decode()
+      if (tail) {
+        this.buffer += tail
+        const event = encoder.encode(`data: ${JSON.stringify({ delta: tail })}\n\n`)
         await this.fanout(event)
       }
 
