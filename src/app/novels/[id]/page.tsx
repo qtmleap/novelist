@@ -1,7 +1,7 @@
 'use client'
 
 import { Copy, Loader2, Pencil, RefreshCw, Sparkles } from 'lucide-react'
-import { useRouter } from 'next/navigation'
+import { useParams, useRouter } from 'next/navigation'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { ChapterSelectionDialog } from '@/components/novel/ChapterSelectionDialog'
@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
 import {
   type Chapter,
@@ -25,15 +26,6 @@ import {
   type Outline,
   OutlineSchema
 } from '@/schemas/novel.dto'
-
-// Module-level helpers (never recreated, safe as effect deps)
-
-function getNovelId(): string {
-  if (typeof window === 'undefined') return ''
-  const parts = window.location.pathname.split('/')
-  const idx = parts.indexOf('novels')
-  return idx !== -1 ? (parts[idx + 1] ?? '') : ''
-}
 
 function parseOutline(raw: string | null): Outline | null {
   if (!raw) return null
@@ -197,9 +189,9 @@ function NovelTotals({
 
 export default function NovelDetailPage() {
   const router = useRouter()
+  const { id } = useParams<{ id: string }>()
   const [state, dispatch] = useReducer(reducer, INITIAL)
   const abortRef = useRef<AbortController | null>(null)
-  const novelIdRef = useRef<string | null>(null)
   const [outlineDialogOpen, setOutlineDialogOpen] = useState(false)
   const [chapterDialogOpen, setChapterDialogOpen] = useState(false)
   const [promptPreviewOpen, setPromptPreviewOpen] = useState(false)
@@ -238,7 +230,7 @@ export default function NovelDetailPage() {
           address_override: r.address_override
         }))
       })
-      router.push(`/novels/${created.id}/edit`)
+      router.push(routes.novels.edit(created.id))
     } catch (e) {
       dispatch({ type: 'LOAD_ERR', error: readApiError(e, '小説のコピーに失敗しました') })
       setIsCopying(false)
@@ -329,15 +321,11 @@ export default function NovelDetailPage() {
 
   // Mount effect — runs once. 生成は明示的なボタン操作からのみ開始する (新規作成直後の自動実行は無し)。
   useEffect(() => {
-    const id = getNovelId()
-    if (!id) return
-    novelIdRef.current = id
     loadNovel(id)
-
     return () => {
       abortRef.current?.abort()
     }
-  }, [loadNovel])
+  }, [id, loadNovel])
 
   const handleCancel = () => {
     abortRef.current?.abort()
@@ -345,9 +333,8 @@ export default function NovelDetailPage() {
   }
 
   const handleRetryChapter = async (num: number) => {
-    const id = novelIdRef.current
     const currentNovel = state.novel
-    if (!id || !currentNovel) return
+    if (!currentNovel) return
     dispatch({ type: 'RETRY_CLEAR' })
     const abort = new AbortController()
     abortRef.current = abort
@@ -361,7 +348,7 @@ export default function NovelDetailPage() {
 
   return (
     <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: '小説一覧', href: '/novels' }, { label: novel?.title ?? '詳細' }]} />
+      <PageHeader crumbs={[{ label: '小説一覧', href: routes.novels.list }, { label: novel?.title ?? '詳細' }]} />
 
       {novel && (
         <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
@@ -383,8 +370,6 @@ export default function NovelDetailPage() {
                 variant='outline'
                 disabled={isGenerating}
                 onClick={async () => {
-                  const id = novelIdRef.current
-                  if (!id) return
                   setPromptPreviewLoading(true)
                   setPromptPreviewOpen(true)
                   try {
@@ -434,7 +419,7 @@ export default function NovelDetailPage() {
             </Button>
             {editAllowed ? (
               <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
-                <a href={`/novels/${novel.id}/edit`}>
+                <a href={routes.novels.edit(novel.id)}>
                   <Pencil />
                   編集
                 </a>
@@ -451,15 +436,7 @@ export default function NovelDetailPage() {
 
       {status === 'loading' && <NovelSkeleton />}
 
-      {status === 'error' && error && (
-        <ErrorAlert
-          message={error}
-          onRetry={() => {
-            const id = novelIdRef.current
-            if (id) loadNovel(id)
-          }}
-        />
-      )}
+      {status === 'error' && error && <ErrorAlert message={error} onRetry={() => loadNovel(id)} />}
 
       {isGenerating && (
         <GenerationStatus
@@ -481,8 +458,6 @@ export default function NovelDetailPage() {
           expectedTotal={novel.num_chapters}
           canEdit={editAllowed}
           onSaveOutline={async (next) => {
-            const id = novelIdRef.current
-            if (id === null) return
             try {
               const res = await api.updateOutline({ outline: next }, { params: { id } })
               // server レスポンスを正として state を更新する。loadNovel まで叩くと SSE 再接続でフラッシュされるので避ける。
@@ -527,8 +502,7 @@ export default function NovelDetailPage() {
           totalChapters={novel.num_chapters}
           outline={outline}
           onConfirm={(targets) => {
-            const id = novelIdRef.current
-            if (id && targets.length > 0) doGenerateOutline(id, GeminiModelSchema.parse(novel.editor_model), targets)
+            if (targets.length > 0) doGenerateOutline(id, GeminiModelSchema.parse(novel.editor_model), targets)
           }}
         />
       )}
@@ -555,8 +529,7 @@ export default function NovelDetailPage() {
           outline={outline}
           chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
           onConfirm={(targets) => {
-            const id = novelIdRef.current
-            if (id && targets.length > 0) runGeneration(id, targets, GeminiModelSchema.parse(novel.writer_model))
+            if (targets.length > 0) runGeneration(id, targets, GeminiModelSchema.parse(novel.writer_model))
           }}
         />
       )}

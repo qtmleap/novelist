@@ -18,12 +18,13 @@ import {
   useSidebar
 } from '@/components/ui/sidebar'
 import { useAuth } from '@/hooks/useAuth'
+import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
-  { label: '小説一覧', href: '/novels', icon: Library },
-  { label: '登場人物一覧', href: '/characters', icon: Users },
-  { label: '設定', href: '/settings', icon: Settings }
+  { label: '小説一覧', href: routes.novels.list, icon: Library },
+  { label: '登場人物一覧', href: routes.characters.list, icon: Users },
+  { label: '設定', href: routes.settings, icon: Settings }
 ]
 
 export function AppSidebar() {
@@ -43,7 +44,7 @@ export function AppSidebar() {
     <Sidebar collapsible='icon'>
       <SidebarHeader className='h-16 justify-center border-b'>
         <Link
-          href='/novels'
+          href={routes.novels.list}
           onClick={closeIfMobile}
           className={cn(
             'group-data-[collapsible=icon]:hidden',
@@ -95,7 +96,7 @@ export function AppSidebar() {
                 disabled={auth.status === 'loading'}
               >
                 {/* CF Access の Application で /login を Allow に設定すれば、このページにアクセスした時点で認証フローが起動する。 */}
-                <a href='/login'>
+                <a href={routes.login}>
                   <LogIn />
                   <span>{auth.status === 'loading' ? '確認中…' : 'ログイン'}</span>
                 </a>

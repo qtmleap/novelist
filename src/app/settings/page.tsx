@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useAtom } from 'jotai'
+import { useState } from 'react'
 import { PageHeader } from '@/components/PageHeader'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { getEditorModel, getWriterModel, setEditorModel, setWriterModel } from '@/lib/settings'
-import { GEMINI_MODELS, type GeminiModel, MODEL_META } from '@/schemas/novel.dto'
+import { GEMINI_MODELS, type GeminiModel, GeminiModelSchema, MODEL_META } from '@/schemas/novel.dto'
+import { editorModelAtom, writerModelAtom } from '@/store/atoms'
 
 function Stars({ n }: { n: number }) {
   return (
@@ -35,35 +36,26 @@ function ModelMeta({ model }: { model: GeminiModel }) {
 }
 
 export default function SettingsPage() {
-  const [editorModel, setEditorModelState] = useState<GeminiModel | null>(null)
-  const [writerModel, setWriterModelState] = useState<GeminiModel | null>(null)
+  const [editorModel, setEditorModel] = useAtom(editorModelAtom)
+  const [writerModel, setWriterModel] = useAtom(writerModelAtom)
   const [saved, setSaved] = useState(false)
-
-  useEffect(() => {
-    setEditorModelState(getEditorModel())
-    setWriterModelState(getWriterModel())
-  }, [])
-
-  const handleEditorChange = (value: string) => {
-    const m = value as GeminiModel
-    setEditorModel(m)
-    setEditorModelState(m)
-    showSaved()
-  }
-
-  const handleWriterChange = (value: string) => {
-    const m = value as GeminiModel
-    setWriterModel(m)
-    setWriterModelState(m)
-    showSaved()
-  }
 
   const showSaved = () => {
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
   }
 
-  if (editorModel === null || writerModel === null) return null
+  const handleEditorChange = (value: string) => {
+    const result = GeminiModelSchema.safeParse(value)
+    if (result.success) setEditorModel(result.data)
+    showSaved()
+  }
+
+  const handleWriterChange = (value: string) => {
+    const result = GeminiModelSchema.safeParse(value)
+    if (result.success) setWriterModel(result.data)
+    showSaved()
+  }
 
   return (
     <div className='space-y-6'>

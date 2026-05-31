@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation'
 import { useEffect } from 'react'
 import { PageHeader } from '@/components/PageHeader'
 import { useAuth } from '@/hooks/useAuth'
+import { routes } from '@/lib/routes'
 
 // CF Access の Application で **このページ** (`/login`) だけを gate する。
 // 匿名で `/login` にアクセス → CF Access のログイン画面に redirect → 認証 → `/login` に戻ってくる。
@@ -16,7 +17,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (auth.status === 'authenticated') {
-      router.replace('/novels')
+      router.replace(routes.novels.list)
     }
   }, [auth.status, router])
 

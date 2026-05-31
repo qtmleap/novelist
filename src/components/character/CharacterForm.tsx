@@ -2,7 +2,7 @@
 
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2, Plus, Save, Trash2 } from 'lucide-react'
-import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
+import { type DefaultValues, type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { z } from 'zod'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -19,7 +19,7 @@ import {
 } from '@/schemas/character.dto'
 
 type Props = {
-  defaultValues?: Partial<CreateCharacterInput>
+  defaultValues?: DefaultValues<CreateCharacterInput>
   submitLabel: string
   onSubmit: (data: CreateCharacterInput) => Promise<void>
   isSubmitting?: boolean

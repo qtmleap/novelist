@@ -2,6 +2,7 @@
 
 import { BookOpen, Calendar, ChevronRight, Layers } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
+import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
 import type { Novel } from '@/schemas/novel.dto'
 
@@ -22,7 +23,7 @@ export function NovelCard({ novel }: Props) {
   const status = hasOutline ? '生成済み' : '未生成'
 
   return (
-    <a href={`/novels/${novel.id}`} className='flex items-center gap-3 px-4 py-3 transition hover:bg-muted/50'>
+    <a href={routes.novels.detail(novel.id)} className='flex items-center gap-3 px-4 py-3 transition hover:bg-muted/50'>
       <BookOpen className='size-5 shrink-0 text-primary' />
       <div className='min-w-0 flex-1'>
         <span className='truncate font-medium text-sm'>{novel.title}</span>

@@ -3,6 +3,7 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2, PenLine, Plus, Save, Trash2, UserPlus } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import type { DefaultValues } from 'react-hook-form'
 import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -10,6 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api/client'
+import { routes } from '@/lib/routes'
 import type { Character } from '@/schemas/character.dto'
 import { ADDRESS_STYLES, CHARACTER_ROLES } from '@/schemas/character.dto'
 import {
@@ -51,7 +53,7 @@ const CHAPTER_COUNT_OPTIONS = Array.from({ length: 30 }, (_, i) => i + 1)
 type Props = {
   onSubmit: (data: CreateNovelInput) => Promise<void>
   isSubmitting: boolean
-  defaultValues?: CreateNovelInput
+  defaultValues?: DefaultValues<CreateNovelInput>
   mode?: 'create' | 'edit'
 }
 
@@ -432,7 +434,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
         {dictionary.length === 0 ? (
           <p className='text-sm text-muted-foreground'>
             登場人物がまだ登録されていません。{' '}
-            <a href='/characters/new' className='underline underline-offset-2'>
+            <a href={routes.characters.new} className='underline underline-offset-2'>
               辞典に追加する
             </a>
           </p>
