@@ -1,7 +1,7 @@
 'use client'
 
 import { QueryErrorResetBoundary } from '@tanstack/react-query'
-import { Component, type ReactNode, Suspense } from 'react'
+import { Component, type ReactNode, Suspense, useEffect, useState } from 'react'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { readApiError } from '@/lib/api/client'
 
@@ -35,7 +35,14 @@ type Props = {
   fallback: ReactNode
 }
 
+// Prevents queries from running during SSR — all data fetching is client-only.
+// SSR returns the skeleton; the client mounts and fetches.
 export function QueryBoundary({ children, fallback }: Props) {
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => { setMounted(true) }, [])
+
+  if (!mounted) return <>{fallback}</>
+
   return (
     <QueryErrorResetBoundary>
       {({ reset }) => (
