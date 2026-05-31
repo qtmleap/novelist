@@ -22,8 +22,9 @@ export function ThemeToggle() {
       aria-label='テーマ切替'
       onClick={() => setTheme(isDark ? 'light' : 'dark')}
       className='[&_svg]:size-5!'
+      suppressHydrationWarning
     >
-      {isDark ? <Sun /> : <Moon />}
+      {isDark ? <Sun suppressHydrationWarning /> : <Moon suppressHydrationWarning />}
     </Button>
   )
 }
