@@ -67,10 +67,25 @@ function serializeNovel(n: {
     notes: n.notes,
     editor_model: n.editor_model,
     writer_model: n.writer_model,
-    outline: n.outline,
+    // DB の JSON 文字列をパース・検証してオブジェクトで返す。未生成 (null) や壊れた JSON は null。
+    outline: parseStoredOutline(n.outline),
     created_at: n.created_at.toISOString(),
     updated_at: n.updated_at.toISOString()
   }
+}
+
+// DB に保存された outline (JSON 文字列 | null) を OutlineSchema で検証して返す。
+// 壊れていれば null にフォールバックし、API レスポンスは常に Outline | null で一貫させる。
+function parseStoredOutline(raw: string | null): z.infer<typeof OutlineSchema> | null {
+  if (raw === null || raw.length === 0) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  const result = OutlineSchema.safeParse(parsed)
+  return result.success ? result.data : null
 }
 
 function serializeCharacter(c: {

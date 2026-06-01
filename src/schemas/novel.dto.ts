@@ -154,7 +154,10 @@ export const NovelSchema = z.object({
   // フォーム入力 (CreateNovelSchema) 側は厳密に GeminiModelSchema を要求している。
   editor_model: z.string(),
   writer_model: z.string(),
-  outline: z.string().nullable(),
+  // outline は DB では JSON 文字列で保存するが、API レスポンスではサーバーがパース・検証した
+  // オブジェクトとして返す (フロントで JSON.parse する手間と検証漏れを避ける)。未生成や
+  // 壊れた JSON の場合は null。
+  outline: OutlineSchema.nullable(),
   created_at: z.string(),
   updated_at: z.string()
 })
