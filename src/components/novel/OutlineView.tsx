@@ -16,8 +16,8 @@ type Props = {
   isGenerating: boolean
   regenerateSlot?: ReactNode
   isBusy?: boolean
-  chapters?: ChapterData[]
-  costs?: ChapterCost[]
+  chapters: ChapterData[]
+  costs: ChapterCost[]
   streamingIndex?: number | null
   // 生成済みの章を押したときの遷移先 (例: /novels/[id]/chapters/[number])。
   novelId?: string
@@ -55,30 +55,34 @@ export function OutlineView({
   // outline (prop) が外から変わったら draft も追従させる (再生成後など)。
   // 編集中の差分は捨てる: 衝突するくらいなら最新を採用する方針。
   useEffect(() => {
-    setDraft(outline?.chapters ?? [])
+    setDraft(outline !== null ? outline.chapters : [])
   }, [outline])
 
   const chapterByNumber = new Map<number, ChapterData>()
-  for (const c of chapters ?? []) chapterByNumber.set(c.number, c)
+  for (const c of chapters) chapterByNumber.set(c.number, c)
   const costByNumber = new Map<number, ChapterCost>()
-  for (const c of costs ?? []) costByNumber.set(c.chapter_number, c)
+  for (const c of costs) costByNumber.set(c.chapter_number, c)
   const outlineByNumber = new Map<number, Outline['chapters'][number]>()
-  for (const ch of outline?.chapters ?? []) outlineByNumber.set(ch.chapter_number, ch)
+  for (const ch of outline !== null ? outline.chapters : []) outlineByNumber.set(ch.chapter_number, ch)
 
   // 表示対象は outline の章番号 + novel.num_chapters まで。
   // どちらも 0 のときは何も出さない。
-  const maxNumber = Math.max(expectedTotal, ...Array.from(outlineByNumber.keys()), streamingIndex ?? 0)
+  const maxNumber = Math.max(
+    expectedTotal,
+    ...Array.from(outlineByNumber.keys()),
+    streamingIndex !== null ? streamingIndex : 0
+  )
   if (maxNumber === 0 && !isGenerating) return null
   const slots = Array.from({ length: maxNumber }, (_, i) => i + 1)
 
   const editableSaveable = onSaveOutline !== undefined && canEdit && !isGenerating
 
   const handleStartEdit = () => {
-    setDraft(outline?.chapters ?? [])
+    setDraft(outline !== null ? outline.chapters : [])
     setEditing(true)
   }
   const handleCancelEdit = () => {
-    setDraft(outline?.chapters ?? [])
+    setDraft(outline !== null ? outline.chapters : [])
     setEditing(false)
   }
   const handleSave = async () => {

@@ -9,8 +9,10 @@ import {
   type StreamChapterUsage,
   streamChapter
 } from '@/lib/gemini/client'
+import { buildChapterPayload } from '@/lib/novel/chapter-payload'
 import { saveChapter } from '@/lib/novel/repository'
 import type { GeminiModel, Outline } from '@/schemas/novel.dto'
+import { GeminiModelSchema } from '@/schemas/novel.dto'
 
 // Gemini の finishReason を人向けの日本語メッセージに変換する。
 // 'STOP' 以外がここに届く前提なので 'STOP' は扱わない。
@@ -320,6 +322,13 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         return
       }
 
+      // Advance queue before notifying subscribers so client refetch sees updated job
+      try {
+        await this.advanceGenerationJob()
+      } catch {
+        // best-effort: don't fail chapter completion due to job advancement error
+      }
+
       this.phase = 'done'
       await this.persistAll()
 
@@ -377,6 +386,56 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.ctx.storage.put('payload', this.payload),
       this.ctx.storage.put('lastProgressAt', this.lastProgressAt)
     ])
+  }
+
+  private async advanceGenerationJob(): Promise<void> {
+    if (!this.payload) return
+    const prisma = this.makePrisma()
+    try {
+      const job = await prisma.novelGenerationJob.findUnique({
+        where: { novel_id: this.payload.novelId }
+      })
+      if (!job || job.status !== 'running') return
+
+      const pending: number[] = JSON.parse(job.pending)
+      if (pending.length === 0 || pending[0] !== this.payload.chapterNumber) return
+
+      const remaining = pending.slice(1)
+
+      if (remaining.length === 0) {
+        await prisma.novelGenerationJob.update({
+          where: { novel_id: this.payload.novelId },
+          data: { status: 'completed', pending: '[]', current: null }
+        })
+        return
+      }
+
+      const nextChapter = remaining[0]
+      await prisma.novelGenerationJob.update({
+        where: { novel_id: this.payload.novelId },
+        data: { pending: JSON.stringify(remaining), current: nextChapter }
+      })
+
+      const nextPayload = await buildChapterPayload(
+        prisma,
+        this.payload.novelId,
+        nextChapter,
+        this.payload.model !== undefined ? this.payload.model : GeminiModelSchema.enum['gemini-2.5-flash']
+      )
+      if (!nextPayload) {
+        await prisma.novelGenerationJob.update({
+          where: { novel_id: this.payload.novelId },
+          data: { status: 'stopped' }
+        })
+        return
+      }
+
+      const doId = this.env.CHAPTER_GEN.idFromName(`${this.payload.novelId}:${nextChapter}`)
+      const stub = this.env.CHAPTER_GEN.get(doId)
+      await stub.start(nextPayload)
+    } finally {
+      await prisma.$disconnect()
+    }
   }
 
   private makePrisma(): PrismaClient {

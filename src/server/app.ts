@@ -1,7 +1,6 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import type { StartChapterGenPayload } from '@/lib/chapter-gen-do'
 import {
   createCharacter,
   deleteCharacter,
@@ -10,19 +9,22 @@ import {
   updateCharacter
 } from '@/lib/character/repository'
 import { getEnv, getPrisma } from '@/lib/db'
-import type { CastMember, CastRelation } from '@/lib/gemini/client'
 import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
+import { buildCastForGemini, buildChapterPayload, buildRelationsForGemini } from '@/lib/novel/chapter-payload'
 import {
   createNovel,
   deleteNovel,
   getNovelWithChapters,
   listNovels,
   saveOutline,
-  updateNovel
+  stopGenerationJob,
+  updateNovel,
+  upsertGenerationJob
 } from '@/lib/novel/repository'
 import { CreateCharacterSchema } from '@/schemas/character.dto'
 import {
   CreateNovelSchema,
+  GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   OutlineSchema
@@ -69,67 +71,6 @@ function serializeNovel(n: {
     created_at: n.created_at.toISOString(),
     updated_at: n.updated_at.toISOString()
   }
-}
-
-// Gemini プロンプト用に NovelWithChapters.character_links / relations を
-// 辞典フィールド込みの CastMember[] / CastRelation[] に変換する。
-// speech_examples は DB では JSON 文字列で持っているのでここでパースする。
-function buildCastForGemini(
-  characterLinks: Array<{
-    character_id: string
-    role: string
-    character: {
-      name: string
-      gender: string
-      age: string
-      occupation: string
-      appearance: string
-      first_person: string
-      address_others: string
-      speech_examples: string
-      description: string
-    }
-  }>
-): CastMember[] {
-  return characterLinks.map((l) => {
-    let speech: string[] = []
-    try {
-      const parsed = JSON.parse(l.character.speech_examples)
-      if (Array.isArray(parsed)) speech = parsed.filter((s) => typeof s === 'string')
-    } catch {
-      // malformed stored value — skip
-    }
-    return {
-      name: l.character.name,
-      role: l.role,
-      gender: l.character.gender,
-      age: l.character.age,
-      occupation: l.character.occupation,
-      appearance: l.character.appearance,
-      first_person: l.character.first_person,
-      address_others: l.character.address_others,
-      speech_examples: speech,
-      description: l.character.description
-    }
-  })
-}
-
-function buildRelationsForGemini(
-  relations: Array<{
-    source_name: string
-    target_name: string
-    relation: string
-    description: string
-    address_override: string
-  }>
-): CastRelation[] {
-  return relations.map((r) => ({
-    source_name: r.source_name,
-    target_name: r.target_name,
-    relation: r.relation,
-    description: r.description,
-    address_override: r.address_override
-  }))
 }
 
 function serializeCharacter(c: {
@@ -208,7 +149,14 @@ export const app = new Hono()
         cast: novel.cast,
         relations: novel.relations,
         generation_costs: novel.generation_costs,
-        total_cost_usd: novel.total_cost_usd
+        total_cost_usd: novel.total_cost_usd,
+        gen_job: novel.generation_job
+          ? (() => {
+              const parsed: unknown = JSON.parse(novel.generation_job.pending)
+              const pending = Array.isArray(parsed) ? parsed.filter((x): x is number => typeof x === 'number') : []
+              return { status: novel.generation_job.status, current: novel.generation_job.current, pending }
+            })()
+          : null
       })
     } finally {
       await prisma.$disconnect()
@@ -450,63 +398,18 @@ export const app = new Hono()
 
     const options = c.req.valid('json')
     const prisma = getPrisma()
-    let payload: StartChapterGenPayload
+    let payload: import('@/lib/chapter-gen-do').StartChapterGenPayload | null
     try {
-      const novel = await getNovelWithChapters(prisma, id)
-      if (!novel) return c.json({ error: 'not_found' }, 404)
-      if (!novel.outline) return c.json({ error: 'outline_not_generated' }, 400)
-
-      let outlineParsed: ReturnType<typeof OutlineSchema.safeParse>
-      try {
-        outlineParsed = OutlineSchema.safeParse(JSON.parse(novel.outline))
-      } catch {
-        return c.json({ error: 'invalid_outline' }, 500)
-      }
-      if (!outlineParsed.success) return c.json({ error: 'invalid_outline' }, 500)
-
-      const outline = outlineParsed.data
-      const targetEntry = outline.chapters.find((ch) => ch.chapter_number === chapterNumber)
-      if (!targetEntry) return c.json({ error: 'chapter_not_in_outline' }, 400)
-
-      const previousChapters = novel.chapters
-        .filter((ch) => ch.chapter_number < chapterNumber)
-        .sort((a, b) => a.chapter_number - b.chapter_number)
-        .slice(-2)
-        .map((ch) => ({ chapter_number: ch.chapter_number, content: ch.content }))
-
-      const povChar = novel.pov_character_id
-        ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
-        : undefined
-
-      payload = {
-        novelId: id,
+      payload = await buildChapterPayload(
+        prisma,
+        id,
         chapterNumber,
-        chapterTitle: targetEntry.title,
-        targetChars: novel.target_chars,
-        model: options.model,
-        novel: {
-          title: novel.title,
-          genre: novel.genre,
-          characters: novel.characters,
-          setting: novel.setting,
-          num_chapters: novel.num_chapters,
-          notes: novel.notes
-        },
-        outline,
-        previousChapters,
-        style: {
-          pov: novel.pov,
-          tone: novel.tone,
-          age_rating: novel.age_rating,
-          ending: novel.ending,
-          viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
-        },
-        cast: buildCastForGemini(novel.character_links),
-        relations: buildRelationsForGemini(novel.relations)
-      }
+        options.model !== undefined ? options.model : GeminiModelSchema.enum['gemini-2.5-flash']
+      )
     } finally {
       await prisma.$disconnect()
     }
+    if (!payload) return c.json({ error: 'not_found' }, 404)
 
     const env = getEnv()
     const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
@@ -527,6 +430,45 @@ export const app = new Hono()
     const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
     const stub = env.CHAPTER_GEN.get(doId)
     return stub.openStream()
+  })
+
+  .post(
+    '/novels/:id/generation/start',
+    requireAuth,
+    zValidator('json', z.object({ chapters: z.array(z.number().int().min(1)).min(1), model: GeminiModelSchema })),
+    async (c) => {
+      const id = c.req.param('id')
+      const { chapters, model } = c.req.valid('json')
+      const prisma = getPrisma()
+      try {
+        await upsertGenerationJob(prisma, id, {
+          status: 'running',
+          pending: JSON.stringify(chapters),
+          current: chapters[0],
+          model
+        })
+        const payload = await buildChapterPayload(prisma, id, chapters[0], model)
+        if (!payload) return c.json({ error: 'not_found' }, 404)
+        const env = getEnv()
+        const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapters[0]}`)
+        const stub = env.CHAPTER_GEN.get(doId)
+        await stub.start(payload)
+        return c.json({ status: 'started' }, 202)
+      } finally {
+        await prisma.$disconnect()
+      }
+    }
+  )
+
+  .post('/novels/:id/generation/stop', requireAuth, async (c) => {
+    const id = c.req.param('id')
+    const prisma = getPrisma()
+    try {
+      await stopGenerationJob(prisma, id)
+      return c.json({ ok: true })
+    } finally {
+      await prisma.$disconnect()
+    }
   })
 
   // 章本文の削除。整合性を保つため「最新の生成済み章」しか消せない (後続を消さないと前章を消す意味がないので)。
