@@ -10,7 +10,7 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 const GeminiCandidateSchema = z.object({
   content: z
     .object({
-      parts: z.array(z.object({ text: z.string().optional() })).optional()
+      parts: z.array(z.object({ text: z.string().optional(), thought: z.boolean().default(false) })).optional()
     })
     .optional(),
   finishReason: z.string().optional(),
@@ -641,7 +641,12 @@ function extractUsage(chunk: unknown, model: string): Omit<StreamChapterUsage, '
 function extractText(chunk: unknown): string {
   const parsed = GeminiResponseSchema.safeParse(chunk)
   if (!parsed.success) return ''
-  return parsed.data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+  const parts = parsed.data.candidates?.[0]?.content?.parts
+  if (!parts || parts.length === 0) return ''
+  return parts
+    .filter((p) => p.thought !== true)
+    .map((p) => (p.text !== undefined ? p.text : ''))
+    .join('')
 }
 
 // chunk に乗っていれば finishReason を取り出す。最終 chunk にだけ含まれることが多い。
