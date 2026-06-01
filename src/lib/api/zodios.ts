@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { CharacterSchema, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
   CreateNovelSchema,
+  GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   NovelSchema,
@@ -114,6 +115,33 @@ export const api = makeApi([
     parameters: [{ name: 'body', type: 'Body', schema: GenerateOptionsSchema }],
     response: GenerateAckSchema,
     status: 202,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'post',
+    path: '/api/novels/:id/generation/start',
+    alias: 'startBatchGeneration',
+    description: '章リストをキューに登録してバックグラウンド生成を開始',
+    parameters: [
+      {
+        name: 'body',
+        type: 'Body',
+        schema: z.object({
+          chapters: z.array(z.number().int().min(1)).min(1),
+          model: GeminiModelSchema
+        })
+      }
+    ],
+    response: z.object({ status: z.literal('started') }),
+    status: 202,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'post',
+    path: '/api/novels/:id/generation/stop',
+    alias: 'stopGeneration',
+    description: '生成キューを停止',
+    response: z.object({ ok: z.literal(true) }),
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   {

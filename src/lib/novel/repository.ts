@@ -117,7 +117,8 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
           target: { select: { id: true, name: true } }
         }
       },
-      generation_costs: { orderBy: [{ chapter_number: 'asc' }, { created_at: 'desc' }] }
+      generation_costs: { orderBy: [{ chapter_number: 'asc' }, { created_at: 'desc' }] },
+      generation_job: true
     }
   })
 
@@ -166,8 +167,28 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
       address_override: r.address_override
     })),
     generation_costs,
-    total_cost_usd
+    total_cost_usd,
+    generation_job: novel.generation_job
   }
+}
+
+export async function upsertGenerationJob(
+  prisma: PrismaClient,
+  novelId: string,
+  data: { status: string; pending: string; current: number | null; model: string }
+) {
+  return prisma.novelGenerationJob.upsert({
+    where: { novel_id: novelId },
+    create: { novel_id: novelId, ...data },
+    update: { ...data }
+  })
+}
+
+export async function stopGenerationJob(prisma: PrismaClient, novelId: string) {
+  return prisma.novelGenerationJob.updateMany({
+    where: { novel_id: novelId, status: 'running' },
+    data: { status: 'stopped' }
+  })
 }
 
 export async function listNovels(prisma: PrismaClient) {

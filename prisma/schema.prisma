@@ -31,6 +31,19 @@ model Novel {
   character_links  NovelCharacter[]
   relations        NovelCharacterRelation[]
   generation_costs ChapterGenerationCost[]
+  generation_job   NovelGenerationJob?
+}
+
+model NovelGenerationJob {
+  id         String   @id @default(uuid())
+  novel_id   String   @unique
+  novel      Novel    @relation(fields: [novel_id], references: [id], onDelete: Cascade)
+  status     String
+  pending    String
+  current    Int?
+  model      String
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 }
 
 model Character {
