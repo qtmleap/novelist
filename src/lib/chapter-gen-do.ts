@@ -205,6 +205,22 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         /* already closed */
       }
       this.subscribers.delete(sub)
+    } else if (this.phase === 'streaming') {
+      // 自己修復: phase=streaming だが進捗が STALE なものは、DO eviction で run() の Promise が
+      // 失われ alarm chain も途切れた死亡状態とみなす。alarm を待たず、接続が来たこの場で
+      // run() を再起動 + alarm を貼り直す。lastProgressAt を先に更新するので、ほぼ同時に
+      // 複数 subscriber が来ても二重起動しない。
+      const sinceProgress = Date.now() - this.lastProgressAt
+      if (sinceProgress > STALE_STREAMING_MS && this.payload !== null) {
+        this.buffer = ''
+        this.errMsg = null
+        this.chapterId = null
+        this.chapterTitle = null
+        this.lastProgressAt = Date.now()
+        await this.persistAll()
+        await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_INTERVAL_MS)
+        this.ctx.waitUntil(this.run())
+      }
     }
 
     return new Response(readable, {
@@ -356,6 +372,11 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         this.phase = 'error'
         this.errMsg = truncationMessage(finishReason)
         await this.persistAll()
+        try {
+          await this.failGenerationJob()
+        } catch {
+          // best-effort
+        }
         const errEvent = encoder.encode(`data: ${JSON.stringify({ error: this.errMsg })}\n\n`)
         await this.fanout(errEvent)
         await this.closeAll()
@@ -387,10 +408,31 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     this.phase = 'error'
     this.errMsg = msg
     await this.persistAll()
+    // running の生成ジョブを stopped に落とす。これをしないと job が永遠に running のまま残り、
+    // フロントは毎回ロード時にこの章を「生成中」とみなして購読 → 即エラー表示を繰り返す。
+    try {
+      await this.failGenerationJob()
+    } catch {
+      // best-effort: ジョブ更新の失敗で error 通知自体を止めない
+    }
     const encoder = new TextEncoder()
     const event = encoder.encode(`data: ${JSON.stringify({ error: msg })}\n\n`)
     await this.fanout(event)
     await this.closeAll()
+  }
+
+  // この novel の running ジョブを stopped にする (エラー/途中打ち切り時)。
+  private async failGenerationJob(): Promise<void> {
+    if (this.payload === null) return
+    const prisma = this.makePrisma()
+    try {
+      await prisma.novelGenerationJob.updateMany({
+        where: { novel_id: this.payload.novelId, status: 'running' },
+        data: { status: 'stopped' }
+      })
+    } finally {
+      await prisma.$disconnect()
+    }
   }
 
   private async fanout(event: Uint8Array) {

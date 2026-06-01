@@ -20,29 +20,12 @@ import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
-import {
-  type Chapter,
-  type ChapterCost,
-  type GeminiModel,
-  GeminiModelSchema,
-  type Outline,
-  OutlineSchema
-} from '@/schemas/novel.dto'
+import { type Chapter, type ChapterCost, type GeminiModel, GeminiModelSchema, type Outline } from '@/schemas/novel.dto'
 
 function asGeminiModel(model: string): GeminiModel {
   const result = GeminiModelSchema.safeParse(model)
   if (!result.success) throw new Error(`Invalid model: ${model}`)
   return result.data
-}
-
-function parseOutline(raw: string | null): Outline | null {
-  if (!raw) return null
-  try {
-    const parsed = OutlineSchema.safeParse(JSON.parse(raw))
-    return parsed.success ? parsed.data : null
-  } catch {
-    return null
-  }
 }
 
 function chaptersFromApi(apiChapters: Chapter[]): ChapterData[] {
@@ -188,7 +171,7 @@ function NovelDetailContent({ id }: { id: string }) {
     genReducer,
     novel,
     (n): GenState => ({
-      outline: parseOutline(n.outline),
+      outline: n.outline,
       chapters: chaptersFromApi(n.chapters),
       streamingIndex: null,
       buffer: '',
