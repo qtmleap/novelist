@@ -29,6 +29,24 @@ function truncationMessage(finishReason: string): string {
   return `生成が途中で打ち切られました (理由: ${finishReason})。途中までの本文は保存されています。`
 }
 
+// 出力が 0 文字だったときの原因別メッセージ。blockReason (プロンプト拒否) を最優先で示し、
+// それが無ければ finishReason、どちらも無ければ汎用文を返す。
+function emptyOutputMessage(blockReason: string | undefined, finishReason: string | undefined): string {
+  if (blockReason === 'PROHIBITED_CONTENT') {
+    return 'Gemini がプロンプトを拒否しました (PROHIBITED_CONTENT)。登場人物の年齢設定 (18 歳未満) と性的描写の組み合わせなど、Google が一律で禁じている内容に該当している可能性があります。年齢を 18 歳以上にするか、年齢指定を R15/全年齢 に変更して再生成してください。'
+  }
+  if (blockReason === 'SAFETY') {
+    return 'Gemini のセーフティ判定でプロンプトが拒否されました (SAFETY)。設定や備考の表現をやや穏当にして再生成してください。'
+  }
+  if (blockReason !== undefined) {
+    return `Gemini がプロンプトを拒否しました (${blockReason})。設定内容を見直して再生成してください。`
+  }
+  if (finishReason !== undefined && finishReason !== 'STOP') {
+    return `生成テキストが空でした (finishReason: ${finishReason})。モデルを変更するか、設定を調整して再生成してください。`
+  }
+  return '生成テキストが空でした。Gemini がプロンプトをブロックしたか、思考モデルの出力がフィルタされた可能性があります。モデルを変更して再生成してください。'
+}
+
 // DO 起動時に worker から渡されるペイロード。プロンプト合成に必要な小説 + outline 情報を全部含む
 // (DO 側で D1 を読みに行かない: 起動時の novel スナップショットを使うほうが冪等で扱いやすい)。
 export type StartChapterGenPayload = {
@@ -191,7 +209,9 @@ export class ChapterGenerationDO extends DurableObject<Env> {
 
     return new Response(readable, {
       headers: {
-        'Content-Type': 'text/event-stream',
+        // charset=utf-8 を明示しないと、プロキシや devtools が Latin-1 と誤解して
+        // 日本語の delta / error メッセージが文字化けする (例: 生成 → ç”Ÿæˆ)。
+        'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache',
         'X-Accel-Buffering': 'no'
       }
@@ -232,7 +252,13 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         style: payload.style,
         cast: payload.cast,
         relations: payload.relations,
-        model: payload.model
+        model: payload.model,
+        // thinking チャンクを含む全 Gemini チャンク受信時に lastProgressAt を更新する。
+        // thinking フェーズ中はテキスト出力がないため result.stream に何も流れず、
+        // lastProgressAt が更新されないまま alarm の stale 閾値を超えて誤再起動するのを防ぐ。
+        onChunk: () => {
+          this.lastProgressAt = Date.now()
+        }
       })
 
       const decoder = new TextDecoder()
@@ -275,6 +301,20 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       }
       const finishReason = usage === undefined ? 'STOP' : usage.finishReason
       const truncated = finishReason !== 'STOP'
+
+      // バッファが空の場合はエラー扱い。Gemini がプロンプトを拒否したか、思考モデルが
+      // 全出力を thinking チャンクとして送り extractText でフィルタされた可能性がある。
+      // 0 文字で保存してしまうと UI に何も表示されないため、ユーザーが気づけるよう error にする。
+      if (this.buffer.length === 0) {
+        let blockReason: string | undefined
+        try {
+          blockReason = await result.blockReason
+        } catch {
+          blockReason = undefined
+        }
+        await this.transitionError(emptyOutputMessage(blockReason, usage?.finishReason))
+        return
+      }
 
       // D1 へ章本文を保存 (途中打ち切りでも残しておいて、UI 側で再生成判断できるようにする)
       const prisma = this.makePrisma()

@@ -197,12 +197,12 @@ export const NovelGenerationJobSchema = z.object({
 export type NovelGenerationJob = z.infer<typeof NovelGenerationJobSchema>
 
 export const NovelWithChaptersSchema = NovelSchema.extend({
-  chapters: z.array(ChapterSchema),
+  chapters: z.array(ChapterSchema).default([]),
   cast: z.array(NovelCastMemberSchema).default([]),
   relations: z.array(NovelRelationSchema).default([]),
   generation_costs: z.array(ChapterCostSchema).default([]),
   total_cost_usd: z.number().default(0),
-  gen_job: NovelGenerationJobSchema.nullable()
+  gen_job: NovelGenerationJobSchema.nullable().default(null)
 })
 export type NovelWithChapters = z.infer<typeof NovelWithChaptersSchema>
 

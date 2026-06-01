@@ -199,7 +199,9 @@ function NovelDetailContent({ id }: { id: string }) {
 
   const abortRef = useRef<AbortController | null>(null)
 
-  const genJobCurrentKey = novel.gen_job !== null && novel.gen_job.status === 'running' ? novel.gen_job.current : null
+  const genJob = novel.gen_job
+  const genJobCurrentKey =
+    genJob !== null && genJob !== undefined && genJob.status === 'running' ? genJob.current : null
 
   useEffect(() => {
     if (genJobCurrentKey === null) return

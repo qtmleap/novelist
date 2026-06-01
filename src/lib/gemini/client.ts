@@ -108,6 +108,9 @@ type StreamChapterParams = {
   cast?: CastMember[]
   relations?: CastRelation[]
   model?: GeminiModel
+  // Gemini から任意のチャンク (thinking 含む) を受け取るたびに呼ばれるコールバック。
+  // DO 側が lastProgressAt を更新して stale 誤検知を防ぐために使う。
+  onChunk?: () => void
 }
 
 type ModelPricing = { input: number; output: number }
@@ -471,6 +474,10 @@ export type StreamChapterUsage = {
 export type StreamChapterResult = {
   stream: ReadableStream<Uint8Array>
   usage: Promise<StreamChapterUsage>
+  // Gemini がプロンプト自体を拒否した場合の理由 (PROHIBITED_CONTENT 等)。
+  // stream 終了時に resolve される。拒否がなければ undefined。
+  // 空出力時に DO 側がユーザーへ原因を提示するために使う。
+  blockReason: Promise<string | undefined>
 }
 
 export function streamChapter(env: Env, params: StreamChapterParams): StreamChapterResult {
@@ -549,6 +556,11 @@ ${sections.join('\n\n')}
     rejectUsage = rej
   })
 
+  let resolveBlockReason!: (value: string | undefined) => void
+  const blockReason = new Promise<string | undefined>((res) => {
+    resolveBlockReason = res
+  })
+
   const doStream = async () => {
     let res: Response
     try {
@@ -577,6 +589,7 @@ ${sections.join('\n\n')}
     // finishReason は最終 chunk にのみ乗ることが多いので、流れる度に上書き。
     // 終了時にこれを見て途中打ち切り (MAX_TOKENS/SAFETY/RECITATION) を検出する。
     let lastFinishReason: string | undefined
+    let lastBlockReason: string | undefined
 
     try {
       for await (const value of res.body) {
@@ -594,6 +607,8 @@ ${sections.join('\n\n')}
           } catch {
             continue
           }
+          // thinking 含む全チャンク受信時に通知 (DO 側の lastProgressAt 更新用)
+          params.onChunk?.()
           const text = extractText(chunk)
           if (text) {
             await writer.write(encoder.encode(text))
@@ -602,10 +617,13 @@ ${sections.join('\n\n')}
           if (meta) lastUsage = meta
           const fr = extractFinishReason(chunk)
           if (fr) lastFinishReason = fr
+          const br = extractBlockReason(chunk)
+          if (br) lastBlockReason = br
         }
       }
     } finally {
       await writer.close()
+      resolveBlockReason(lastBlockReason)
       if (lastUsage) {
         const finishReason = lastFinishReason === undefined ? 'STOP' : lastFinishReason
         resolveUsage({ ...lastUsage, finishReason })
@@ -617,6 +635,7 @@ ${sections.join('\n\n')}
 
   doStream().catch(async (e) => {
     rejectUsage(e)
+    resolveBlockReason(undefined)
     try {
       await writer.abort(e)
     } catch {
@@ -624,7 +643,7 @@ ${sections.join('\n\n')}
     }
   })
 
-  return { stream: readable, usage }
+  return { stream: readable, usage, blockReason }
 }
 
 function extractUsage(chunk: unknown, model: string): Omit<StreamChapterUsage, 'finishReason'> | undefined {
@@ -654,4 +673,12 @@ function extractFinishReason(chunk: unknown): string | undefined {
   const parsed = GeminiResponseSchema.safeParse(chunk)
   if (!parsed.success) return undefined
   return parsed.data.candidates?.[0]?.finishReason
+}
+
+// chunk に乗っていれば promptFeedback.blockReason を取り出す。
+// プロンプトが拒否されると候補なしでこのフィールドだけ送られてくる (= 空出力の原因)。
+function extractBlockReason(chunk: unknown): string | undefined {
+  const parsed = GeminiResponseSchema.safeParse(chunk)
+  if (!parsed.success) return undefined
+  return parsed.data.promptFeedback?.blockReason
 }
