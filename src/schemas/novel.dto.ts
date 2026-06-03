@@ -93,7 +93,6 @@ export const CreateNovelSchema = z.object({
   pov: z.string().max(30).default(DEFAULT_POV),
   tone: z.string().max(30).default(DEFAULT_TONE),
   age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
-  pov_character_id: z.string().max(50).default(''),
   ending: z.string().max(30).default(DEFAULT_ENDING),
   // プロンプトに追加で混ぜる自由記述 (口調の傾向、固有名詞表記、避けたい展開など)
   notes: z.string().max(2000).default(''),
@@ -102,11 +101,18 @@ export const CreateNovelSchema = z.object({
   editor_model: GeminiModelSchema,
   writer_model: GeminiModelSchema,
   // 所属カテゴリ。未分類は null (デフォルト)。
-  category_id: z.string().nullable().default(null),
+  category_id: z.string().nullable().default(null)
+})
+export type CreateNovelInput = z.infer<typeof CreateNovelSchema>
+
+// キャスト・関係・語り手はあらすじフォームから分離し、専用ページでまとめて保存する。
+export const SaveCastSchema = z.object({
+  // 語り手 (視点キャラ)。一人称 / 三人称一元視点 のときに有効。未指定は空文字。
+  pov_character_id: z.string().max(50).default(''),
   character_links: z.array(NovelCharacterLinkSchema).max(50).default([]),
   relations: z.array(NovelCharacterRelationInputSchema).max(100).default([])
 })
-export type CreateNovelInput = z.infer<typeof CreateNovelSchema>
+export type SaveCastInput = z.infer<typeof SaveCastSchema>
 
 // ---------------------- カテゴリ ----------------------
 
