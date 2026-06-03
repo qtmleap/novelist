@@ -26,41 +26,41 @@ function parseSpeech(json: string): string[] {
   return []
 }
 
-// DB 行を API/フロント向けの形 (speech_examples を配列化、stages を整形) に変換する。
+// DB 行を API/フロント向けの形 (speech_examples を配列化、variants を整形) に変換する。
 // 行の型は Prisma 生成型から取り、独自定義はしない。
-function shapeCharacter(row: Prisma.CharacterGetPayload<{ include: { stages: true } }>) {
+function shapeCharacter(row: Prisma.CharacterGetPayload<{ include: { variants: true } }>) {
   return {
     ...row,
     speech_examples: parseSpeech(row.speech_examples),
-    stages: row.stages.map((s) => ({
-      id: s.id,
-      label: s.label,
-      age: s.age,
-      occupation: s.occupation,
-      appearance: s.appearance,
-      first_person: s.first_person,
-      address_others: s.address_others,
-      speech_examples: parseSpeech(s.speech_examples),
-      description: s.description
+    variants: row.variants.map((v) => ({
+      id: v.id,
+      label: v.label,
+      age: v.age,
+      occupation: v.occupation,
+      appearance: v.appearance,
+      first_person: v.first_person,
+      address_others: v.address_others,
+      speech_examples: parseSpeech(v.speech_examples),
+      description: v.description
     }))
   }
 }
 
-// 成長段階を position 付きで作成する $transaction オペレーション群を作る。
-function stageCreateOps(prisma: PrismaClient, characterId: string, stages: CreateCharacterInput['stages']) {
-  return stages.map((s, i) =>
-    prisma.characterStage.create({
+// バリエーションを position 付きで作成する $transaction オペレーション群を作る。
+function variantCreateOps(prisma: PrismaClient, characterId: string, variants: CreateCharacterInput['variants']) {
+  return variants.map((v, i) =>
+    prisma.characterVariant.create({
       data: {
         character_id: characterId,
         position: i,
-        label: s.label,
-        age: s.age,
-        occupation: s.occupation,
-        appearance: s.appearance,
-        first_person: s.first_person,
-        address_others: s.address_others,
-        speech_examples: JSON.stringify(s.speech_examples),
-        description: s.description
+        label: v.label,
+        age: v.age,
+        occupation: v.occupation,
+        appearance: v.appearance,
+        first_person: v.first_person,
+        address_others: v.address_others,
+        speech_examples: JSON.stringify(v.speech_examples),
+        description: v.description
       }
     })
   )
@@ -68,7 +68,7 @@ function stageCreateOps(prisma: PrismaClient, characterId: string, stages: Creat
 
 export async function createCharacter(prisma: PrismaClient, input: CreateCharacterInput) {
   const character = await prisma.character.create({ data: serializeBase(input) })
-  const ops = stageCreateOps(prisma, character.id, input.stages)
+  const ops = variantCreateOps(prisma, character.id, input.variants)
   if (ops.length > 0) await prisma.$transaction(ops)
   const created = await getCharacter(prisma, character.id)
   // 直前に作成しているので必ず存在する。
@@ -79,7 +79,7 @@ export async function createCharacter(prisma: PrismaClient, input: CreateCharact
 export async function listCharacters(prisma: PrismaClient) {
   const rows = await prisma.character.findMany({
     orderBy: { created_at: 'desc' },
-    include: { stages: { orderBy: { position: 'asc' } } }
+    include: { variants: { orderBy: { position: 'asc' } } }
   })
   return rows.map(shapeCharacter)
 }
@@ -87,7 +87,7 @@ export async function listCharacters(prisma: PrismaClient) {
 export async function getCharacter(prisma: PrismaClient, id: string) {
   const row = await prisma.character.findUnique({
     where: { id },
-    include: { stages: { orderBy: { position: 'asc' } } }
+    include: { variants: { orderBy: { position: 'asc' } } }
   })
   if (!row) return null
   return shapeCharacter(row)
@@ -98,8 +98,8 @@ export async function updateCharacter(prisma: PrismaClient, id: string, input: C
   // 既存 stages は一旦消して input から入れ直す。
   const ops: Prisma.PrismaPromise<unknown>[] = [
     prisma.character.update({ where: { id }, data: serializeBase(input) }),
-    prisma.characterStage.deleteMany({ where: { character_id: id } }),
-    ...stageCreateOps(prisma, id, input.stages)
+    prisma.characterVariant.deleteMany({ where: { character_id: id } }),
+    ...variantCreateOps(prisma, id, input.variants)
   ]
   await prisma.$transaction(ops)
   const updated = await getCharacter(prisma, id)

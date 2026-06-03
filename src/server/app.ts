@@ -29,7 +29,7 @@ import {
   updateNovel,
   upsertGenerationJob
 } from '@/lib/novel/repository'
-import { type CharacterStage, CreateCharacterSchema } from '@/schemas/character.dto'
+import { type CharacterVariant, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
   ArrangeNovelsSchema,
   CreateCategorySchema,
@@ -121,7 +121,7 @@ function serializeCharacter(c: {
   address_others: string
   speech_examples: string[]
   description: string
-  stages: CharacterStage[]
+  variants: CharacterVariant[]
   created_at: Date
   updated_at: Date
 }) {
@@ -136,7 +136,7 @@ function serializeCharacter(c: {
     address_others: c.address_others,
     speech_examples: c.speech_examples,
     description: c.description,
-    stages: c.stages,
+    variants: c.variants,
     created_at: c.created_at.toISOString(),
     updated_at: c.updated_at.toISOString()
   }

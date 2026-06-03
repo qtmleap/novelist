@@ -79,17 +79,17 @@ model Character {
   novel_links         NovelCharacter[]
   relations_as_source NovelCharacterRelation[] @relation("RelationSource")
   relations_as_target NovelCharacterRelation[] @relation("RelationTarget")
-  stages              CharacterStage[]
+  variants            CharacterVariant[]
 }
 
-// キャラクターの成長段階。話の進行で変化する外見・背景・口調を段階ごとに上書き保持する。
+// キャラクターのバリエーション (別の姿・状態)。名前・性別は不変で、それ以外を上書き保持する。
 // 空文字のフィールドはベース (Character) の値を継承する想定 (マージは生成時に行う)。
-model CharacterStage {
+model CharacterVariant {
   id              String    @id @default(uuid())
   character_id    String
   position        Int       @default(0)
   label           String
-  // 名前・性別は不変。それ以外は空文字ならベース継承、入力があればその段階で上書き。
+  // 名前・性別は不変。それ以外は空文字ならベース継承、入力があればこのバリエーションで上書き。
   age             String    @default("")
   occupation      String    @default("")
   appearance      String    @default("")

@@ -62,9 +62,9 @@ export const ADDRESS_STYLES = [
   '苗字＋さん'
 ] as const
 
-// 成長段階の入力。名前・性別以外は空欄ならベース (Character 本体) の値を継承する。
-export const CharacterStageInputSchema = z.object({
-  label: z.string().nonempty('段階名を入力してください').max(50),
+// バリエーションの入力。名前・性別以外は空欄ならベース (Character 本体) の値を継承する。
+export const CharacterVariantInputSchema = z.object({
+  label: z.string().nonempty('バリエーション名を入力してください').max(50),
   age: z.string().max(50).default(''),
   occupation: z.string().max(50).default(''),
   appearance: z.string().max(2000).default(''),
@@ -73,7 +73,7 @@ export const CharacterStageInputSchema = z.object({
   speech_examples: z.array(z.string().max(300)).max(20).default([]),
   description: z.string().max(4000).default('')
 })
-export type CharacterStageInput = z.infer<typeof CharacterStageInputSchema>
+export type CharacterVariantInput = z.infer<typeof CharacterVariantInputSchema>
 
 export const CreateCharacterSchema = z.object({
   name: z.string().nonempty('名前を入力してください').max(100),
@@ -85,13 +85,13 @@ export const CreateCharacterSchema = z.object({
   address_others: z.string().max(500).default(''),
   speech_examples: z.array(z.string().max(300)).max(20).default([]),
   description: z.string().max(4000).default(''),
-  // 成長段階 (任意・順序あり)。話の進行で変化する姿を段階として持たせる。
-  stages: z.array(CharacterStageInputSchema).max(20).default([])
+  // バリエーション (任意・順序あり)。別の姿・状態を持たせる。
+  variants: z.array(CharacterVariantInputSchema).max(20).default([])
 })
 export type CreateCharacterInput = z.infer<typeof CreateCharacterSchema>
 
 // DB では speech_examples を JSON 文字列で保持し、API 層で配列に変換する。
-export const CharacterStageSchema = z.object({
+export const CharacterVariantSchema = z.object({
   id: z.string().nonempty(),
   label: z.string().nonempty().max(50),
   age: z.string().max(50),
@@ -102,7 +102,7 @@ export const CharacterStageSchema = z.object({
   speech_examples: z.array(z.string().max(300)),
   description: z.string().max(4000)
 })
-export type CharacterStage = z.infer<typeof CharacterStageSchema>
+export type CharacterVariant = z.infer<typeof CharacterVariantSchema>
 
 export const CharacterSchema = z.object({
   id: z.string().nonempty(),
@@ -115,7 +115,7 @@ export const CharacterSchema = z.object({
   address_others: z.string().max(500),
   speech_examples: z.array(z.string().max(300)),
   description: z.string().max(4000),
-  stages: z.array(CharacterStageSchema).default([]),
+  variants: z.array(CharacterVariantSchema).default([]),
   created_at: z.string().nonempty(),
   updated_at: z.string().nonempty()
 })
