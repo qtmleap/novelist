@@ -1,6 +1,6 @@
 'use client'
 
-import { FileText, Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import { FileText, History, Loader2, RefreshCw, Trash2 } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -25,10 +25,17 @@ import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
-import { type ChapterCost, GeminiModelSchema, type NovelWithChapters } from '@/schemas/novel.dto'
+import { type ChapterCost, type ChapterVersion, GeminiModelSchema, type NovelWithChapters } from '@/schemas/novel.dto'
 
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+}
+
+// ISO 文字列を Date を経由せず "YYYY/MM/DD HH:mm" に整形 (no-new-date 方針)。
+function formatDateTime(iso: string): string {
+  const date = iso.slice(0, 10).replace(/-/g, '/')
+  const time = iso.slice(11, 16)
+  return `${date} ${time}`
 }
 
 function parseRoute(pathname: string): { novelId: string; chapterNumber: number } {
@@ -75,6 +82,13 @@ export default function ChapterDetailPage() {
   const [promptView, setPromptView] = useState<
     { status: 'loading' } | { status: 'loaded'; text: string | null } | { status: 'error'; message: string }
   >({ status: 'loading' })
+  // 生成履歴 (過去 version) の表示。
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyView, setHistoryView] = useState<
+    { status: 'loading' } | { status: 'loaded'; versions: ChapterVersion[] } | { status: 'error'; message: string }
+  >({ status: 'loading' })
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
+  const [showVersionPrompt, setShowVersionPrompt] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const auth = useAuth()
   const editAllowed = canEdit(auth)
@@ -190,8 +204,28 @@ export default function ChapterDetailPage() {
     }
   }
 
+  const handleViewHistory = async () => {
+    if (!novelId || chapterNumber <= 0) return
+    setHistoryOpen(true)
+    setHistoryView({ status: 'loading' })
+    setShowVersionPrompt(false)
+    try {
+      const data = await api.getChapterVersions({ params: { id: novelId, number: String(chapterNumber) } })
+      setHistoryView({ status: 'loaded', versions: data })
+      setSelectedVersionId(data.length > 0 ? data[0].id : null)
+    } catch (e) {
+      setHistoryView({ status: 'error', message: readApiError(e, '生成履歴の取得に失敗しました') })
+    }
+  }
+
   const displayContent = isRegenerating ? buffer : (chapter?.content ?? '')
   const busy = isRegenerating || isDeleting
+
+  // 履歴ダイアログで選択中の version (未選択なら先頭=最新)。
+  const historyVersions = historyView.status === 'loaded' ? historyView.versions : []
+  const foundVersion = historyVersions.find((v) => v.id === selectedVersionId)
+  const selectedVersion =
+    foundVersion !== undefined ? foundVersion : historyVersions.length > 0 ? historyVersions[0] : undefined
 
   return (
     <div className='space-y-6'>
@@ -251,7 +285,7 @@ export default function ChapterDetailPage() {
             </Button>
           </div>
 
-          <div className='border-t pt-6'>
+          <div className='flex flex-wrap items-center gap-2 border-t pt-6'>
             <Button
               type='button'
               variant='outline'
@@ -262,6 +296,17 @@ export default function ChapterDetailPage() {
             >
               <FileText />
               生成プロンプトを見る
+            </Button>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={busy}
+              onClick={handleViewHistory}
+              className='[&_svg]:size-4!'
+            >
+              <History />
+              生成履歴
             </Button>
           </div>
 
@@ -376,6 +421,62 @@ export default function ChapterDetailPage() {
                 <pre className='max-h-[60vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap'>
                   {promptView.text}
                 </pre>
+              )}
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+            <DialogContent className='sm:max-w-3xl'>
+              <DialogHeader>
+                <DialogTitle>第 {chapterNumber} 章の生成履歴</DialogTitle>
+                <DialogDescription>
+                  再生成しても過去の生成は残ります。版を選んで本文とプロンプトを確認できます。
+                </DialogDescription>
+              </DialogHeader>
+              {historyView.status === 'loading' && <p className='text-sm text-muted-foreground'>取得中…</p>}
+              {historyView.status === 'error' && <p className='text-sm text-destructive'>{historyView.message}</p>}
+              {historyView.status === 'loaded' && historyVersions.length === 0 && (
+                <p className='text-sm text-muted-foreground'>履歴がありません。</p>
+              )}
+              {selectedVersion !== undefined && (
+                <div className='space-y-3'>
+                  <div className='flex flex-wrap gap-1.5'>
+                    {historyVersions.map((v, idx) => (
+                      <Button
+                        key={v.id}
+                        type='button'
+                        size='sm'
+                        variant={v.id === selectedVersion.id ? 'default' : 'outline'}
+                        onClick={() => {
+                          setSelectedVersionId(v.id)
+                          setShowVersionPrompt(false)
+                        }}
+                      >
+                        v{v.version}
+                        {idx === 0 && ' (現在)'}
+                      </Button>
+                    ))}
+                  </div>
+                  <div className='flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
+                    {selectedVersion.title !== null && <span className='font-medium'>{selectedVersion.title}</span>}
+                    <span>{formatDateTime(selectedVersion.created_at)}</span>
+                    <span className='tabular-nums'>{selectedVersion.content.length.toLocaleString()} 文字</span>
+                    {selectedVersion.prompt !== null && (
+                      <button
+                        type='button'
+                        onClick={() => setShowVersionPrompt((v) => !v)}
+                        className='underline underline-offset-2 hover:text-foreground'
+                      >
+                        {showVersionPrompt ? '本文を表示' : 'この版のプロンプトを表示'}
+                      </button>
+                    )}
+                  </div>
+                  <pre className='max-h-[55vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap'>
+                    {showVersionPrompt && selectedVersion.prompt !== null
+                      ? selectedVersion.prompt
+                      : selectedVersion.content}
+                  </pre>
+                </div>
               )}
             </DialogContent>
           </Dialog>

@@ -20,6 +20,7 @@ import {
   getNovelWithChapters,
   getWrittenCharCounts,
   listCategories,
+  listChapterVersions,
   listNovels,
   renameCategory,
   reorderCategories,
@@ -40,6 +41,13 @@ import {
   ReorderSchema
 } from '@/schemas/novel.dto'
 import { readAuthEmail, requireAuth } from '@/server/auth'
+
+// 章番号を含むルートの param。z.coerce で文字列 → 数値に変換・検証するので
+// ハンドラ側で Number.parseInt や NaN チェックを書かなくてよい (不正なら zValidator が 400)。
+const ChapterParamSchema = z.object({
+  id: z.string().min(1),
+  number: z.coerce.number().int().min(1)
+})
 
 function serializeNovel(n: {
   id: string
@@ -427,12 +435,8 @@ export const app = new Hono()
 
   // 章本文生成時に実際に Gemini へ送ったプロンプト (最新 version) を返す。
   // この機能より前に生成された章は prompt=null。
-  .get('/novels/:id/chapters/:number/prompt', async (c) => {
-    const id = c.req.param('id')
-    const chapterNumber = Number.parseInt(c.req.param('number'), 10)
-    if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
-      return c.json({ error: 'invalid_chapter_number' }, 400)
-    }
+  .get('/novels/:id/chapters/:number/prompt', zValidator('param', ChapterParamSchema), async (c) => {
+    const { id, number: chapterNumber } = c.req.valid('param')
     const prisma = getPrisma()
     try {
       const chapter = await prisma.chapter.findFirst({
@@ -446,112 +450,131 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
-
-  .post('/novels/:id/outline/:number', requireAuth, zValidator('json', GenerateOptionsSchema), async (c) => {
-    const id = c.req.param('id')
-    const chapterNumber = Number.parseInt(c.req.param('number'), 10)
-    if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
-      return c.json({ error: 'invalid_chapter_number' }, 400)
-    }
-    const options = c.req.valid('json')
+  // 章の生成履歴 (全 version)。再生成しても過去は append-only で残るので、ここで全部返す。
+  .get('/novels/:id/chapters/:number/versions', zValidator('param', ChapterParamSchema), async (c) => {
+    const { id, number: chapterNumber } = c.req.valid('param')
     const prisma = getPrisma()
     try {
-      const novel = await getNovelWithChapters(prisma, id)
-      if (!novel) return c.json({ error: 'not_found' }, 404)
-      if (!novel.outline) return c.json({ error: 'outline_not_generated' }, 400)
-
-      const parsedOutline = OutlineSchema.safeParse(JSON.parse(novel.outline))
-      if (!parsedOutline.success) return c.json({ error: 'invalid_outline' }, 500)
-
-      const env = getEnv()
-      const povChar = novel.pov_character_id
-        ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
-        : undefined
-      const style = {
-        pov: novel.pov,
-        tone: novel.tone,
-        age_rating: novel.age_rating,
-        ending: novel.ending,
-        viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
-      }
-      const cast = buildCastForGemini(novel.character_links)
-      const relations = buildRelationsForGemini(novel.relations)
-
-      try {
-        const next = await regenerateOutlineChapter(
-          env,
-          {
-            title: novel.title,
-            genre: novel.genre,
-            characters: novel.characters,
-            setting: novel.setting,
-            num_chapters: novel.num_chapters,
-            notes: novel.notes
-          },
-          style,
-          parsedOutline.data,
-          chapterNumber,
-          options.model,
-          cast,
-          relations
-        )
-        const merged = {
-          chapters: parsedOutline.data.chapters.map((ch) => (ch.chapter_number === chapterNumber ? next : ch))
-        }
-        await saveOutline(prisma, id, JSON.stringify(merged))
-        // 章立て (タイトル・要約) と本文がずれた状態は混乱の元なので、
-        // 章立てを上書きしたらこの章の本文も全 version 削除する。
-        await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
-        return c.json({ outline: merged })
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        return c.json({ error: 'generation_failed', detail: msg }, 502)
-      }
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-
-  // 生成キックオフ。Durable Object に payload を渡して即座に 202 を返す。
-  // 生成自体は DO 内で fire-and-forget で走り続け、ページ離脱・タブ閉じでも止まらない。
-  // クライアントは下の /stream エンドポイントで SSE 経由で進捗を受け取る。
-  .post('/novels/:id/chapters/:number/generate', requireAuth, zValidator('json', GenerateOptionsSchema), async (c) => {
-    const id = c.req.param('id')
-    const chapterNumber = Number.parseInt(c.req.param('number'), 10)
-    if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
-      return c.json({ error: 'invalid_chapter_number' }, 400)
-    }
-
-    const options = c.req.valid('json')
-    const prisma = getPrisma()
-    let payload: import('@/lib/chapter-gen-do').StartChapterGenPayload | null
-    try {
-      payload = await buildChapterPayload(
-        prisma,
-        id,
-        chapterNumber,
-        options.model !== undefined ? options.model : GeminiModelSchema.enum['gemini-2.5-flash']
+      const versions = await listChapterVersions(prisma, id, chapterNumber)
+      return c.json(
+        versions.map((v) => ({
+          id: v.id,
+          version: v.version,
+          title: v.title,
+          content: v.content,
+          prompt: v.prompt,
+          created_at: v.created_at.toISOString()
+        }))
       )
     } finally {
       await prisma.$disconnect()
     }
-    if (!payload) return c.json({ error: 'not_found' }, 404)
-
-    const env = getEnv()
-    const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
-    const stub = env.CHAPTER_GEN.get(doId)
-    const result = await stub.start(payload)
-    return c.json(result, 202)
   })
+
+  .post(
+    '/novels/:id/outline/:number',
+    requireAuth,
+    zValidator('param', ChapterParamSchema),
+    zValidator('json', GenerateOptionsSchema),
+    async (c) => {
+      const { id, number: chapterNumber } = c.req.valid('param')
+      const options = c.req.valid('json')
+      const prisma = getPrisma()
+      try {
+        const novel = await getNovelWithChapters(prisma, id)
+        if (!novel) return c.json({ error: 'not_found' }, 404)
+        if (!novel.outline) return c.json({ error: 'outline_not_generated' }, 400)
+
+        const parsedOutline = OutlineSchema.safeParse(JSON.parse(novel.outline))
+        if (!parsedOutline.success) return c.json({ error: 'invalid_outline' }, 500)
+
+        const env = getEnv()
+        const povChar = novel.pov_character_id
+          ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
+          : undefined
+        const style = {
+          pov: novel.pov,
+          tone: novel.tone,
+          age_rating: novel.age_rating,
+          ending: novel.ending,
+          viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
+        }
+        const cast = buildCastForGemini(novel.character_links)
+        const relations = buildRelationsForGemini(novel.relations)
+
+        try {
+          const next = await regenerateOutlineChapter(
+            env,
+            {
+              title: novel.title,
+              genre: novel.genre,
+              characters: novel.characters,
+              setting: novel.setting,
+              num_chapters: novel.num_chapters,
+              notes: novel.notes
+            },
+            style,
+            parsedOutline.data,
+            chapterNumber,
+            options.model,
+            cast,
+            relations
+          )
+          const merged = {
+            chapters: parsedOutline.data.chapters.map((ch) => (ch.chapter_number === chapterNumber ? next : ch))
+          }
+          await saveOutline(prisma, id, JSON.stringify(merged))
+          // 章立て (タイトル・要約) と本文がずれた状態は混乱の元なので、
+          // 章立てを上書きしたらこの章の本文も全 version 削除する。
+          await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
+          return c.json({ outline: merged })
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          return c.json({ error: 'generation_failed', detail: msg }, 502)
+        }
+      } finally {
+        await prisma.$disconnect()
+      }
+    }
+  )
+
+  // 生成キックオフ。Durable Object に payload を渡して即座に 202 を返す。
+  // 生成自体は DO 内で fire-and-forget で走り続け、ページ離脱・タブ閉じでも止まらない。
+  // クライアントは下の /stream エンドポイントで SSE 経由で進捗を受け取る。
+  .post(
+    '/novels/:id/chapters/:number/generate',
+    requireAuth,
+    zValidator('param', ChapterParamSchema),
+    zValidator('json', GenerateOptionsSchema),
+    async (c) => {
+      const { id, number: chapterNumber } = c.req.valid('param')
+      const options = c.req.valid('json')
+      const prisma = getPrisma()
+      let payload: import('@/lib/chapter-gen-do').StartChapterGenPayload | null
+      try {
+        payload = await buildChapterPayload(
+          prisma,
+          id,
+          chapterNumber,
+          options.model !== undefined ? options.model : GeminiModelSchema.enum['gemini-2.5-flash']
+        )
+      } finally {
+        await prisma.$disconnect()
+      }
+      if (!payload) return c.json({ error: 'not_found' }, 404)
+
+      const env = getEnv()
+      const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
+      const stub = env.CHAPTER_GEN.get(doId)
+      const result = await stub.start(payload)
+      return c.json(result, 202)
+    }
+  )
 
   // 生成中の章本文 SSE。DO に橋渡しするだけ。EventSource で接続すると自動再接続される。
   // 既に done/error なら最終イベントを送って閉じる。
-  .get('/novels/:id/chapters/:number/stream', async (c) => {
-    const id = c.req.param('id')
-    const chapterNumber = Number.parseInt(c.req.param('number'), 10)
-    if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
-      return c.json({ error: 'invalid_chapter_number' }, 400)
-    }
+  .get('/novels/:id/chapters/:number/stream', zValidator('param', ChapterParamSchema), async (c) => {
+    const { id, number: chapterNumber } = c.req.valid('param')
     const env = getEnv()
     const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
     const stub = env.CHAPTER_GEN.get(doId)
@@ -598,12 +621,8 @@ export const app = new Hono()
   })
 
   // 章本文の削除。整合性を保つため「最新の生成済み章」しか消せない (後続を消さないと前章を消す意味がないので)。
-  .delete('/novels/:id/chapters/:number', requireAuth, async (c) => {
-    const id = c.req.param('id')
-    const chapterNumber = Number.parseInt(c.req.param('number'), 10)
-    if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
-      return c.json({ error: 'invalid_chapter_number' }, 400)
-    }
+  .delete('/novels/:id/chapters/:number', requireAuth, zValidator('param', ChapterParamSchema), async (c) => {
+    const { id, number: chapterNumber } = c.req.valid('param')
     const prisma = getPrisma()
     try {
       const latest = await prisma.chapter.findFirst({

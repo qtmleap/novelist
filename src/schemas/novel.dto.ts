@@ -170,6 +170,18 @@ export const ChapterSchema = z.object({
 })
 export type Chapter = z.infer<typeof ChapterSchema>
 
+// 章の生成履歴 1 件 (= 1 version)。再生成のたびに version が増え、過去分も DB に残る。
+export const ChapterVersionSchema = z.object({
+  id: z.string(),
+  version: z.number().int(),
+  title: z.string().nullable(),
+  content: z.string(),
+  // プロンプト保存機能より前に生成された version は null。
+  prompt: z.string().nullable(),
+  created_at: z.string()
+})
+export type ChapterVersion = z.infer<typeof ChapterVersionSchema>
+
 export const NovelSchema = z.object({
   id: z.string(),
   title: z.string(),
