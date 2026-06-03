@@ -1,8 +1,9 @@
 import type { Prisma, PrismaClient } from '@/generated/prisma/client'
-import type { CreateNovelInput } from '@/schemas/novel.dto'
+import type { CreateNovelInput, SaveCastInput } from '@/schemas/novel.dto'
 
+// キャスト・関係・語り手は専用ページ (saveNovelCast) で管理するので本体作成では触らない。
 export async function createNovel(prisma: PrismaClient, input: CreateNovelInput) {
-  const novel = await prisma.novel.create({
+  return prisma.novel.create({
     data: {
       title: input.title,
       genre: input.genre,
@@ -12,7 +13,6 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
       pov: input.pov,
       tone: input.tone,
       age_rating: input.age_rating,
-      pov_character_id: input.pov_character_id,
       ending: input.ending,
       notes: input.notes,
       editor_model: input.editor_model,
@@ -21,22 +21,24 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
     },
     include: { category: { select: { name: true } } }
   })
+}
 
-  const ops: Prisma.PrismaPromise<unknown>[] = []
-
+// 小説のキャスト (character_links) + 関係 + 語り手をまとめて置き換える。
+// D1 はインタラクティブトランザクション非対応なので $transaction([...]) で順序実行。
+export async function saveNovelCast(prisma: PrismaClient, id: string, input: SaveCastInput) {
+  const ops: Prisma.PrismaPromise<unknown>[] = [
+    prisma.novel.update({ where: { id }, data: { pov_character_id: input.pov_character_id } }),
+    prisma.novelCharacterRelation.deleteMany({ where: { novel_id: id } }),
+    prisma.novelCharacter.deleteMany({ where: { novel_id: id } })
+  ]
   for (const link of input.character_links) {
-    ops.push(
-      prisma.novelCharacter.create({
-        data: { novel_id: novel.id, character_id: link.character_id, role: link.role }
-      })
-    )
+    ops.push(prisma.novelCharacter.create({ data: { novel_id: id, character_id: link.character_id, role: link.role } }))
   }
-
   for (const rel of input.relations) {
     ops.push(
       prisma.novelCharacterRelation.create({
         data: {
-          novel_id: novel.id,
+          novel_id: id,
           source_character_id: rel.source_character_id,
           target_character_id: rel.target_character_id,
           relation: rel.relation,
@@ -46,12 +48,7 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
       })
     )
   }
-
-  if (ops.length > 0) {
-    await prisma.$transaction(ops)
-  }
-
-  return novel
+  await prisma.$transaction(ops)
 }
 
 export async function saveOutline(prisma: PrismaClient, id: string, outlineJson: string) {
@@ -317,59 +314,27 @@ export async function deleteCategory(prisma: PrismaClient, id: string) {
   await prisma.category.deleteMany({ where: { id } })
 }
 
+// キャスト・関係・語り手は saveNovelCast で管理するので本体更新では触らない。
 export async function updateNovel(prisma: PrismaClient, id: string, input: CreateNovelInput) {
-  // D1 はインタラクティブトランザクション非対応のため $transaction([...]) で順序実行する。
-  // 既存の cast / relations は一旦消してから input に従って入れ直す。
-  const ops: Prisma.PrismaPromise<unknown>[] = [
-    prisma.novel.update({
-      where: { id },
-      data: {
-        title: input.title,
-        genre: input.genre,
-        setting: input.setting,
-        num_chapters: input.num_chapters,
-        target_chars: input.target_chars,
-        pov: input.pov,
-        tone: input.tone,
-        age_rating: input.age_rating,
-        pov_character_id: input.pov_character_id,
-        ending: input.ending,
-        notes: input.notes,
-        editor_model: input.editor_model,
-        writer_model: input.writer_model,
-        category_id: input.category_id
-      },
-      include: { category: { select: { name: true } } }
-    }),
-    prisma.novelCharacterRelation.deleteMany({ where: { novel_id: id } }),
-    prisma.novelCharacter.deleteMany({ where: { novel_id: id } })
-  ]
-
-  for (const link of input.character_links) {
-    ops.push(
-      prisma.novelCharacter.create({
-        data: { novel_id: id, character_id: link.character_id, role: link.role }
-      })
-    )
-  }
-
-  for (const rel of input.relations) {
-    ops.push(
-      prisma.novelCharacterRelation.create({
-        data: {
-          novel_id: id,
-          source_character_id: rel.source_character_id,
-          target_character_id: rel.target_character_id,
-          relation: rel.relation,
-          description: rel.description,
-          address_override: rel.address_override
-        }
-      })
-    )
-  }
-
-  const results = await prisma.$transaction(ops)
-  return results[0] as Prisma.NovelGetPayload<{ include: { category: { select: { name: true } } } }>
+  return prisma.novel.update({
+    where: { id },
+    data: {
+      title: input.title,
+      genre: input.genre,
+      setting: input.setting,
+      num_chapters: input.num_chapters,
+      target_chars: input.target_chars,
+      pov: input.pov,
+      tone: input.tone,
+      age_rating: input.age_rating,
+      ending: input.ending,
+      notes: input.notes,
+      editor_model: input.editor_model,
+      writer_model: input.writer_model,
+      category_id: input.category_id
+    },
+    include: { category: { select: { name: true } } }
+  })
 }
 
 export async function deleteNovel(prisma: PrismaClient, id: string) {

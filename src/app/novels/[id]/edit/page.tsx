@@ -35,22 +35,13 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
     pov: novel.pov,
     tone: novel.tone,
     age_rating: novel.age_rating,
-    pov_character_id: novel.pov_character_id,
     ending: novel.ending,
     notes: novel.notes,
     // DB は NOT NULL default で常に有効値だが、型としては string なので parse で narrow する。
     // 無効値が混入したら表示時点で気付かせるため throw する (Surface or throw)。
     editor_model: GeminiModelSchema.parse(novel.editor_model),
     writer_model: GeminiModelSchema.parse(novel.writer_model),
-    category_id: novel.category_id,
-    character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
-    relations: novel.relations.map((r) => ({
-      source_character_id: r.source_character_id,
-      target_character_id: r.target_character_id,
-      relation: r.relation,
-      description: r.description,
-      address_override: r.address_override
-    }))
+    category_id: novel.category_id
   }
 }
 

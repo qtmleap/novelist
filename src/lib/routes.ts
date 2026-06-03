@@ -5,6 +5,7 @@ export const routes = {
     organize: '/novels/organize',
     detail: (id: string) => `/novels/${id}`,
     edit: (id: string) => `/novels/${id}/edit`,
+    cast: (id: string) => `/novels/${id}/cast`,
     chapter: (id: string, number: number) => `/novels/${id}/chapters/${number}`
   },
   characters: {
