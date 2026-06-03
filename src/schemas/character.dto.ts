@@ -62,12 +62,16 @@ export const ADDRESS_STYLES = [
   '苗字＋さん'
 ] as const
 
-// 成長段階の入力。空欄のフィールドはベース (Character 本体) の値を継承する。
+// 成長段階の入力。名前・性別以外は空欄ならベース (Character 本体) の値を継承する。
 export const CharacterStageInputSchema = z.object({
   label: z.string().nonempty('段階名を入力してください').max(50),
+  age: z.string().max(50).default(''),
+  occupation: z.string().max(50).default(''),
   appearance: z.string().max(2000).default(''),
-  description: z.string().max(4000).default(''),
-  speech_examples: z.array(z.string().max(300)).max(20).default([])
+  first_person: z.string().max(20).default(''),
+  address_others: z.string().max(500).default(''),
+  speech_examples: z.array(z.string().max(300)).max(20).default([]),
+  description: z.string().max(4000).default('')
 })
 export type CharacterStageInput = z.infer<typeof CharacterStageInputSchema>
 
@@ -88,27 +92,31 @@ export type CreateCharacterInput = z.infer<typeof CreateCharacterSchema>
 
 // DB では speech_examples を JSON 文字列で保持し、API 層で配列に変換する。
 export const CharacterStageSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  appearance: z.string(),
-  description: z.string(),
-  speech_examples: z.array(z.string())
+  id: z.string().nonempty(),
+  label: z.string().nonempty().max(50),
+  age: z.string().max(50),
+  occupation: z.string().max(50),
+  appearance: z.string().max(2000),
+  first_person: z.string().max(20),
+  address_others: z.string().max(500),
+  speech_examples: z.array(z.string().max(300)),
+  description: z.string().max(4000)
 })
 export type CharacterStage = z.infer<typeof CharacterStageSchema>
 
 export const CharacterSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  gender: z.string(),
-  age: z.string(),
-  occupation: z.string(),
-  appearance: z.string(),
-  first_person: z.string(),
-  address_others: z.string(),
-  speech_examples: z.array(z.string()),
-  description: z.string(),
+  id: z.string().nonempty(),
+  name: z.string().nonempty().max(100),
+  gender: z.string().max(20),
+  age: z.string().max(50),
+  occupation: z.string().max(50),
+  appearance: z.string().max(2000),
+  first_person: z.string().max(20),
+  address_others: z.string().max(500),
+  speech_examples: z.array(z.string().max(300)),
+  description: z.string().max(4000),
   stages: z.array(CharacterStageSchema).default([]),
-  created_at: z.string(),
-  updated_at: z.string()
+  created_at: z.string().nonempty(),
+  updated_at: z.string().nonempty()
 })
 export type Character = z.infer<typeof CharacterSchema>

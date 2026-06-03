@@ -26,22 +26,22 @@ function parseSpeech(json: string): string[] {
   return []
 }
 
-type CharacterRow = {
-  speech_examples: string
-  stages: Array<{ id: string; label: string; appearance: string; description: string; speech_examples: string }>
-}
-
 // DB 行を API/フロント向けの形 (speech_examples を配列化、stages を整形) に変換する。
-function shapeCharacter<T extends CharacterRow>(row: T) {
+// 行の型は Prisma 生成型から取り、独自定義はしない。
+function shapeCharacter(row: Prisma.CharacterGetPayload<{ include: { stages: true } }>) {
   return {
     ...row,
     speech_examples: parseSpeech(row.speech_examples),
     stages: row.stages.map((s) => ({
       id: s.id,
       label: s.label,
+      age: s.age,
+      occupation: s.occupation,
       appearance: s.appearance,
-      description: s.description,
-      speech_examples: parseSpeech(s.speech_examples)
+      first_person: s.first_person,
+      address_others: s.address_others,
+      speech_examples: parseSpeech(s.speech_examples),
+      description: s.description
     }))
   }
 }
@@ -54,9 +54,13 @@ function stageCreateOps(prisma: PrismaClient, characterId: string, stages: Creat
         character_id: characterId,
         position: i,
         label: s.label,
+        age: s.age,
+        occupation: s.occupation,
         appearance: s.appearance,
-        description: s.description,
-        speech_examples: JSON.stringify(s.speech_examples)
+        first_person: s.first_person,
+        address_others: s.address_others,
+        speech_examples: JSON.stringify(s.speech_examples),
+        description: s.description
       }
     })
   )

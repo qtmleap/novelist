@@ -35,7 +35,11 @@ const FormSchema = CreateCharacterSchema.extend({
     .array(
       z.object({
         label: z.string().max(50),
+        age: z.string().max(50).default(''),
+        occupation: z.string().max(50).default(''),
         appearance: z.string().max(2000).default(''),
+        first_person: z.string().max(20).default(''),
+        address_others: z.string().max(500).default(''),
         description: z.string().max(4000).default(''),
         speech: z.string().max(6200).default('')
       })
@@ -44,6 +48,8 @@ const FormSchema = CreateCharacterSchema.extend({
     .default([])
 })
 type FormValues = z.infer<typeof FormSchema>
+
+const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
 // CharacterStageInput[] (speech_examples: string[]) → フォーム形 (speech: 改行結合) へ。
 // DefaultValues はネストが Partial になるので各フィールドを明示的に narrow する。
@@ -54,9 +60,13 @@ function toFormStages(stages: DefaultValues<CreateCharacterInput>['stages']): Fo
       ? s.speech_examples.filter((v): v is string => typeof v === 'string')
       : []
     return {
-      label: typeof s?.label === 'string' ? s.label : '',
-      appearance: typeof s?.appearance === 'string' ? s.appearance : '',
-      description: typeof s?.description === 'string' ? s.description : '',
+      label: str(s?.label),
+      age: str(s?.age),
+      occupation: str(s?.occupation),
+      appearance: str(s?.appearance),
+      first_person: str(s?.first_person),
+      address_others: str(s?.address_others),
+      description: str(s?.description),
       speech: speech.join('\n')
     }
   })
@@ -105,7 +115,11 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
         .filter((s) => s.label.trim() !== '')
         .map((s) => ({
           label: s.label.trim(),
+          age: s.age,
+          occupation: s.occupation,
           appearance: s.appearance,
+          first_person: s.first_person,
+          address_others: s.address_others,
           description: s.description,
           speech_examples: s.speech
             .split('\n')
@@ -373,6 +387,89 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                       <Trash2 />
                     </Button>
                   </div>
+                  <div className='grid grid-cols-1 gap-2 sm:grid-cols-3'>
+                    <FormField
+                      control={form.control}
+                      name={`stages.${idx}.age`}
+                      render={({ field: itemField }) => (
+                        <FormItem>
+                          <FormControl>
+                            <Input placeholder='年齢（継承可）' {...itemField} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name={`stages.${idx}.occupation`}
+                      render={({ field: itemField }) => (
+                        <FormItem>
+                          <Select value={itemField.value} onValueChange={itemField.onChange}>
+                            <FormControl>
+                              <SelectTrigger className='w-full'>
+                                <SelectValue placeholder='職業（ベース継承）' />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              {OCCUPATION_OPTIONS.map((o) => (
+                                <SelectItem key={o} value={o}>
+                                  {o}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name={`stages.${idx}.first_person`}
+                      render={({ field: itemField }) => (
+                        <FormItem>
+                          <Select value={itemField.value} onValueChange={itemField.onChange}>
+                            <FormControl>
+                              <SelectTrigger className='w-full'>
+                                <SelectValue placeholder='一人称（ベース継承）' />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              {FIRST_PERSON_OPTIONS.map((p) => (
+                                <SelectItem key={p} value={p}>
+                                  {p}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                  <FormField
+                    control={form.control}
+                    name={`stages.${idx}.address_others`}
+                    render={({ field: itemField }) => (
+                      <FormItem>
+                        <Select value={itemField.value} onValueChange={itemField.onChange}>
+                          <FormControl>
+                            <SelectTrigger className='w-full'>
+                              <SelectValue placeholder='他者の呼び方（ベース継承）' />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            {ADDRESS_STYLES.map((s) => (
+                              <SelectItem key={s} value={s}>
+                                {s}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
                   <FormField
                     control={form.control}
                     name={`stages.${idx}.appearance`}
@@ -427,7 +524,18 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
             variant='outline'
             size='sm'
             className='[&_svg]:size-5!'
-            onClick={() => appendStage({ label: '', appearance: '', description: '', speech: '' })}
+            onClick={() =>
+              appendStage({
+                label: '',
+                age: '',
+                occupation: '',
+                appearance: '',
+                first_person: '',
+                address_others: '',
+                description: '',
+                speech: ''
+              })
+            }
           >
             <Plus />
             成長段階を追加
