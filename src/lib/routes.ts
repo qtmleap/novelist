@@ -12,6 +12,9 @@ export const routes = {
     detail: (id: string) => `/characters/${id}`,
     edit: (id: string) => `/characters/${id}/edit`
   },
+  categories: {
+    list: '/categories'
+  },
   settings: '/settings',
   login: '/login'
 } as const
