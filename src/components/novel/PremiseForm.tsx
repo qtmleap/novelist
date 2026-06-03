@@ -6,6 +6,7 @@ import { Loader2, PenLine, Plus, Save, Trash2, UserPlus } from 'lucide-react'
 import { useState } from 'react'
 import type { DefaultValues } from 'react-hook-form'
 import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
@@ -63,10 +64,14 @@ type Props = {
   mode?: 'create' | 'edit'
 }
 
-// その項目が生成プロンプトのどこに渡るかをラベル横に示す。
+// その項目が生成プロンプトのどこに渡るかをラベル横にバッジで示す。
 function ScopeTag({ scope }: { scope: 'both' | 'outline' | 'body' }) {
-  const text = scope === 'both' ? '章立て・本文に反映' : scope === 'outline' ? '章立てに反映' : '本文に反映'
-  return <span className='ml-1.5 align-middle text-xs font-normal text-muted-foreground'>（{text}）</span>
+  const text = scope === 'both' ? '章立て・本文' : scope === 'outline' ? '章立て' : '本文'
+  return (
+    <Badge variant='outline' className='ml-1.5 align-middle text-[10px] font-normal text-muted-foreground'>
+      {text}
+    </Badge>
+  )
 }
 
 export const EMPTY_DEFAULTS: CreateNovelInput = {
