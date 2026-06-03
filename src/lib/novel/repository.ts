@@ -226,6 +226,23 @@ export async function listNovels(prisma: PrismaClient) {
   })
 }
 
+// 小説ごとの生成済み本文の合計文字数 (各 chapter_number の最新 version のみ集計)。
+// 一覧は章本文を載せないので、ここで SUM(LENGTH(content)) を集計してまとめて返す。
+export async function getWrittenCharCounts(prisma: PrismaClient): Promise<Map<string, number>> {
+  const rows = await prisma.$queryRaw<Array<{ novel_id: string; chars: number | bigint }>>`
+    SELECT c.novel_id AS novel_id, SUM(LENGTH(c.content)) AS chars
+    FROM Chapter c
+    WHERE c.version = (
+      SELECT MAX(c2.version) FROM Chapter c2
+      WHERE c2.novel_id = c.novel_id AND c2.chapter_number = c.chapter_number
+    )
+    GROUP BY c.novel_id
+  `
+  const map = new Map<string, number>()
+  for (const row of rows) map.set(row.novel_id, Number(row.chars))
+  return map
+}
+
 // 整理ページの配置保存。カテゴリ (category_id, 未分類は null) ごとに、カード順で
 // category_id と position(0..n-1) を一括更新する。カテゴリ移動と並び替えを同時に扱う。
 // position はカテゴリごとに 0 始まりだが、一覧はカテゴリでグループ化するので破綻しない。

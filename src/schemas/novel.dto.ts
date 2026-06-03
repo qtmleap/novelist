@@ -196,6 +196,8 @@ export const NovelSchema = z.object({
   // 所属カテゴリ。未分類は両方とも null。一覧のグループ表示に使うので名前も持たせる。
   category_id: z.string().nullable(),
   category_name: z.string().nullable(),
+  // 生成済み本文の合計文字数 (各章の最新 version の content 長の合計)。未生成は 0。
+  written_chars: z.number().int(),
   created_at: z.string(),
   updated_at: z.string()
 })
