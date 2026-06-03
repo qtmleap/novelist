@@ -63,6 +63,12 @@ type Props = {
   mode?: 'create' | 'edit'
 }
 
+// その項目が生成プロンプトのどこに渡るかをラベル横に示す。
+function ScopeTag({ scope }: { scope: 'both' | 'outline' | 'body' }) {
+  const text = scope === 'both' ? '章立て・本文に反映' : scope === 'outline' ? '章立てに反映' : '本文に反映'
+  return <span className='ml-1.5 align-middle text-xs font-normal text-muted-foreground'>（{text}）</span>
+}
+
 export const EMPTY_DEFAULTS: CreateNovelInput = {
   title: '',
   genre: '',
@@ -167,7 +173,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             name='title'
             render={({ field }) => (
               <FormItem className='space-y-2'>
-                <FormLabel>タイトル</FormLabel>
+                <FormLabel>
+                  タイトル
+                  <ScopeTag scope='both' />
+                </FormLabel>
                 <FormControl>
                   <Input placeholder='例: 星降る王国の伝説' {...field} />
                 </FormControl>
@@ -181,7 +190,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             name='genre'
             render={({ field }) => (
               <FormItem className='space-y-2'>
-                <FormLabel>ジャンル</FormLabel>
+                <FormLabel>
+                  ジャンル
+                  <ScopeTag scope='both' />
+                </FormLabel>
                 <Select value={field.value} onValueChange={field.onChange}>
                   <FormControl>
                     <SelectTrigger>
@@ -290,7 +302,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             name='setting'
             render={({ field }) => (
               <FormItem className='space-y-2'>
-                <FormLabel>舞台・世界観</FormLabel>
+                <FormLabel>
+                  舞台・世界観
+                  <ScopeTag scope='both' />
+                </FormLabel>
                 <FormControl>
                   <Textarea
                     placeholder='例: 魔法が存在する中世ヨーロッパ風の王国。500年前に封印された古代の呪いが再び目覚めようとしている。'
@@ -311,6 +326,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               <FormItem className='space-y-2'>
                 <FormLabel>
                   物語に入れたいシーン・展開 <span className='text-muted-foreground font-normal'>（任意）</span>
+                  <ScopeTag scope='outline' />
                 </FormLabel>
                 <FormControl>
                   <Textarea
@@ -337,7 +353,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='num_chapters'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>章数</FormLabel>
+                  <FormLabel>
+                    章数
+                    <ScopeTag scope='outline' />
+                  </FormLabel>
                   <Select value={String(field.value)} onValueChange={(v) => field.onChange(Number(v))}>
                     <FormControl>
                       <SelectTrigger className='w-32'>
@@ -365,7 +384,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='target_chars'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>1章あたりの目標文字数</FormLabel>
+                  <FormLabel>
+                    1章あたりの目標文字数
+                    <ScopeTag scope='body' />
+                  </FormLabel>
                   <Select value={String(field.value)} onValueChange={(v) => field.onChange(Number(v))}>
                     <FormControl>
                       <SelectTrigger className='w-40'>
@@ -403,7 +425,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='pov'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>視点</FormLabel>
+                  <FormLabel>
+                    視点
+                    <ScopeTag scope='both' />
+                  </FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(v) => {
@@ -436,7 +461,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='tone'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>文体トーン</FormLabel>
+                  <FormLabel>
+                    文体トーン
+                    <ScopeTag scope='both' />
+                  </FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
                       <SelectTrigger className='w-full'>
@@ -461,7 +489,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='age_rating'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>年齢指定</FormLabel>
+                  <FormLabel>
+                    年齢指定
+                    <ScopeTag scope='both' />
+                  </FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
                       <SelectTrigger className='w-full'>
@@ -486,7 +517,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='ending'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>エンディング</FormLabel>
+                  <FormLabel>
+                    エンディング
+                    <ScopeTag scope='both' />
+                  </FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
                       <SelectTrigger className='w-full'>
@@ -579,7 +613,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='pov_character_id'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>語り手（視点人物）</FormLabel>
+                  <FormLabel>
+                    語り手（視点人物）
+                    <ScopeTag scope='both' />
+                  </FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
                       <SelectTrigger className='w-52'>
