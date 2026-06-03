@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import { PrismaD1 } from '@prisma/adapter-d1'
+import { z } from 'zod'
 import { PrismaClient } from '@/generated/prisma/client'
 import type { Env } from '@/lib/db'
 import {
@@ -76,7 +77,22 @@ export type StartChapterGenPayload = {
   relations?: CastRelation[]
 }
 
-type Phase = 'idle' | 'streaming' | 'done' | 'error'
+// DO に永続化する状態の schema。storage が空 (初回) のキーは .default() で初期値を当てる。
+// ?? フォールバックを使わず、デフォルトをここに一元化する。
+// errMsg / chapterTitle は .nonempty() を付けない: errMsg は e.message が空のことがあり、
+// chapterTitle は outline 章タイトル (空文字制約なし) 由来で空になり得る。ここで空文字を弾くと
+// 復元時に parse が throw して DO がクラッシュループするため、空文字も許容する。
+const PersistedStateSchema = z.object({
+  phase: z.enum(['idle', 'streaming', 'done', 'error']).default('idle'),
+  buffer: z.string().default(''),
+  errMsg: z.string().nullable().default(null),
+  chapterId: z.string().nullable().default(null),
+  chapterTitle: z.string().nullable().default(null),
+  payload: z.custom<StartChapterGenPayload>().nullable().default(null),
+  lastProgressAt: z.number().default(0)
+})
+
+type Phase = z.infer<typeof PersistedStateSchema>['phase']
 
 type Subscriber = {
   writer: WritableStreamDefaultWriter<Uint8Array>
@@ -110,13 +126,19 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   constructor(state: DurableObjectState, env: Env) {
     super(state, env)
     void state.blockConcurrencyWhile(async () => {
-      this.phase = (await state.storage.get<Phase>('phase')) ?? 'idle'
-      this.buffer = (await state.storage.get<string>('buffer')) ?? ''
-      this.errMsg = (await state.storage.get<string | null>('errMsg')) ?? null
-      this.chapterId = (await state.storage.get<string | null>('chapterId')) ?? null
-      this.chapterTitle = (await state.storage.get<string | null>('chapterTitle')) ?? null
-      this.payload = (await state.storage.get<StartChapterGenPayload>('payload')) ?? null
-      this.lastProgressAt = (await state.storage.get<number>('lastProgressAt')) ?? 0
+      const stored = await state.storage.list()
+      const result = PersistedStateSchema.safeParse(Object.fromEntries(stored))
+      // 自分で persistAll() が書いた storage なので schema 不一致は破損を意味する。
+      // 黙って初期値に戻すと進行中の生成状態を握り潰すので、隠さず throw して表面化させる。
+      if (!result.success) throw new Error(`corrupted DO state: ${result.error.message}`)
+      const state_ = result.data
+      this.phase = state_.phase
+      this.buffer = state_.buffer
+      this.errMsg = state_.errMsg
+      this.chapterId = state_.chapterId
+      this.chapterTitle = state_.chapterTitle
+      this.payload = state_.payload
+      this.lastProgressAt = state_.lastProgressAt
     })
   }
 
