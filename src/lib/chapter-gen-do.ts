@@ -173,55 +173,64 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     const sub: Subscriber = { writer }
     this.subscribers.add(sub)
 
-    const encoder = new TextEncoder()
-    const send = async (data: unknown) => {
-      try {
-        await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
-      } catch {
-        this.subscribers.delete(sub)
-      }
+    // 自己修復の二重起動防止だけは Response を返す前に同期実行する。lastProgressAt を
+    // ここで先に更新しておくことで、ほぼ同時に複数 subscriber が来ても run() が二重起動しない。
+    // (実際の run() 再開と storage への永続化は priming 側に委ねる)
+    const needsSelfHeal =
+      this.phase === 'streaming' && Date.now() - this.lastProgressAt > STALE_STREAMING_MS && this.payload !== null
+    if (needsSelfHeal) {
+      this.buffer = ''
+      this.errMsg = null
+      this.chapterId = null
+      this.chapterTitle = null
+      this.lastProgressAt = Date.now()
     }
 
-    // 現バッファをまとめて 1 イベントで replay
-    if (this.buffer.length > 0) await send({ delta: this.buffer })
+    // 初期送出 (replay / 最終イベント / self-heal の再起動) は Response を返した後に
+    // 走らせる。ここで await すると、readable がまだ消費されていない TransformStream に
+    // 書き込むことになり、バックプレッシャで writer.write() が解決せず Response 自体が
+    // 返らない (= ヘッダーすら出ずクライアントが永久にスピンする) ため。
+    const prime = async () => {
+      const encoder = new TextEncoder()
+      const send = async (data: unknown) => {
+        try {
+          await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        } catch {
+          this.subscribers.delete(sub)
+        }
+      }
+      const close = async () => {
+        try {
+          await writer.close()
+        } catch {
+          /* already closed */
+        }
+        this.subscribers.delete(sub)
+      }
 
-    // 既に終わっている場合は最終イベントを送って閉じる
-    if (this.phase === 'done') {
-      // phase=done のとき chapterTitle は run() が必ず設定して persistAll() で保存する。
-      // null になるのは不変条件の破壊なので隠さず null のまま送り、
-      // クライアント側の schema validation で onDone を呼ばずに表面化させる。
-      await send({ done: true, chapterId: this.chapterId, title: this.chapterTitle })
-      try {
-        await writer.close()
-      } catch {
-        /* already closed */
-      }
-      this.subscribers.delete(sub)
-    } else if (this.phase === 'error') {
-      await send({ error: this.errMsg ?? 'unknown_error' })
-      try {
-        await writer.close()
-      } catch {
-        /* already closed */
-      }
-      this.subscribers.delete(sub)
-    } else if (this.phase === 'streaming') {
-      // 自己修復: phase=streaming だが進捗が STALE なものは、DO eviction で run() の Promise が
-      // 失われ alarm chain も途切れた死亡状態とみなす。alarm を待たず、接続が来たこの場で
-      // run() を再起動 + alarm を貼り直す。lastProgressAt を先に更新するので、ほぼ同時に
-      // 複数 subscriber が来ても二重起動しない。
-      const sinceProgress = Date.now() - this.lastProgressAt
-      if (sinceProgress > STALE_STREAMING_MS && this.payload !== null) {
-        this.buffer = ''
-        this.errMsg = null
-        this.chapterId = null
-        this.chapterTitle = null
-        this.lastProgressAt = Date.now()
+      // 現バッファをまとめて 1 イベントで replay
+      if (this.buffer.length > 0) await send({ delta: this.buffer })
+
+      // 既に終わっている場合は最終イベントを送って閉じる
+      if (this.phase === 'done') {
+        // phase=done のとき chapterTitle は run() が必ず設定して persistAll() で保存する。
+        // null になるのは不変条件の破壊なので隠さず null のまま送り、
+        // クライアント側の schema validation で onDone を呼ばずに表面化させる。
+        await send({ done: true, chapterId: this.chapterId, title: this.chapterTitle })
+        await close()
+      } else if (this.phase === 'error') {
+        await send({ error: this.errMsg ?? 'unknown_error' })
+        await close()
+      } else if (needsSelfHeal) {
+        // 自己修復: phase=streaming だが進捗が STALE なものは、DO eviction で run() の
+        // Promise が失われ alarm chain も途切れた死亡状態とみなす。run() を再起動して
+        // alarm を貼り直す。
         await this.persistAll()
         await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_INTERVAL_MS)
         this.ctx.waitUntil(this.run())
       }
     }
+    this.ctx.waitUntil(prime())
 
     return new Response(readable, {
       headers: {
