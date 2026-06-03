@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import { formatAge } from '@/lib/character/format'
 import { routes } from '@/lib/routes'
 import type { Character } from '@/schemas/character.dto'
 
@@ -103,7 +104,7 @@ function CharacterDetailContent({ id }: { id: string }) {
 
       <div className='divide-y border-y'>
         {character.gender && <Field label='性別'>{character.gender}</Field>}
-        {character.age && <Field label='年齢'>{character.age}</Field>}
+        {character.age && <Field label='年齢'>{formatAge(character.age)}</Field>}
         {character.occupation && <Field label='職業'>{character.occupation}</Field>}
         {character.appearance && <Field label='外見'>{character.appearance}</Field>}
         {character.first_person && <Field label='一人称'>{character.first_person}</Field>}
@@ -134,7 +135,7 @@ function CharacterDetailContent({ id }: { id: string }) {
               <div key={s.id} className='py-3'>
                 <p className='text-sm font-medium'>{s.label}</p>
                 <div className='mt-1 divide-y'>
-                  {s.age && <Field label='年齢'>{s.age}</Field>}
+                  {s.age && <Field label='年齢'>{formatAge(s.age)}</Field>}
                   {s.occupation && <Field label='職業'>{s.occupation}</Field>}
                   {s.appearance && <Field label='外見'>{s.appearance}</Field>}
                   {s.first_person && <Field label='一人称'>{s.first_person}</Field>}

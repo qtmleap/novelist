@@ -22,6 +22,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import { formatAge } from '@/lib/character/format'
 import { routes } from '@/lib/routes'
 import type { CharacterVariant, CharacterVariantInput } from '@/schemas/character.dto'
 
@@ -132,9 +133,24 @@ function VariantsContent({ id }: { id: string }) {
               <div key={v.id} className='flex items-start gap-3 px-1 py-3'>
                 <div className='min-w-0 flex-1'>
                   <p className='text-sm font-medium'>{v.label}</p>
-                  <p className='mt-0.5 text-xs text-muted-foreground'>
-                    {[v.age, v.occupation, v.appearance].filter((s) => s.length > 0).join('・')}
-                  </p>
+                  <div className='mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
+                    {v.age.length > 0 && <span>年齢 {formatAge(v.age)}</span>}
+                    {v.occupation.length > 0 && <span>職業 {v.occupation}</span>}
+                    {v.first_person.length > 0 && <span>一人称「{v.first_person}」</span>}
+                    {v.address_others.length > 0 && <span>呼び方「{v.address_others}」</span>}
+                    {v.appearance.length > 0 && <span className='max-w-[24ch] truncate'>外見 {v.appearance}</span>}
+                    {v.speech_examples.length > 0 && <span>口調 {v.speech_examples.length}例</span>}
+                    {v.description.length > 0 && <span>説明あり</span>}
+                  </div>
+                  {v.age.length === 0 &&
+                    v.occupation.length === 0 &&
+                    v.first_person.length === 0 &&
+                    v.address_others.length === 0 &&
+                    v.appearance.length === 0 &&
+                    v.speech_examples.length === 0 &&
+                    v.description.length === 0 && (
+                      <p className='mt-0.5 text-xs text-muted-foreground'>上書き項目なし（すべてベース継承）</p>
+                    )}
                 </div>
                 {editAllowed && (
                   <div className='flex shrink-0 items-center gap-1'>
