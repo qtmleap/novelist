@@ -331,7 +331,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             )}
           />
 
-          <div className='flex flex-wrap gap-4'>
+          <div className='flex flex-wrap items-start gap-4'>
             <FormField
               control={form.control}
               name='num_chapters'
