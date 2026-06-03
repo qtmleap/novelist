@@ -18,6 +18,7 @@ import {
   deleteCategory,
   deleteNovel,
   getNovelWithChapters,
+  getWrittenCharCounts,
   listCategories,
   listNovels,
   renameCategory,
@@ -142,7 +143,13 @@ export const app = new Hono()
     const prisma = getPrisma()
     try {
       const novels = await listNovels(prisma)
-      return c.json(novels.map(serializeNovel))
+      const charCounts = await getWrittenCharCounts(prisma)
+      return c.json(
+        novels.map((n) => {
+          const written = charCounts.get(n.id)
+          return { ...serializeNovel(n), written_chars: written === undefined ? 0 : written }
+        })
+      )
     } finally {
       await prisma.$disconnect()
     }
@@ -218,7 +225,8 @@ export const app = new Hono()
     const prisma = getPrisma()
     try {
       const novel = await createNovel(prisma, input)
-      return c.json(serializeNovel(novel), 201)
+      // 作成直後は章本文なし。
+      return c.json({ ...serializeNovel(novel), written_chars: 0 }, 201)
     } finally {
       await prisma.$disconnect()
     }
@@ -232,6 +240,7 @@ export const app = new Hono()
       if (!novel) return c.json({ error: 'not_found' }, 404)
       return c.json({
         ...serializeNovel(novel),
+        written_chars: novel.chapters.reduce((sum, ch) => sum + ch.content.length, 0),
         chapters: novel.chapters.map((ch) => ({
           id: ch.id,
           novel_id: ch.novel_id,
@@ -268,7 +277,8 @@ export const app = new Hono()
         return c.json({ error: 'num_chapters_cannot_decrease', current: existing.num_chapters }, 409)
       }
       const novel = await updateNovel(prisma, id, input)
-      return c.json(serializeNovel(novel))
+      // 更新は章本文を変えないので、表示用の written_chars は一覧/詳細の再取得で確定させる。
+      return c.json({ ...serializeNovel(novel), written_chars: 0 })
     } catch (e) {
       const err = e as { code?: string }
       if (err.code === 'P2025') return c.json({ error: 'not_found' }, 404)

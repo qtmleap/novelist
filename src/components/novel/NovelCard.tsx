@@ -1,6 +1,6 @@
 'use client'
 
-import { BookOpen, Calendar, ChevronRight, Layers } from 'lucide-react'
+import { BookOpen, Calendar, ChevronRight, Layers, Type } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
@@ -41,6 +41,12 @@ export function NovelCard({ novel }: Props) {
             <Layers className='size-3.5' />
             {novel.num_chapters} 章
           </span>
+          {novel.written_chars > 0 && (
+            <span className='flex items-center gap-1'>
+              <Type className='size-3.5' />
+              <span className='tabular-nums'>{novel.written_chars.toLocaleString()}</span> 文字
+            </span>
+          )}
           <span className='flex items-center gap-1'>
             <Calendar className='size-3.5' />
             {formatDate(novel.created_at)}
