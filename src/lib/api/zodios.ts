@@ -2,6 +2,8 @@ import { makeApi, Zodios, type ZodiosOptions } from '@zodios/core'
 import { z } from 'zod'
 import { CharacterSchema, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
+  CategorySchema,
+  CreateCategorySchema,
   CreateNovelSchema,
   GeminiModelSchema,
   GenerateOptionsSchema,
@@ -29,6 +31,26 @@ const AuthStateSchema = z.object({ email: z.string().nullable() })
 // makeApi は as const 配列を受けて alias 名でメソッドを生やすため、すべての
 // エンドポイントを 1 つのリテラル配列にまとめないと型情報が縮退する。
 export const api = makeApi([
+  // ── Category ──
+  {
+    method: 'get',
+    path: '/api/categories',
+    alias: 'listCategories',
+    description: 'カテゴリ一覧を取得',
+    response: z.array(CategorySchema),
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'post',
+    path: '/api/categories',
+    alias: 'createCategory',
+    description: 'カテゴリを作成 (同名は既存を返す)',
+    parameters: [{ name: 'body', type: 'Body', schema: CreateCategorySchema }],
+    response: CategorySchema,
+    status: 201,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+
   // ── Novel ──
   {
     method: 'get',

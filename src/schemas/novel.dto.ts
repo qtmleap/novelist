@@ -102,10 +102,26 @@ export const CreateNovelSchema = z.object({
   // DB も NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値が入っている前提。
   editor_model: GeminiModelSchema,
   writer_model: GeminiModelSchema,
+  // 所属カテゴリ。未分類は null (デフォルト)。
+  category_id: z.string().nullable().default(null),
   character_links: z.array(NovelCharacterLinkSchema).max(50).default([]),
   relations: z.array(NovelCharacterRelationInputSchema).max(100).default([])
 })
 export type CreateNovelInput = z.infer<typeof CreateNovelSchema>
+
+// ---------------------- カテゴリ ----------------------
+
+export const CategorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  novel_count: z.number().int()
+})
+export type Category = z.infer<typeof CategorySchema>
+
+export const CreateCategorySchema = z.object({
+  name: z.string().nonempty('カテゴリ名を入力してください').max(50)
+})
+export type CreateCategoryInput = z.infer<typeof CreateCategorySchema>
 
 // ---------------------- 章立て (outline) ----------------------
 
@@ -158,6 +174,9 @@ export const NovelSchema = z.object({
   // オブジェクトとして返す (フロントで JSON.parse する手間と検証漏れを避ける)。未生成や
   // 壊れた JSON の場合は null。
   outline: OutlineSchema.nullable(),
+  // 所属カテゴリ。未分類は両方とも null。一覧のグループ表示に使うので名前も持たせる。
+  category_id: z.string().nullable(),
+  category_name: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string()
 })

@@ -1,8 +1,9 @@
 'use client'
 
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useQueryClient, useSuspenseQueries } from '@tanstack/react-query'
 import { Loader2, PenLine, Plus, Save, Trash2, UserPlus } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { DefaultValues } from 'react-hook-form'
 import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { Button } from '@/components/ui/button'
@@ -16,6 +17,7 @@ import type { Character } from '@/schemas/character.dto'
 import { ADDRESS_STYLES, CHARACTER_ROLES } from '@/schemas/character.dto'
 import {
   AGE_RATING_OPTIONS,
+  type Category,
   CHAPTER_LENGTH_OPTIONS,
   type CreateNovelInput,
   CreateNovelSchema,
@@ -50,6 +52,10 @@ const GENRES = [
 
 const CHAPTER_COUNT_OPTIONS = Array.from({ length: 30 }, (_, i) => i + 1)
 
+// shadcn(Radix) Select は空文字 value を使えないため、「未分類」(= category_id: null) を
+// 表す UI 専用のセンチネル。フォームの値自体は null のままで、Select 境界でのみ読み替える。
+const NO_CATEGORY = '__none__'
+
 type Props = {
   onSubmit: (data: CreateNovelInput) => Promise<void>
   isSubmitting: boolean
@@ -72,6 +78,7 @@ export const EMPTY_DEFAULTS: CreateNovelInput = {
   notes: '',
   editor_model: DEFAULT_EDITOR_MODEL,
   writer_model: DEFAULT_WRITER_MODEL,
+  category_id: null,
   character_links: [],
   relations: []
 }
@@ -80,14 +87,16 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
   // 編集モードでは章数を減らせない (= 既に生成済みの章本文が宙ぶらりんになるため)。
   const minChapterCount =
     mode === 'edit' ? (typeof defaultValues?.num_chapters === 'number' ? defaultValues.num_chapters : 1) : 1
-  const [dictionary, setDictionary] = useState<Character[]>([])
-
-  useEffect(() => {
-    api
-      .listCharacters()
-      .then((data) => setDictionary(data))
-      .catch(() => setDictionary([]))
-  }, [])
+  const queryClient = useQueryClient()
+  const [{ data: dictionary }, { data: categories }] = useSuspenseQueries({
+    queries: [
+      { queryKey: ['characters'], queryFn: () => api.listCharacters() },
+      { queryKey: ['categories'], queryFn: () => api.listCategories() }
+    ]
+  })
+  const [newCategoryOpen, setNewCategoryOpen] = useState(false)
+  const [newCategoryName, setNewCategoryName] = useState('')
+  const [creatingCategory, setCreatingCategory] = useState(false)
 
   const form = useForm<CreateNovelInput>({
     resolver: zodResolver(CreateNovelSchema) as Resolver<CreateNovelInput>,
@@ -123,6 +132,26 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
   const showNarratorSelect = FOCAL_POVS.includes(pov) && castCharacters.length > 0
 
   const submit = form.handleSubmit(onSubmit)
+
+  const handleCreateCategory = async () => {
+    const name = newCategoryName.trim()
+    if (name.length === 0 || creatingCategory) return
+    setCreatingCategory(true)
+    try {
+      const created = await api.createCategory({ name })
+      queryClient.setQueryData<Category[]>(['categories'], (prev) => {
+        const list = prev === undefined ? [] : prev
+        return list.some((c) => c.id === created.id) ? list : [...list, created]
+      })
+      form.setValue('category_id', created.id)
+      setNewCategoryName('')
+      setNewCategoryOpen(false)
+    } catch {
+      // 失敗時は入力を残してユーザーが再試行できるようにする
+    } finally {
+      setCreatingCategory(false)
+    }
+  }
 
   return (
     <Form {...form}>
@@ -168,6 +197,89 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                     ))}
                   </SelectContent>
                 </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='category_id'
+            render={({ field }) => (
+              <FormItem className='space-y-2'>
+                <FormLabel>
+                  カテゴリ <span className='text-muted-foreground font-normal'>（任意）</span>
+                </FormLabel>
+                <div className='flex flex-wrap items-center gap-2'>
+                  <Select
+                    value={field.value === null ? NO_CATEGORY : field.value}
+                    onValueChange={(v) => field.onChange(v === NO_CATEGORY ? null : v)}
+                  >
+                    <FormControl>
+                      <SelectTrigger className='w-52'>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value={NO_CATEGORY}>未分類</SelectItem>
+                      {categories.map((cat) => (
+                        <SelectItem key={cat.id} value={cat.id}>
+                          {cat.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {newCategoryOpen ? (
+                    <>
+                      <Input
+                        autoFocus
+                        value={newCategoryName}
+                        onChange={(e) => setNewCategoryName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            handleCreateCategory()
+                          }
+                        }}
+                        placeholder='新しいカテゴリ名'
+                        maxLength={50}
+                        className='w-44'
+                      />
+                      <Button
+                        type='button'
+                        size='sm'
+                        disabled={creatingCategory || newCategoryName.trim().length === 0}
+                        onClick={handleCreateCategory}
+                        className='[&_svg]:size-5!'
+                      >
+                        {creatingCategory ? <Loader2 className='animate-spin' /> : <Plus />}
+                        追加
+                      </Button>
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='sm'
+                        onClick={() => {
+                          setNewCategoryOpen(false)
+                          setNewCategoryName('')
+                        }}
+                      >
+                        キャンセル
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      type='button'
+                      variant='outline'
+                      size='sm'
+                      onClick={() => setNewCategoryOpen(true)}
+                      className='[&_svg]:size-5!'
+                    >
+                      <Plus />
+                      新規カテゴリ
+                    </Button>
+                  )}
+                </div>
                 <FormMessage />
               </FormItem>
             )}
