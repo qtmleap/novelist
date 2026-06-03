@@ -17,8 +17,10 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
       ending: input.ending,
       notes: input.notes,
       editor_model: input.editor_model,
-      writer_model: input.writer_model
-    }
+      writer_model: input.writer_model,
+      category_id: input.category_id
+    },
+    include: { category: { select: { name: true } } }
   })
 
   const ops: Prisma.PrismaPromise<unknown>[] = []
@@ -120,7 +122,8 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
         }
       },
       generation_costs: { orderBy: [{ chapter_number: 'asc' }, { created_at: 'desc' }] },
-      generation_job: true
+      generation_job: true,
+      category: { select: { id: true, name: true } }
     }
   })
 
@@ -213,10 +216,26 @@ export async function listNovels(prisma: PrismaClient) {
       editor_model: true,
       writer_model: true,
       outline: true,
+      category_id: true,
+      category: { select: { name: true } },
       created_at: true,
       updated_at: true
     }
   })
+}
+
+export async function listCategories(prisma: PrismaClient) {
+  return prisma.category.findMany({
+    orderBy: { name: 'asc' },
+    select: { id: true, name: true, _count: { select: { novels: true } } }
+  })
+}
+
+// 同名カテゴリは作らず既存を返す (inline 作成で名前が被っても自然に選択できる)。
+export async function createCategory(prisma: PrismaClient, name: string) {
+  const existing = await prisma.category.findUnique({ where: { name } })
+  if (existing) return existing
+  return prisma.category.create({ data: { name } })
 }
 
 export async function updateNovel(prisma: PrismaClient, id: string, input: CreateNovelInput) {
@@ -239,8 +258,10 @@ export async function updateNovel(prisma: PrismaClient, id: string, input: Creat
         ending: input.ending,
         notes: input.notes,
         editor_model: input.editor_model,
-        writer_model: input.writer_model
-      }
+        writer_model: input.writer_model,
+        category_id: input.category_id
+      },
+      include: { category: { select: { name: true } } }
     }),
     prisma.novelCharacterRelation.deleteMany({ where: { novel_id: id } }),
     prisma.novelCharacter.deleteMany({ where: { novel_id: id } })
@@ -270,7 +291,7 @@ export async function updateNovel(prisma: PrismaClient, id: string, input: Creat
   }
 
   const results = await prisma.$transaction(ops)
-  return results[0] as Awaited<ReturnType<typeof prisma.novel.update>>
+  return results[0] as Prisma.NovelGetPayload<{ include: { category: { select: { name: true } } } }>
 }
 
 export async function deleteNovel(prisma: PrismaClient, id: string) {

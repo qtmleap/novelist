@@ -12,9 +12,11 @@ import { getEnv, getPrisma } from '@/lib/db'
 import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
 import { buildCastForGemini, buildChapterPayload, buildRelationsForGemini } from '@/lib/novel/chapter-payload'
 import {
+  createCategory,
   createNovel,
   deleteNovel,
   getNovelWithChapters,
+  listCategories,
   listNovels,
   saveOutline,
   stopGenerationJob,
@@ -23,6 +25,7 @@ import {
 } from '@/lib/novel/repository'
 import { CreateCharacterSchema } from '@/schemas/character.dto'
 import {
+  CreateCategorySchema,
   CreateNovelSchema,
   GeminiModelSchema,
   GenerateOptionsSchema,
@@ -48,6 +51,8 @@ function serializeNovel(n: {
   editor_model: string
   writer_model: string
   outline: string | null
+  category_id: string | null
+  category: { name: string } | null
   created_at: Date
   updated_at: Date
 }) {
@@ -69,6 +74,8 @@ function serializeNovel(n: {
     writer_model: n.writer_model,
     // DB の JSON 文字列をパース・検証してオブジェクトで返す。未生成 (null) や壊れた JSON は null。
     outline: parseStoredOutline(n.outline),
+    category_id: n.category_id,
+    category_name: n.category ? n.category.name : null,
     created_at: n.created_at.toISOString(),
     updated_at: n.updated_at.toISOString()
   }
@@ -134,6 +141,28 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
+
+  // ── Categories (ユーザー作成のフォルダ式カテゴリ) ──────────────────────
+  .get('/categories', async (c) => {
+    const prisma = getPrisma()
+    try {
+      const categories = await listCategories(prisma)
+      return c.json(categories.map((cat) => ({ id: cat.id, name: cat.name, novel_count: cat._count.novels })))
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+  .post('/categories', requireAuth, zValidator('json', CreateCategorySchema), async (c) => {
+    const input = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      const category = await createCategory(prisma, input.name)
+      return c.json({ id: category.id, name: category.name, novel_count: 0 }, 201)
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+
   .post('/novels', requireAuth, zValidator('json', CreateNovelSchema), async (c) => {
     const input = c.req.valid('json')
     const prisma = getPrisma()

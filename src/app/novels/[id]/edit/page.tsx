@@ -43,6 +43,7 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
     // 無効値が混入したら表示時点で気付かせるため throw する (Surface or throw)。
     editor_model: GeminiModelSchema.parse(novel.editor_model),
     writer_model: GeminiModelSchema.parse(novel.writer_model),
+    category_id: novel.category_id,
     character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
     relations: novel.relations.map((r) => ({
       source_character_id: r.source_character_id,
