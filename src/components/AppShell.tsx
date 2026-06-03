@@ -21,7 +21,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           </header>
           <main className='flex-1 p-4 md:p-6'>
-            <div className='mx-auto max-w-4xl'>{children}</div>
+            <div className='max-w-4xl'>{children}</div>
           </main>
         </SidebarInset>
       </SidebarProvider>
