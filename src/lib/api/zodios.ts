@@ -50,6 +50,23 @@ export const api = makeApi([
     status: 201,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
+  {
+    method: 'put',
+    path: '/api/categories/:id',
+    alias: 'updateCategory',
+    description: 'カテゴリ名を変更',
+    parameters: [{ name: 'body', type: 'Body', schema: CreateCategorySchema }],
+    response: CategorySchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'delete',
+    path: '/api/categories/:id',
+    alias: 'deleteCategory',
+    description: 'カテゴリを削除 (所属小説は未分類に戻る)',
+    response: z.object({ id: z.string() }),
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
 
   // ── Novel ──
   {

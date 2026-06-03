@@ -1,16 +1,27 @@
 'use client'
 
 import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { FolderTree, Loader2, Plus } from 'lucide-react'
+import { Check, FolderTree, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { PageHeader } from '@/components/PageHeader'
 import { QueryBoundary } from '@/components/QueryBoundary'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import type { Category } from '@/schemas/novel.dto'
 
 function CategorySkeletonList() {
   return (
@@ -45,21 +56,48 @@ function CategoryListContent() {
   const editAllowed = canEdit(auth)
   const queryClient = useQueryClient()
   const [name, setName] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingName, setEditingName] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState<Category | null>(null)
 
   const { data: categories } = useSuspenseQuery({
     queryKey: ['categories'],
     queryFn: () => api.listCategories()
   })
 
+  // カテゴリ変更は所属小説の表示 (一覧グループ・作品数) にも効くので novels も無効化する。
+  const invalidateAll = () => {
+    void queryClient.invalidateQueries({ queryKey: ['categories'] })
+    void queryClient.invalidateQueries({ queryKey: ['novels'] })
+  }
+
   const createMutation = useMutation({
     mutationFn: (categoryName: string) => api.createCategory({ name: categoryName }),
     onSuccess: () => {
       setName('')
-      void queryClient.invalidateQueries({ queryKey: ['categories'] })
-      // 一覧の作品数表示にも効くので novels も無効化しておく。
-      void queryClient.invalidateQueries({ queryKey: ['novels'] })
+      invalidateAll()
     },
     onError: (e) => toast.error(readApiError(e, 'カテゴリの作成に失敗しました'))
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: (vars: { id: string; name: string }) =>
+      api.updateCategory({ name: vars.name }, { params: { id: vars.id } }),
+    onSuccess: () => {
+      setEditingId(null)
+      setEditingName('')
+      invalidateAll()
+    },
+    onError: (e) => toast.error(readApiError(e, 'カテゴリ名の変更に失敗しました'))
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.deleteCategory(undefined, { params: { id } }),
+    onSuccess: () => {
+      setDeleteTarget(null)
+      invalidateAll()
+    },
+    onError: (e) => toast.error(readApiError(e, 'カテゴリの削除に失敗しました'))
   })
 
   const trimmed = name.trim()
@@ -68,6 +106,17 @@ function CategoryListContent() {
   const submit = () => {
     if (!canSubmit) return
     createMutation.mutate(trimmed)
+  }
+
+  const startEdit = (cat: Category) => {
+    setEditingId(cat.id)
+    setEditingName(cat.name)
+  }
+
+  const saveEdit = (id: string) => {
+    const next = editingName.trim()
+    if (next.length === 0 || updateMutation.isPending) return
+    updateMutation.mutate({ id, name: next })
   }
 
   return (
@@ -111,17 +160,115 @@ function CategoryListContent() {
         <EmptyCategories />
       ) : (
         <div className='divide-y border-y'>
-          {categories.map((cat) => (
-            <div key={cat.id} className='flex items-center gap-3 px-4 py-3'>
-              <FolderTree className='size-5 shrink-0 text-muted-foreground' />
-              <span className='truncate font-medium text-sm'>{cat.name}</span>
-              <span className='ml-auto shrink-0 text-xs tabular-nums text-muted-foreground'>
-                {cat.novel_count} 作品
-              </span>
-            </div>
-          ))}
+          {categories.map((cat) => {
+            const isEditing = editingId === cat.id
+            return (
+              <div key={cat.id} className='flex items-center gap-3 px-4 py-3'>
+                <FolderTree className='size-5 shrink-0 text-muted-foreground' />
+                {isEditing ? (
+                  <>
+                    <Input
+                      autoFocus
+                      value={editingName}
+                      onChange={(e) => setEditingName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          saveEdit(cat.id)
+                        }
+                        if (e.key === 'Escape') setEditingId(null)
+                      }}
+                      maxLength={50}
+                      className='h-8 w-60'
+                    />
+                    <div className='ml-auto flex shrink-0 items-center gap-1'>
+                      <Button
+                        type='button'
+                        size='icon'
+                        aria-label='保存'
+                        disabled={updateMutation.isPending || editingName.trim().length === 0}
+                        onClick={() => saveEdit(cat.id)}
+                        className='size-8 [&_svg]:size-5!'
+                      >
+                        {updateMutation.isPending ? <Loader2 className='animate-spin' /> : <Check />}
+                      </Button>
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='icon'
+                        aria-label='キャンセル'
+                        onClick={() => setEditingId(null)}
+                        className='size-8 [&_svg]:size-5!'
+                      >
+                        <X />
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span className='truncate font-medium text-sm'>{cat.name}</span>
+                    <span className='ml-auto shrink-0 text-xs tabular-nums text-muted-foreground'>
+                      {cat.novel_count} 作品
+                    </span>
+                    {editAllowed && (
+                      <div className='flex shrink-0 items-center gap-1'>
+                        <Button
+                          type='button'
+                          variant='ghost'
+                          size='icon'
+                          aria-label='名前を変更'
+                          onClick={() => startEdit(cat)}
+                          className='size-8 text-muted-foreground [&_svg]:size-5!'
+                        >
+                          <Pencil />
+                        </Button>
+                        <Button
+                          type='button'
+                          variant='ghost'
+                          size='icon'
+                          aria-label='削除'
+                          onClick={() => setDeleteTarget(cat)}
+                          className='size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive [&_svg]:size-5!'
+                        >
+                          <Trash2 />
+                        </Button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
+
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>カテゴリ「{deleteTarget?.name}」を削除しますか？</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget !== null && deleteTarget.novel_count > 0
+                ? `このカテゴリの小説 ${deleteTarget.novel_count} 件は「未分類」に戻ります。小説自体は削除されません。`
+                : 'このカテゴリを削除します。小説自体は削除されません。'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>キャンセル</AlertDialogCancel>
+            <AlertDialogAction
+              variant='destructive'
+              disabled={deleteMutation.isPending}
+              onClick={(e) => {
+                e.preventDefault()
+                if (deleteTarget !== null) deleteMutation.mutate(deleteTarget.id)
+              }}
+              className='[&_svg]:size-5!'
+            >
+              {deleteMutation.isPending ? <Loader2 className='animate-spin' /> : <Trash2 />}
+              削除する
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }
