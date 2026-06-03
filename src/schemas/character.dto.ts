@@ -62,6 +62,15 @@ export const ADDRESS_STYLES = [
   '苗字＋さん'
 ] as const
 
+// 成長段階の入力。空欄のフィールドはベース (Character 本体) の値を継承する。
+export const CharacterStageInputSchema = z.object({
+  label: z.string().nonempty('段階名を入力してください').max(50),
+  appearance: z.string().max(2000).default(''),
+  description: z.string().max(4000).default(''),
+  speech_examples: z.array(z.string().max(300)).max(20).default([])
+})
+export type CharacterStageInput = z.infer<typeof CharacterStageInputSchema>
+
 export const CreateCharacterSchema = z.object({
   name: z.string().nonempty('名前を入力してください').max(100),
   gender: z.string().max(20).default(''),
@@ -71,11 +80,22 @@ export const CreateCharacterSchema = z.object({
   first_person: z.string().max(20).default(''),
   address_others: z.string().max(500).default(''),
   speech_examples: z.array(z.string().max(300)).max(20).default([]),
-  description: z.string().max(4000).default('')
+  description: z.string().max(4000).default(''),
+  // 成長段階 (任意・順序あり)。話の進行で変化する姿を段階として持たせる。
+  stages: z.array(CharacterStageInputSchema).max(20).default([])
 })
 export type CreateCharacterInput = z.infer<typeof CreateCharacterSchema>
 
 // DB では speech_examples を JSON 文字列で保持し、API 層で配列に変換する。
+export const CharacterStageSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  appearance: z.string(),
+  description: z.string(),
+  speech_examples: z.array(z.string())
+})
+export type CharacterStage = z.infer<typeof CharacterStageSchema>
+
 export const CharacterSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -87,6 +107,7 @@ export const CharacterSchema = z.object({
   address_others: z.string(),
   speech_examples: z.array(z.string()),
   description: z.string(),
+  stages: z.array(CharacterStageSchema).default([]),
   created_at: z.string(),
   updated_at: z.string()
 })

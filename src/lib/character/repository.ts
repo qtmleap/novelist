@@ -1,7 +1,8 @@
-import type { PrismaClient } from '@/generated/prisma/client'
+import type { Prisma, PrismaClient } from '@/generated/prisma/client'
 import type { CreateCharacterInput } from '@/schemas/character.dto'
 
-function serializeCharacter(input: CreateCharacterInput) {
+// ベース (Character 本体) のフィールドを DB 形に。stages は別テーブルなので含めない。
+function serializeBase(input: CreateCharacterInput) {
   return {
     name: input.name,
     gender: input.gender,
@@ -15,36 +16,91 @@ function serializeCharacter(input: CreateCharacterInput) {
   }
 }
 
-export function parseCharacter<T extends { speech_examples: string }>(row: T) {
-  let examples: string[] = []
+function parseSpeech(json: string): string[] {
   try {
-    const parsed = JSON.parse(row.speech_examples)
-    if (Array.isArray(parsed)) examples = parsed as string[]
+    const parsed = JSON.parse(json)
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === 'string')
   } catch {
     // malformed stored value — return empty array
   }
-  return { ...row, speech_examples: examples }
+  return []
+}
+
+type CharacterRow = {
+  speech_examples: string
+  stages: Array<{ id: string; label: string; appearance: string; description: string; speech_examples: string }>
+}
+
+// DB 行を API/フロント向けの形 (speech_examples を配列化、stages を整形) に変換する。
+function shapeCharacter<T extends CharacterRow>(row: T) {
+  return {
+    ...row,
+    speech_examples: parseSpeech(row.speech_examples),
+    stages: row.stages.map((s) => ({
+      id: s.id,
+      label: s.label,
+      appearance: s.appearance,
+      description: s.description,
+      speech_examples: parseSpeech(s.speech_examples)
+    }))
+  }
+}
+
+// 成長段階を position 付きで作成する $transaction オペレーション群を作る。
+function stageCreateOps(prisma: PrismaClient, characterId: string, stages: CreateCharacterInput['stages']) {
+  return stages.map((s, i) =>
+    prisma.characterStage.create({
+      data: {
+        character_id: characterId,
+        position: i,
+        label: s.label,
+        appearance: s.appearance,
+        description: s.description,
+        speech_examples: JSON.stringify(s.speech_examples)
+      }
+    })
+  )
 }
 
 export async function createCharacter(prisma: PrismaClient, input: CreateCharacterInput) {
-  const row = await prisma.character.create({ data: serializeCharacter(input) })
-  return parseCharacter(row)
+  const character = await prisma.character.create({ data: serializeBase(input) })
+  const ops = stageCreateOps(prisma, character.id, input.stages)
+  if (ops.length > 0) await prisma.$transaction(ops)
+  const created = await getCharacter(prisma, character.id)
+  // 直前に作成しているので必ず存在する。
+  if (created === null) throw new Error('character disappeared after create')
+  return created
 }
 
 export async function listCharacters(prisma: PrismaClient) {
-  const rows = await prisma.character.findMany({ orderBy: { created_at: 'desc' } })
-  return rows.map(parseCharacter)
+  const rows = await prisma.character.findMany({
+    orderBy: { created_at: 'desc' },
+    include: { stages: { orderBy: { position: 'asc' } } }
+  })
+  return rows.map(shapeCharacter)
 }
 
 export async function getCharacter(prisma: PrismaClient, id: string) {
-  const row = await prisma.character.findUnique({ where: { id } })
+  const row = await prisma.character.findUnique({
+    where: { id },
+    include: { stages: { orderBy: { position: 'asc' } } }
+  })
   if (!row) return null
-  return parseCharacter(row)
+  return shapeCharacter(row)
 }
 
 export async function updateCharacter(prisma: PrismaClient, id: string, input: CreateCharacterInput) {
-  const row = await prisma.character.update({ where: { id }, data: serializeCharacter(input) })
-  return parseCharacter(row)
+  // D1 はインタラクティブトランザクション非対応なので $transaction([...]) で順序実行。
+  // 既存 stages は一旦消して input から入れ直す。
+  const ops: Prisma.PrismaPromise<unknown>[] = [
+    prisma.character.update({ where: { id }, data: serializeBase(input) }),
+    prisma.characterStage.deleteMany({ where: { character_id: id } }),
+    ...stageCreateOps(prisma, id, input.stages)
+  ]
+  await prisma.$transaction(ops)
+  const updated = await getCharacter(prisma, id)
+  if (updated === null) throw new Error('character disappeared after update')
+  return updated
 }
 
 export async function deleteCharacter(prisma: PrismaClient, id: string) {

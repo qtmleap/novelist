@@ -29,9 +29,38 @@ const FormSchema = CreateCharacterSchema.extend({
   speech_examples: z
     .array(z.object({ value: z.string().max(300) }))
     .max(20)
+    .default([]),
+  // 成長段階。口調は 1 行 1 例の textarea で持ち、送信時に配列へ分解する。
+  stages: z
+    .array(
+      z.object({
+        label: z.string().max(50),
+        appearance: z.string().max(2000).default(''),
+        description: z.string().max(4000).default(''),
+        speech: z.string().max(6200).default('')
+      })
+    )
+    .max(20)
     .default([])
 })
 type FormValues = z.infer<typeof FormSchema>
+
+// CharacterStageInput[] (speech_examples: string[]) → フォーム形 (speech: 改行結合) へ。
+// DefaultValues はネストが Partial になるので各フィールドを明示的に narrow する。
+function toFormStages(stages: DefaultValues<CreateCharacterInput>['stages']): FormValues['stages'] {
+  const list = Array.isArray(stages) ? stages : []
+  return list.map((s) => {
+    const speech = Array.isArray(s?.speech_examples)
+      ? s.speech_examples.filter((v): v is string => typeof v === 'string')
+      : []
+    return {
+      label: typeof s?.label === 'string' ? s.label : '',
+      appearance: typeof s?.appearance === 'string' ? s.appearance : '',
+      description: typeof s?.description === 'string' ? s.description : '',
+      speech: speech.join('\n')
+    }
+  })
+}
 
 export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitting = false }: Props) {
   const form = useForm<FormValues>({
@@ -48,7 +77,10 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
         .filter((v): v is string => typeof v === 'string')
         .map((v) => ({ value: v })),
       description: '',
-      ...Object.fromEntries(Object.entries(defaultValues ? defaultValues : {}).filter(([k]) => k !== 'speech_examples'))
+      stages: toFormStages(defaultValues?.stages),
+      ...Object.fromEntries(
+        Object.entries(defaultValues ? defaultValues : {}).filter(([k]) => k !== 'speech_examples' && k !== 'stages')
+      )
     },
     mode: 'onSubmit'
   })
@@ -58,10 +90,28 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
     name: 'speech_examples'
   })
 
+  const {
+    fields: stageFields,
+    append: appendStage,
+    remove: removeStage
+  } = useFieldArray<FormValues, 'stages'>({ control: form.control, name: 'stages' })
+
   const handleSubmit = form.handleSubmit((data) => {
     const flattened: CreateCharacterInput = {
       ...data,
-      speech_examples: data.speech_examples.map((r) => r.value).filter((v) => v.trim() !== '')
+      speech_examples: data.speech_examples.map((r) => r.value).filter((v) => v.trim() !== ''),
+      // 段階名が空の行は捨てる。口調は改行で分割して空行を除く。
+      stages: data.stages
+        .filter((s) => s.label.trim() !== '')
+        .map((s) => ({
+          label: s.label.trim(),
+          appearance: s.appearance,
+          description: s.description,
+          speech_examples: s.speech
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line !== '')
+        }))
     }
     return onSubmit(flattened)
   })
@@ -284,6 +334,104 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
               </FormItem>
             )}
           />
+        </div>
+
+        {/* ── 成長段階 ── */}
+        <div className='space-y-3 border-t pt-5'>
+          <div>
+            <p className='text-sm font-medium'>成長段階（任意）</p>
+            <p className='mt-0.5 text-sm text-muted-foreground'>
+              話の進行で変化する姿を段階として登録できます。空欄の項目はベースの設定を引き継ぎます。本文生成時にどの段階を使うか選べます。
+            </p>
+          </div>
+
+          {stageFields.length > 0 && (
+            <div className='space-y-3'>
+              {stageFields.map((field, idx) => (
+                <div key={field.id} className='space-y-2 rounded-md border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <FormField
+                      control={form.control}
+                      name={`stages.${idx}.label`}
+                      render={({ field: itemField }) => (
+                        <FormItem className='flex-1'>
+                          <FormControl>
+                            <Input placeholder={`段階名 (例: 覚醒後 / 成長後)`} {...itemField} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <Button
+                      type='button'
+                      variant='ghost'
+                      size='icon'
+                      aria-label='段階を削除'
+                      className='shrink-0 size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive [&_svg]:size-5!'
+                      onClick={() => removeStage(idx)}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                  <FormField
+                    control={form.control}
+                    name={`stages.${idx}.appearance`}
+                    render={({ field: itemField }) => (
+                      <FormItem>
+                        <FormControl>
+                          <Textarea placeholder='この段階の外見（空欄ならベースのまま）' rows={2} {...itemField} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name={`stages.${idx}.description`}
+                    render={({ field: itemField }) => (
+                      <FormItem>
+                        <FormControl>
+                          <Textarea
+                            placeholder='この段階の説明・背景（空欄ならベースのまま）'
+                            rows={3}
+                            {...itemField}
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name={`stages.${idx}.speech`}
+                    render={({ field: itemField }) => (
+                      <FormItem>
+                        <FormControl>
+                          <Textarea
+                            placeholder='この段階の口調の例（1行に1つ。空欄ならベースのまま）'
+                            rows={3}
+                            {...itemField}
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Button
+            type='button'
+            variant='outline'
+            size='sm'
+            className='[&_svg]:size-5!'
+            onClick={() => appendStage({ label: '', appearance: '', description: '', speech: '' })}
+          >
+            <Plus />
+            成長段階を追加
+          </Button>
         </div>
 
         <Button type='submit' disabled={isSubmitting} className='[&_svg]:size-5!'>
