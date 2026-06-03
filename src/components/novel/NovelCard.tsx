@@ -18,6 +18,14 @@ function formatDate(iso: string): string {
   return `${Number(y)}年${Number(m)}月${Number(d)}日`
 }
 
+// 年齢指定バッジの色。R18 を最も強く、R15 を中間、全年齢は控えめにして
+// 制限付きの作品が一覧でひと目で分かるようにする。
+function ageRatingClass(rating: string): string {
+  if (rating === 'R18') return 'border-red-500 text-red-600'
+  if (rating === 'R15') return 'border-amber-500 text-amber-600'
+  return 'text-muted-foreground'
+}
+
 export function NovelCard({ novel }: Props) {
   const hasOutline = novel.outline !== null
   const status = hasOutline ? '生成済み' : '未生成'
@@ -40,6 +48,9 @@ export function NovelCard({ novel }: Props) {
         </div>
       </div>
       <div className='ml-auto flex items-center gap-1 shrink-0'>
+        <Badge variant='outline' className={cn('text-xs', ageRatingClass(novel.age_rating))}>
+          {novel.age_rating}
+        </Badge>
         <Badge
           variant='outline'
           className={cn('text-xs', hasOutline ? 'border-green-500 text-green-600' : 'text-muted-foreground')}
