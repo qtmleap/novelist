@@ -336,6 +336,28 @@ export const app = new Hono()
     }
   })
 
+  // 章本文生成時に実際に Gemini へ送ったプロンプト (最新 version) を返す。
+  // この機能より前に生成された章は prompt=null。
+  .get('/novels/:id/chapters/:number/prompt', async (c) => {
+    const id = c.req.param('id')
+    const chapterNumber = Number.parseInt(c.req.param('number'), 10)
+    if (Number.isNaN(chapterNumber) || chapterNumber < 1) {
+      return c.json({ error: 'invalid_chapter_number' }, 400)
+    }
+    const prisma = getPrisma()
+    try {
+      const chapter = await prisma.chapter.findFirst({
+        where: { novel_id: id, chapter_number: chapterNumber },
+        orderBy: { version: 'desc' },
+        select: { prompt: true }
+      })
+      if (!chapter) return c.json({ error: 'not_found' }, 404)
+      return c.json({ prompt: chapter.prompt })
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+
   .post('/novels/:id/outline/:number', requireAuth, zValidator('json', GenerateOptionsSchema), async (c) => {
     const id = c.req.param('id')
     const chapterNumber = Number.parseInt(c.req.param('number'), 10)

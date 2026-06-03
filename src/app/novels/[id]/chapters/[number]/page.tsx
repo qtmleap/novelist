@@ -1,6 +1,6 @@
 'use client'
 
-import { Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import { FileText, Loader2, RefreshCw, Trash2 } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -19,6 +19,7 @@ import {
   AlertDialogTrigger
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
@@ -69,6 +70,11 @@ export default function ChapterDetailPage() {
   const [regenOpen, setRegenOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+  // 生成プロンプト表示。loaded.text が null = この機能より前に生成された章 (プロンプト未保存)。
+  const [promptOpen, setPromptOpen] = useState(false)
+  const [promptView, setPromptView] = useState<
+    { status: 'loading' } | { status: 'loaded'; text: string | null } | { status: 'error'; message: string }
+  >({ status: 'loading' })
   const abortRef = useRef<AbortController | null>(null)
   const auth = useAuth()
   const editAllowed = canEdit(auth)
@@ -172,6 +178,18 @@ export default function ChapterDetailPage() {
     }
   }
 
+  const handleViewPrompt = async () => {
+    if (!novelId || chapterNumber <= 0) return
+    setPromptOpen(true)
+    setPromptView({ status: 'loading' })
+    try {
+      const data = await api.getChapterPrompt({ params: { id: novelId, number: String(chapterNumber) } })
+      setPromptView({ status: 'loaded', text: data.prompt })
+    } catch (e) {
+      setPromptView({ status: 'error', message: readApiError(e, 'プロンプトの取得に失敗しました') })
+    }
+  }
+
   const displayContent = isRegenerating ? buffer : (chapter?.content ?? '')
   const busy = isRegenerating || isDeleting
 
@@ -200,6 +218,17 @@ export default function ChapterDetailPage() {
             <div className='mt-2'>
               <ChapterMeta chars={displayContent.length} cost={cost} />
             </div>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={busy}
+              onClick={handleViewPrompt}
+              className='mt-3 [&_svg]:size-4!'
+            >
+              <FileText />
+              生成プロンプトを見る
+            </Button>
           </div>
 
           <article className='whitespace-pre-wrap text-sm leading-relaxed text-foreground/90'>
@@ -325,6 +354,28 @@ export default function ChapterDetailPage() {
               </AlertDialog>
             </div>
           </div>
+
+          <Dialog open={promptOpen} onOpenChange={setPromptOpen}>
+            <DialogContent className='sm:max-w-3xl'>
+              <DialogHeader>
+                <DialogTitle>第 {chapterNumber} 章を生成したときのプロンプト</DialogTitle>
+                <DialogDescription>本文生成時に実際に Gemini へ送ったプロンプト全文です。</DialogDescription>
+              </DialogHeader>
+              {promptView.status === 'loading' && <p className='text-sm text-muted-foreground'>取得中…</p>}
+              {promptView.status === 'error' && <p className='text-sm text-destructive'>{promptView.message}</p>}
+              {promptView.status === 'loaded' && promptView.text === null && (
+                <p className='text-sm text-muted-foreground'>
+                  この章はプロンプトが保存されていません
+                  (プロンプト保存機能より前に生成された章です)。再生成すると保存されます。
+                </p>
+              )}
+              {promptView.status === 'loaded' && promptView.text !== null && (
+                <pre className='max-h-[60vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap'>
+                  {promptView.text}
+                </pre>
+              )}
+            </DialogContent>
+          </Dialog>
         </>
       )}
     </div>
