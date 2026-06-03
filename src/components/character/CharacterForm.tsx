@@ -30,8 +30,8 @@ const FormSchema = CreateCharacterSchema.extend({
     .array(z.object({ value: z.string().max(300) }))
     .max(20)
     .default([]),
-  // 成長段階。口調は 1 行 1 例の textarea で持ち、送信時に配列へ分解する。
-  stages: z
+  // バリエーション。口調は 1 行 1 例の textarea で持ち、送信時に配列へ分解する。
+  variants: z
     .array(
       z.object({
         label: z.string().max(50),
@@ -51,10 +51,10 @@ type FormValues = z.infer<typeof FormSchema>
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
-// CharacterStageInput[] (speech_examples: string[]) → フォーム形 (speech: 改行結合) へ。
+// CharacterVariantInput[] (speech_examples: string[]) → フォーム形 (speech: 改行結合) へ。
 // DefaultValues はネストが Partial になるので各フィールドを明示的に narrow する。
-function toFormStages(stages: DefaultValues<CreateCharacterInput>['stages']): FormValues['stages'] {
-  const list = Array.isArray(stages) ? stages : []
+function toFormVariants(variants: DefaultValues<CreateCharacterInput>['variants']): FormValues['variants'] {
+  const list = Array.isArray(variants) ? variants : []
   return list.map((s) => {
     const speech = Array.isArray(s?.speech_examples)
       ? s.speech_examples.filter((v): v is string => typeof v === 'string')
@@ -87,9 +87,9 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
         .filter((v): v is string => typeof v === 'string')
         .map((v) => ({ value: v })),
       description: '',
-      stages: toFormStages(defaultValues?.stages),
+      variants: toFormVariants(defaultValues?.variants),
       ...Object.fromEntries(
-        Object.entries(defaultValues ? defaultValues : {}).filter(([k]) => k !== 'speech_examples' && k !== 'stages')
+        Object.entries(defaultValues ? defaultValues : {}).filter(([k]) => k !== 'speech_examples' && k !== 'variants')
       )
     },
     mode: 'onSubmit'
@@ -101,17 +101,17 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
   })
 
   const {
-    fields: stageFields,
-    append: appendStage,
-    remove: removeStage
-  } = useFieldArray<FormValues, 'stages'>({ control: form.control, name: 'stages' })
+    fields: variantFields,
+    append: appendVariant,
+    remove: removeVariant
+  } = useFieldArray<FormValues, 'variants'>({ control: form.control, name: 'variants' })
 
   const handleSubmit = form.handleSubmit((data) => {
     const flattened: CreateCharacterInput = {
       ...data,
       speech_examples: data.speech_examples.map((r) => r.value).filter((v) => v.trim() !== ''),
-      // 段階名が空の行は捨てる。口調は改行で分割して空行を除く。
-      stages: data.stages
+      // バリエーション名が空の行は捨てる。口調は改行で分割して空行を除く。
+      variants: data.variants
         .filter((s) => s.label.trim() !== '')
         .map((s) => ({
           label: s.label.trim(),
@@ -350,27 +350,27 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
           />
         </div>
 
-        {/* ── 成長段階 ── */}
+        {/* ── バリエーション ── */}
         <div className='space-y-3 border-t pt-5'>
           <div>
-            <p className='text-sm font-medium'>成長段階（任意）</p>
+            <p className='text-sm font-medium'>バリエーション（任意）</p>
             <p className='mt-0.5 text-sm text-muted-foreground'>
-              話の進行で変化する姿を段階として登録できます。空欄の項目はベースの設定を引き継ぎます。本文生成時にどの段階を使うか選べます。
+              別の姿・状態をバリエーションとして登録できます。空欄の項目はベースの設定を引き継ぎます。本文生成時にどのバリエーションを使うか選べます。
             </p>
           </div>
 
-          {stageFields.length > 0 && (
+          {variantFields.length > 0 && (
             <div className='space-y-3'>
-              {stageFields.map((field, idx) => (
+              {variantFields.map((field, idx) => (
                 <div key={field.id} className='space-y-2 rounded-md border p-3'>
                   <div className='flex items-center gap-2'>
                     <FormField
                       control={form.control}
-                      name={`stages.${idx}.label`}
+                      name={`variants.${idx}.label`}
                       render={({ field: itemField }) => (
                         <FormItem className='flex-1'>
                           <FormControl>
-                            <Input placeholder={`段階名 (例: 覚醒後 / 成長後)`} {...itemField} />
+                            <Input placeholder={`バリエーション名 (例: 覚醒後 / 成長後)`} {...itemField} />
                           </FormControl>
                           <FormMessage />
                         </FormItem>
@@ -380,9 +380,9 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                       type='button'
                       variant='ghost'
                       size='icon'
-                      aria-label='段階を削除'
+                      aria-label='バリエーションを削除'
                       className='shrink-0 size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive [&_svg]:size-5!'
-                      onClick={() => removeStage(idx)}
+                      onClick={() => removeVariant(idx)}
                     >
                       <Trash2 />
                     </Button>
@@ -390,7 +390,7 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                   <div className='grid grid-cols-1 gap-2 sm:grid-cols-3'>
                     <FormField
                       control={form.control}
-                      name={`stages.${idx}.age`}
+                      name={`variants.${idx}.age`}
                       render={({ field: itemField }) => (
                         <FormItem>
                           <FormControl>
@@ -402,7 +402,7 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                     />
                     <FormField
                       control={form.control}
-                      name={`stages.${idx}.occupation`}
+                      name={`variants.${idx}.occupation`}
                       render={({ field: itemField }) => (
                         <FormItem>
                           <Select value={itemField.value} onValueChange={itemField.onChange}>
@@ -425,7 +425,7 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                     />
                     <FormField
                       control={form.control}
-                      name={`stages.${idx}.first_person`}
+                      name={`variants.${idx}.first_person`}
                       render={({ field: itemField }) => (
                         <FormItem>
                           <Select value={itemField.value} onValueChange={itemField.onChange}>
@@ -449,7 +449,7 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                   </div>
                   <FormField
                     control={form.control}
-                    name={`stages.${idx}.address_others`}
+                    name={`variants.${idx}.address_others`}
                     render={({ field: itemField }) => (
                       <FormItem>
                         <Select value={itemField.value} onValueChange={itemField.onChange}>
@@ -472,11 +472,15 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                   />
                   <FormField
                     control={form.control}
-                    name={`stages.${idx}.appearance`}
+                    name={`variants.${idx}.appearance`}
                     render={({ field: itemField }) => (
                       <FormItem>
                         <FormControl>
-                          <Textarea placeholder='この段階の外見（空欄ならベースのまま）' rows={2} {...itemField} />
+                          <Textarea
+                            placeholder='このバリエーションの外見（空欄ならベースのまま）'
+                            rows={2}
+                            {...itemField}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -484,12 +488,12 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                   />
                   <FormField
                     control={form.control}
-                    name={`stages.${idx}.description`}
+                    name={`variants.${idx}.description`}
                     render={({ field: itemField }) => (
                       <FormItem>
                         <FormControl>
                           <Textarea
-                            placeholder='この段階の説明・背景（空欄ならベースのまま）'
+                            placeholder='このバリエーションの説明・背景（空欄ならベースのまま）'
                             rows={3}
                             {...itemField}
                           />
@@ -500,12 +504,12 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
                   />
                   <FormField
                     control={form.control}
-                    name={`stages.${idx}.speech`}
+                    name={`variants.${idx}.speech`}
                     render={({ field: itemField }) => (
                       <FormItem>
                         <FormControl>
                           <Textarea
-                            placeholder='この段階の口調の例（1行に1つ。空欄ならベースのまま）'
+                            placeholder='このバリエーションの口調の例（1行に1つ。空欄ならベースのまま）'
                             rows={3}
                             {...itemField}
                           />
@@ -525,7 +529,7 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
             size='sm'
             className='[&_svg]:size-5!'
             onClick={() =>
-              appendStage({
+              appendVariant({
                 label: '',
                 age: '',
                 occupation: '',
@@ -538,7 +542,7 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
             }
           >
             <Plus />
-            成長段階を追加
+            バリエーションを追加
           </Button>
         </div>
 

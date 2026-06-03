@@ -54,7 +54,7 @@ function CharacterDetailContent({ id }: { id: string }) {
         address_others: c.address_others,
         speech_examples: c.speech_examples,
         description: c.description,
-        stages: c.stages.map((s) => ({
+        variants: c.variants.map((s) => ({
           label: s.label,
           age: s.age,
           occupation: s.occupation,
@@ -127,14 +127,14 @@ function CharacterDetailContent({ id }: { id: string }) {
         {character.description && <Field label='説明'>{character.description}</Field>}
       </div>
 
-      {character.stages.length > 0 && (
+      {character.variants.length > 0 && (
         <div className='space-y-2'>
           <div>
-            <h2 className='text-sm font-semibold'>成長段階</h2>
+            <h2 className='text-sm font-semibold'>バリエーション</h2>
             <p className='mt-0.5 text-xs text-muted-foreground'>表示されていない項目はベースの設定を引き継ぎます。</p>
           </div>
           <div className='divide-y border-y'>
-            {character.stages.map((s) => (
+            {character.variants.map((s) => (
               <div key={s.id} className='py-3'>
                 <p className='text-sm font-medium'>{s.label}</p>
                 <div className='mt-1 divide-y'>
