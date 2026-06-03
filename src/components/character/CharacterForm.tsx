@@ -70,7 +70,7 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
     <Form {...form}>
       <form onSubmit={handleSubmit} className='space-y-5'>
         <div className='space-y-4'>
-          <div className='grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_10rem_8rem]'>
+          <div className='grid grid-cols-1 items-start gap-4 sm:grid-cols-[minmax(0,1fr)_10rem_8rem]'>
             <FormField
               control={form.control}
               name='name'
@@ -146,7 +146,7 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
             )}
           />
 
-          <div className='grid grid-cols-1 gap-4 sm:grid-cols-3'>
+          <div className='grid grid-cols-1 items-start gap-4 sm:grid-cols-3'>
             <FormField
               control={form.control}
               name='occupation'
