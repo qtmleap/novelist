@@ -53,7 +53,17 @@ function CharacterDetailContent({ id }: { id: string }) {
         first_person: c.first_person,
         address_others: c.address_others,
         speech_examples: c.speech_examples,
-        description: c.description
+        description: c.description,
+        stages: c.stages.map((s) => ({
+          label: s.label,
+          age: s.age,
+          occupation: s.occupation,
+          appearance: s.appearance,
+          first_person: s.first_person,
+          address_others: s.address_others,
+          speech_examples: s.speech_examples,
+          description: s.description
+        }))
       }),
     onSuccess: (created) => router.push(routes.characters.edit(created.id)),
     onError: (e) => toast.error(readApiError(e, '登場人物のコピーに失敗しました'))
@@ -116,6 +126,42 @@ function CharacterDetailContent({ id }: { id: string }) {
         )}
         {character.description && <Field label='説明'>{character.description}</Field>}
       </div>
+
+      {character.stages.length > 0 && (
+        <div className='space-y-2'>
+          <div>
+            <h2 className='text-sm font-semibold'>成長段階</h2>
+            <p className='mt-0.5 text-xs text-muted-foreground'>表示されていない項目はベースの設定を引き継ぎます。</p>
+          </div>
+          <div className='divide-y border-y'>
+            {character.stages.map((s) => (
+              <div key={s.id} className='py-3'>
+                <p className='text-sm font-medium'>{s.label}</p>
+                <div className='mt-1 divide-y'>
+                  {s.age && <Field label='年齢'>{s.age}</Field>}
+                  {s.occupation && <Field label='職業'>{s.occupation}</Field>}
+                  {s.appearance && <Field label='外見'>{s.appearance}</Field>}
+                  {s.first_person && <Field label='一人称'>{s.first_person}</Field>}
+                  {s.address_others && <Field label='他者の呼び方'>{s.address_others}</Field>}
+                  {s.speech_examples.length > 0 && (
+                    <Field label='口調の例'>
+                      <ul className='space-y-1'>
+                        {s.speech_examples.map((ex, i) => (
+                          // biome-ignore lint/suspicious/noArrayIndexKey: 表示専用で順序固定
+                          <li key={i} className='text-foreground/90'>
+                            「{ex}」
+                          </li>
+                        ))}
+                      </ul>
+                    </Field>
+                  )}
+                  {s.description && <Field label='説明'>{s.description}</Field>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </>
   )
 }
