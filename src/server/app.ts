@@ -14,10 +14,12 @@ import { buildCastForGemini, buildChapterPayload, buildRelationsForGemini } from
 import {
   createCategory,
   createNovel,
+  deleteCategory,
   deleteNovel,
   getNovelWithChapters,
   listCategories,
   listNovels,
+  renameCategory,
   saveOutline,
   stopGenerationJob,
   updateNovel,
@@ -158,6 +160,29 @@ export const app = new Hono()
     try {
       const category = await createCategory(prisma, input.name)
       return c.json({ id: category.id, name: category.name, novel_count: 0 }, 201)
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+  .put('/categories/:id', requireAuth, zValidator('json', CreateCategorySchema), async (c) => {
+    const id = c.req.param('id')
+    const input = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      const result = await renameCategory(prisma, id, input.name)
+      if (result.status === 'name_taken') return c.json({ error: 'name_taken' }, 409)
+      if (result.status === 'not_found') return c.json({ error: 'not_found' }, 404)
+      return c.json(result.category)
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+  .delete('/categories/:id', requireAuth, async (c) => {
+    const id = c.req.param('id')
+    const prisma = getPrisma()
+    try {
+      await deleteCategory(prisma, id)
+      return c.json({ id })
     } finally {
       await prisma.$disconnect()
     }

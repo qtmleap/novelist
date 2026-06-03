@@ -238,6 +238,32 @@ export async function createCategory(prisma: PrismaClient, name: string) {
   return prisma.category.create({ data: { name } })
 }
 
+type CategoryWithCount = { id: string; name: string; novel_count: number }
+
+// リネーム。別カテゴリが同名なら 'name_taken'、対象が無ければ 'not_found'。
+export async function renameCategory(
+  prisma: PrismaClient,
+  id: string,
+  name: string
+): Promise<{ status: 'ok'; category: CategoryWithCount } | { status: 'name_taken' } | { status: 'not_found' }> {
+  const dup = await prisma.category.findUnique({ where: { name }, select: { id: true } })
+  if (dup && dup.id !== id) return { status: 'name_taken' }
+  const exists = await prisma.category.findUnique({ where: { id }, select: { id: true } })
+  if (!exists) return { status: 'not_found' }
+  const updated = await prisma.category.update({
+    where: { id },
+    data: { name },
+    select: { id: true, name: true, _count: { select: { novels: true } } }
+  })
+  return { status: 'ok', category: { id: updated.id, name: updated.name, novel_count: updated._count.novels } }
+}
+
+// 削除。所属していた小説は FK の onDelete: SetNull で未分類 (category_id=null) に戻る。
+// 既に無い id でも deleteMany なので throw しない。
+export async function deleteCategory(prisma: PrismaClient, id: string) {
+  await prisma.category.deleteMany({ where: { id } })
+}
+
 export async function updateNovel(prisma: PrismaClient, id: string, input: CreateNovelInput) {
   // D1 はインタラクティブトランザクション非対応のため $transaction([...]) で順序実行する。
   // 既存の cast / relations は一旦消してから input に従って入れ直す。
