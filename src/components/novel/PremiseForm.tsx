@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
+import { cn } from '@/lib/utils'
 import type { Character } from '@/schemas/character.dto'
 import { ADDRESS_STYLES, CHARACTER_ROLES } from '@/schemas/character.dto'
 import {
@@ -65,12 +66,25 @@ type Props = {
 }
 
 // その項目が生成プロンプトのどこに渡るかをラベル横にバッジで示す。
+// 'both' は「章立て」「本文」を別々のバッジに分けて出す。
 function ScopeTag({ scope }: { scope: 'both' | 'outline' | 'body' }) {
-  const text = scope === 'both' ? '章立て・本文' : scope === 'outline' ? '章立て' : '本文'
+  const scopes = scope === 'both' ? (['outline', 'body'] as const) : ([scope] as const)
   return (
-    <Badge variant='outline' className='ml-1.5 align-middle text-[10px] font-normal text-muted-foreground'>
-      {text}
-    </Badge>
+    <>
+      {scopes.map((s) => (
+        <Badge
+          key={s}
+          className={cn(
+            'ml-1.5 align-middle border-transparent text-xs font-medium',
+            s === 'outline'
+              ? 'bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300'
+              : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+          )}
+        >
+          {s === 'outline' ? '章立て' : '本文'}
+        </Badge>
+      ))}
+    </>
   )
 }
 
