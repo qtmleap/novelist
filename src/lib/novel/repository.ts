@@ -197,8 +197,10 @@ export async function stopGenerationJob(prisma: PrismaClient, novelId: string) {
 }
 
 export async function listNovels(prisma: PrismaClient) {
+  // position 昇順 (ユーザー手動並び)。未設定はすべて 0 なので created_at 新しい順でタイブレーク。
+  // 一覧はカテゴリでグループ化して表示するが、グループ化はこの順序を各カテゴリ内で保つ。
   return prisma.novel.findMany({
-    orderBy: { created_at: 'desc' },
+    orderBy: [{ position: 'asc' }, { created_at: 'desc' }],
     select: {
       id: true,
       title: true,
@@ -224,18 +226,45 @@ export async function listNovels(prisma: PrismaClient) {
   })
 }
 
+// 整理ページの配置保存。カテゴリ (category_id, 未分類は null) ごとに、カード順で
+// category_id と position(0..n-1) を一括更新する。カテゴリ移動と並び替えを同時に扱う。
+// position はカテゴリごとに 0 始まりだが、一覧はカテゴリでグループ化するので破綻しない。
+export async function arrangeNovels(
+  prisma: PrismaClient,
+  groups: Array<{ category_id: string | null; ids: string[] }>
+) {
+  const ops: Prisma.PrismaPromise<unknown>[] = []
+  for (const group of groups) {
+    group.ids.forEach((id, i) => {
+      ops.push(prisma.novel.update({ where: { id }, data: { category_id: group.category_id, position: i } }))
+    })
+  }
+  if (ops.length > 0) await prisma.$transaction(ops)
+}
+
 export async function listCategories(prisma: PrismaClient) {
+  // position 昇順 (ユーザー手動並び)。未設定はすべて 0 なので name でタイブレーク。
   return prisma.category.findMany({
-    orderBy: { name: 'asc' },
+    orderBy: [{ position: 'asc' }, { name: 'asc' }],
     select: { id: true, name: true, _count: { select: { novels: true } } }
   })
 }
 
 // 同名カテゴリは作らず既存を返す (inline 作成で名前が被っても自然に選択できる)。
+// 新規は末尾に積む (position = 既存最大 + 1)。
 export async function createCategory(prisma: PrismaClient, name: string) {
   const existing = await prisma.category.findUnique({ where: { name } })
   if (existing) return existing
-  return prisma.category.create({ data: { name } })
+  const agg = await prisma.category.aggregate({ _max: { position: true } })
+  const maxPos = agg._max.position
+  const position = maxPos === null ? 0 : maxPos + 1
+  return prisma.category.create({ data: { name, position } })
+}
+
+// 並び替え。受け取った id 順に position を 0..n-1 で振り直す。
+export async function reorderCategories(prisma: PrismaClient, ids: string[]) {
+  await prisma.$transaction(ids.map((id, i) => prisma.category.update({ where: { id }, data: { position: i } })))
+  return listCategories(prisma)
 }
 
 type CategoryWithCount = { id: string; name: string; novel_count: number }

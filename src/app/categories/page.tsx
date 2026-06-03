@@ -1,11 +1,12 @@
 'use client'
 
 import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { Check, FolderTree, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { Check, FolderTree, GripVertical, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { PageHeader } from '@/components/PageHeader'
 import { QueryBoundary } from '@/components/QueryBoundary'
+import { SortableItem, SortableList } from '@/components/Sortable'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -100,6 +101,25 @@ function CategoryListContent() {
     onError: (e) => toast.error(readApiError(e, 'カテゴリの削除に失敗しました'))
   })
 
+  const reorderMutation = useMutation({
+    mutationFn: (ids: string[]) => api.reorderCategories({ ids }),
+    onSuccess: (list) => queryClient.setQueryData(['categories'], list),
+    onError: (e) => {
+      toast.error(readApiError(e, '並び替えの保存に失敗しました'))
+      // 失敗時はサーバーの実順序へ戻す。
+      void queryClient.invalidateQueries({ queryKey: ['categories'] })
+    }
+  })
+
+  const handleReorder = (orderedIds: string[]) => {
+    if (editingId !== null) return
+    const byId = new Map(categories.map((c) => [c.id, c]))
+    const next = orderedIds.map((id) => byId.get(id)).filter((c): c is Category => c !== undefined)
+    // 楽観更新してからサーバーへ。
+    queryClient.setQueryData(['categories'], next)
+    reorderMutation.mutate(orderedIds)
+  }
+
   const trimmed = name.trim()
   const canSubmit = editAllowed && trimmed.length > 0 && !createMutation.isPending
 
@@ -159,85 +179,102 @@ function CategoryListContent() {
       {categories.length === 0 ? (
         <EmptyCategories />
       ) : (
-        <div className='divide-y border-y'>
-          {categories.map((cat) => {
-            const isEditing = editingId === cat.id
-            return (
-              <div key={cat.id} className='flex items-center gap-3 px-4 py-3'>
-                <FolderTree className='size-5 shrink-0 text-muted-foreground' />
-                {isEditing ? (
-                  <>
-                    <Input
-                      autoFocus
-                      value={editingName}
-                      onChange={(e) => setEditingName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault()
-                          saveEdit(cat.id)
-                        }
-                        if (e.key === 'Escape') setEditingId(null)
-                      }}
-                      maxLength={50}
-                      className='h-8 w-60'
-                    />
-                    <div className='ml-auto flex shrink-0 items-center gap-1'>
-                      <Button
-                        type='button'
-                        size='icon'
-                        aria-label='保存'
-                        disabled={updateMutation.isPending || editingName.trim().length === 0}
-                        onClick={() => saveEdit(cat.id)}
-                        className='size-8 [&_svg]:size-5!'
-                      >
-                        {updateMutation.isPending ? <Loader2 className='animate-spin' /> : <Check />}
-                      </Button>
-                      <Button
-                        type='button'
-                        variant='ghost'
-                        size='icon'
-                        aria-label='キャンセル'
-                        onClick={() => setEditingId(null)}
-                        className='size-8 [&_svg]:size-5!'
-                      >
-                        <X />
-                      </Button>
-                      <Button
-                        type='button'
-                        variant='ghost'
-                        size='icon'
-                        aria-label='削除'
-                        onClick={() => setDeleteTarget(cat)}
-                        className='size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive [&_svg]:size-5!'
-                      >
-                        <Trash2 />
-                      </Button>
+        <SortableList ids={categories.map((c) => c.id)} onReorder={handleReorder}>
+          <div className='divide-y border-y'>
+            {categories.map((cat) => {
+              const isEditing = editingId === cat.id
+              return (
+                <SortableItem key={cat.id} id={cat.id}>
+                  {({ setNodeRef, style, handleProps }) => (
+                    <div ref={setNodeRef} style={style} className='flex items-center gap-2 bg-background px-4 py-3'>
+                      {editAllowed && !isEditing ? (
+                        <button
+                          type='button'
+                          aria-label='ドラッグして並び替え'
+                          className='shrink-0 cursor-grab touch-none text-muted-foreground active:cursor-grabbing [&_svg]:size-5'
+                          {...handleProps}
+                        >
+                          <GripVertical />
+                        </button>
+                      ) : (
+                        <FolderTree className='size-5 shrink-0 text-muted-foreground' />
+                      )}
+                      {isEditing ? (
+                        <>
+                          <Input
+                            autoFocus
+                            value={editingName}
+                            onChange={(e) => setEditingName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                saveEdit(cat.id)
+                              }
+                              if (e.key === 'Escape') setEditingId(null)
+                            }}
+                            maxLength={50}
+                            className='h-8 w-60'
+                          />
+                          <div className='ml-auto flex shrink-0 items-center gap-1'>
+                            <Button
+                              type='button'
+                              size='icon'
+                              aria-label='保存'
+                              disabled={updateMutation.isPending || editingName.trim().length === 0}
+                              onClick={() => saveEdit(cat.id)}
+                              className='size-8 [&_svg]:size-5!'
+                            >
+                              {updateMutation.isPending ? <Loader2 className='animate-spin' /> : <Check />}
+                            </Button>
+                            <Button
+                              type='button'
+                              variant='ghost'
+                              size='icon'
+                              aria-label='キャンセル'
+                              onClick={() => setEditingId(null)}
+                              className='size-8 [&_svg]:size-5!'
+                            >
+                              <X />
+                            </Button>
+                            <Button
+                              type='button'
+                              variant='ghost'
+                              size='icon'
+                              aria-label='削除'
+                              onClick={() => setDeleteTarget(cat)}
+                              className='size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive [&_svg]:size-5!'
+                            >
+                              <Trash2 />
+                            </Button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <span className='truncate font-medium text-sm'>{cat.name}</span>
+                          <span className='ml-auto shrink-0 text-xs tabular-nums text-muted-foreground'>
+                            {cat.novel_count} 作品
+                          </span>
+                          {editAllowed && (
+                            <Button
+                              type='button'
+                              variant='ghost'
+                              size='icon'
+                              aria-label='編集'
+                              onClick={() => startEdit(cat)}
+                              className='size-8 shrink-0 text-muted-foreground [&_svg]:size-5!'
+                            >
+                              <Pencil />
+                            </Button>
+                          )}
+                        </>
+                      )}
                     </div>
-                  </>
-                ) : (
-                  <>
-                    <span className='truncate font-medium text-sm'>{cat.name}</span>
-                    <span className='ml-auto shrink-0 text-xs tabular-nums text-muted-foreground'>
-                      {cat.novel_count} 作品
-                    </span>
-                    {editAllowed && (
-                      <Button
-                        type='button'
-                        variant='ghost'
-                        size='icon'
-                        aria-label='編集'
-                        onClick={() => startEdit(cat)}
-                        className='size-8 shrink-0 text-muted-foreground [&_svg]:size-5!'
-                      >
-                        <Pencil />
-                      </Button>
-                    )}
-                  </>
-                )}
-              </div>
-            )
-          })}
-        </div>
+                  )}
+                </SortableItem>
+              )
+            })}
+          </div>
+        </SortableList>
       )}
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>

@@ -123,6 +123,25 @@ export const CreateCategorySchema = z.object({
 })
 export type CreateCategoryInput = z.infer<typeof CreateCategorySchema>
 
+// カテゴリの並び替え: 新しい順の id 配列を受け取り、サーバーが position を振り直す。
+export const ReorderSchema = z.object({
+  ids: z.array(z.string()).max(1000)
+})
+export type ReorderInput = z.infer<typeof ReorderSchema>
+
+// 小説の整理 (配置保存): カテゴリごとのカード順。category_id は未分類なら null。
+export const ArrangeNovelsSchema = z.object({
+  groups: z
+    .array(
+      z.object({
+        category_id: z.string().nullable(),
+        ids: z.array(z.string()).max(1000)
+      })
+    )
+    .max(500)
+})
+export type ArrangeNovelsInput = z.infer<typeof ArrangeNovelsSchema>
+
 // ---------------------- 章立て (outline) ----------------------
 
 export const OutlineChapterSchema = z.object({
