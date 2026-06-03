@@ -561,23 +561,77 @@ ${sections.join('\n\n')}
     resolveBlockReason = res
   })
 
+  // 上流が無応答でハングすると DO が永久に「生成中」のままになるので、接続〜チャンク間の
+  // 無応答に上限を設ける。チャンク受信ごとにタイマーを張り直し、超過したら fetch を abort する。
+  const STALL_TIMEOUT_MS = 90_000
+  // 一時的な過負荷 (429/5xx) や接続失敗は数回までバックオフして再接続を試みる (本文受信前のみ)。
+  const MAX_CONNECT_ATTEMPTS = 3
+  const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
   const doStream = async () => {
-    let res: Response
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      })
-    } catch (e) {
-      rejectUsage(e)
-      await writer.abort(e)
+    const controller = new AbortController()
+    let stalled: Error | undefined
+    let stallTimer: ReturnType<typeof setTimeout> | undefined
+    const armStall = () => {
+      if (stallTimer !== undefined) clearTimeout(stallTimer)
+      stallTimer = setTimeout(() => {
+        stalled = new Error(`Gemini 応答が ${Math.round(STALL_TIMEOUT_MS / 1000)} 秒途絶えたため中断しました`)
+        controller.abort(stalled)
+      }, STALL_TIMEOUT_MS)
+    }
+    const clearStall = () => {
+      if (stallTimer !== undefined) {
+        clearTimeout(stallTimer)
+        stallTimer = undefined
+      }
+    }
+
+    // ── 接続フェーズ (本文をまだ 1 文字も受け取っていないのでリトライ可能) ──
+    let res: Response | undefined
+    for (let attempt = 1; ; attempt++) {
+      armStall()
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        })
+      } catch (e) {
+        clearStall()
+        if (stalled === undefined && attempt < MAX_CONNECT_ATTEMPTS) {
+          await sleep(500 * 2 ** (attempt - 1))
+          continue
+        }
+        const err = stalled !== undefined ? stalled : e
+        rejectUsage(err)
+        await writer.abort(err)
+        return
+      }
+      if (res.ok && res.body) {
+        clearStall()
+        break
+      }
+      const status = res.status
+      if (RETRYABLE_STATUS.has(status) && attempt < MAX_CONNECT_ATTEMPTS) {
+        const retryAfter = Number(res.headers.get('retry-after'))
+        await res.body?.cancel().catch(() => {})
+        clearStall()
+        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** (attempt - 1))
+        continue
+      }
+      const errText = await res.text().catch(() => String(status))
+      clearStall()
+      const err = new Error(`Gemini streamChapter failed: ${status} ${errText}`)
+      rejectUsage(err)
+      await writer.abort(err)
       return
     }
 
-    if (!res.ok || !res.body) {
-      const errText = await res.text().catch(() => String(res.status))
-      const err = new Error(`Gemini streamChapter failed: ${res.status} ${errText}`)
+    const responseBody = res.body
+    if (responseBody === null) {
+      const err = new Error('Gemini streamChapter failed: empty response body')
       rejectUsage(err)
       await writer.abort(err)
       return
@@ -592,7 +646,8 @@ ${sections.join('\n\n')}
     let lastBlockReason: string | undefined
 
     try {
-      for await (const value of res.body) {
+      for await (const value of responseBody) {
+        armStall()
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
@@ -621,7 +676,8 @@ ${sections.join('\n\n')}
           if (br) lastBlockReason = br
         }
       }
-    } finally {
+      // 正常終了: stream を閉じ、finishReason / usage を確定する。
+      clearStall()
       await writer.close()
       resolveBlockReason(lastBlockReason)
       if (lastUsage) {
@@ -630,6 +686,14 @@ ${sections.join('\n\n')}
       } else {
         rejectUsage(new Error('Gemini stream ended without usageMetadata'))
       }
+    } catch (e) {
+      // 受信途中での中断 (ストール abort / ネットワーク切断)。graceful close せず error として
+      // 伝播させ、DO 側で「途中で止まった部分本文を done 扱い」しないようにする。
+      clearStall()
+      const err = stalled !== undefined ? stalled : e
+      resolveBlockReason(lastBlockReason)
+      rejectUsage(err)
+      await writer.abort(err).catch(() => {})
     }
   }
 
