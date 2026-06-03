@@ -1,14 +1,25 @@
 import { makeApi, Zodios, type ZodiosOptions } from '@zodios/core'
 import { z } from 'zod'
-import { CharacterSchema, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
+  CharacterSchema,
+  CharacterVariantInputSchema,
+  CharacterVariantSchema,
+  CreateCharacterSchema
+} from '@/schemas/character.dto'
+import {
+  ArrangeNovelsSchema,
+  CategorySchema,
+  ChapterVersionSchema,
+  CreateCategorySchema,
   CreateNovelSchema,
   GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   NovelSchema,
   NovelWithChaptersSchema,
-  OutlineSchema
+  OutlineSchema,
+  ReorderSchema,
+  SaveCastSchema
 } from '@/schemas/novel.dto'
 
 // API レスポンスのラッパースキーマ。サーバー側は Hono のままで、
@@ -20,6 +31,8 @@ const ErrorBodySchema = z.object({
 
 const OutlineWrapperSchema = z.object({ outline: OutlineSchema })
 const PromptPreviewSchema = z.object({ prompt: z.string() })
+// 章本文プロンプトは保存済みのものを返すため、この機能より前に生成された章では null になる。
+const ChapterPromptSchema = z.object({ prompt: z.string().nullable() })
 const GenerateAckSchema = z.object({ status: z.enum(['started', 'already_streaming']) })
 // /auth/me は常に 200 を返し、未認証なら email=null。これでフロントは「未認証 vs API ダウン」を切り分け可能。
 const AuthStateSchema = z.object({ email: z.string().nullable() })
@@ -27,6 +40,61 @@ const AuthStateSchema = z.object({ email: z.string().nullable() })
 // makeApi は as const 配列を受けて alias 名でメソッドを生やすため、すべての
 // エンドポイントを 1 つのリテラル配列にまとめないと型情報が縮退する。
 export const api = makeApi([
+  // ── Category ──
+  {
+    method: 'get',
+    path: '/api/categories',
+    alias: 'listCategories',
+    description: 'カテゴリ一覧を取得',
+    response: z.array(CategorySchema),
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'post',
+    path: '/api/categories',
+    alias: 'createCategory',
+    description: 'カテゴリを作成 (同名は既存を返す)',
+    parameters: [{ name: 'body', type: 'Body', schema: CreateCategorySchema }],
+    response: CategorySchema,
+    status: 201,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/categories/:id',
+    alias: 'updateCategory',
+    description: 'カテゴリ名を変更',
+    parameters: [{ name: 'body', type: 'Body', schema: CreateCategorySchema }],
+    response: CategorySchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'delete',
+    path: '/api/categories/:id',
+    alias: 'deleteCategory',
+    description: 'カテゴリを削除 (所属小説は未分類に戻る)',
+    response: z.object({ id: z.string() }),
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/categories/reorder',
+    alias: 'reorderCategories',
+    description: 'カテゴリの並び替え',
+    parameters: [{ name: 'body', type: 'Body', schema: ReorderSchema }],
+    response: z.array(CategorySchema),
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/novels/arrangement',
+    alias: 'arrangeNovels',
+    description: '小説の整理 (カテゴリ移動 + 並び替え) を保存',
+    parameters: [{ name: 'body', type: 'Body', schema: ArrangeNovelsSchema }],
+    response: z.object({ ok: z.boolean() }),
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+
   // ── Novel ──
   {
     method: 'get',
@@ -61,6 +129,15 @@ export const api = makeApi([
     description: '小説を更新',
     parameters: [{ name: 'body', type: 'Body', schema: CreateNovelSchema }],
     response: NovelSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/novels/:id/cast',
+    alias: 'saveNovelCast',
+    description: 'キャスト・関係・語り手を保存',
+    parameters: [{ name: 'body', type: 'Body', schema: SaveCastSchema }],
+    response: z.object({ ok: z.boolean() }),
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   {
@@ -105,6 +182,22 @@ export const api = makeApi([
     description: '指定章の章立てを再生成',
     parameters: [{ name: 'body', type: 'Body', schema: GenerateOptionsSchema }],
     response: OutlineWrapperSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'get',
+    path: '/api/novels/:id/chapters/:number/prompt',
+    alias: 'getChapterPrompt',
+    description: '本文生成時に実際に送ったプロンプト (最新 version)。未保存の章は null',
+    response: ChapterPromptSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'get',
+    path: '/api/novels/:id/chapters/:number/versions',
+    alias: 'getChapterVersions',
+    description: '章の生成履歴 (全 version, 新しい順)',
+    response: z.array(ChapterVersionSchema),
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   {
@@ -194,6 +287,34 @@ export const api = makeApi([
     path: '/api/characters/:id',
     alias: 'deleteCharacter',
     description: '登場人物を削除',
+    response: z.unknown(),
+    status: 204,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'post',
+    path: '/api/characters/:id/variants',
+    alias: 'createVariant',
+    description: 'バリエーションを追加',
+    parameters: [{ name: 'body', type: 'Body', schema: CharacterVariantInputSchema }],
+    response: CharacterVariantSchema,
+    status: 201,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/characters/:id/variants/:variantId',
+    alias: 'updateVariant',
+    description: 'バリエーションを更新',
+    parameters: [{ name: 'body', type: 'Body', schema: CharacterVariantInputSchema }],
+    response: CharacterVariantSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'delete',
+    path: '/api/characters/:id/variants/:variantId',
+    alias: 'deleteVariant',
+    description: 'バリエーションを削除',
     response: z.unknown(),
     status: 204,
     errors: [{ status: 'default', schema: ErrorBodySchema }]

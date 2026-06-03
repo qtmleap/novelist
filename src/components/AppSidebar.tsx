@@ -1,6 +1,6 @@
 'use client'
 
-import { Library, LogIn, LogOut, Settings, Users } from 'lucide-react'
+import { FolderTree, Library, LogIn, LogOut, Settings, Users } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
@@ -24,6 +24,7 @@ import { cn } from '@/lib/utils'
 const NAV_ITEMS = [
   { label: '小説一覧', href: routes.novels.list, icon: Library },
   { label: '登場人物一覧', href: routes.characters.list, icon: Users },
+  { label: 'カテゴリ一覧', href: routes.categories.list, icon: FolderTree },
   { label: '設定', href: routes.settings, icon: Settings }
 ]
 

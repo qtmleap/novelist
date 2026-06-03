@@ -46,7 +46,6 @@ type GeminiResponse = z.infer<typeof GeminiResponseSchema>
 type GeminiNovelParams = {
   title: string
   genre: string
-  characters: string
   setting: string
   num_chapters: number
   // ユーザーが PremiseForm の備考欄に書いた追加指示 (任意)。
@@ -108,6 +107,9 @@ type StreamChapterParams = {
   cast?: CastMember[]
   relations?: CastRelation[]
   model?: GeminiModel
+  // Gemini から任意のチャンク (thinking 含む) を受け取るたびに呼ばれるコールバック。
+  // DO 側が lastProgressAt を更新して stale 誤検知を防ぐために使う。
+  onChunk?: () => void
 }
 
 type ModelPricing = { input: number; output: number }
@@ -199,7 +201,7 @@ function buildWritingRules(cast: CastMember[] | undefined): string {
   ].join('\n')
 }
 
-function buildStyleInstruction(style: StyleParams): string {
+function buildStyleInstruction(style: StyleParams, includeEnding = true): string {
   const { pov, tone, ending, age_rating, viewpointChar: vc } = style
 
   let povLine: string
@@ -247,7 +249,8 @@ function buildStyleInstruction(style: StyleParams): string {
 
   const lines = [`視点: ${povLine}`, `文体: ${toneLine}`]
   if (ratingLine) lines.push(`年齢指定: ${ratingLine}`)
-  if (endingLine) lines.push(`結末: ${endingLine}`)
+  // 結末は章立て時にだけ渡す。本文は章立て(概要)経由で結末に沿うので再注入しない。
+  if (includeEnding && endingLine) lines.push(`結末: ${endingLine}`)
   return lines.join('\n')
 }
 
@@ -266,9 +269,7 @@ export function buildOutlinePrompt(
 
   return `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
 
-タイトル: ${novel.title}
 ジャンル: ${novel.genre}
-登場人物: ${novel.characters}
 世界観・設定: ${novel.setting}
 章数: ${novel.num_chapters}
 ${styleInstruction}
@@ -386,9 +387,7 @@ export async function regenerateOutlineChapter(
   const prompt = `あなたはプロの小説家です。既存の章立てのうち、指定された 1 章だけを書き直してください。
 
 【作品情報】
-タイトル: ${novel.title}
 ジャンル: ${novel.genre}
-登場人物: ${novel.characters}
 世界観・設定: ${novel.setting}
 章数: ${novel.num_chapters}
 
@@ -471,6 +470,13 @@ export type StreamChapterUsage = {
 export type StreamChapterResult = {
   stream: ReadableStream<Uint8Array>
   usage: Promise<StreamChapterUsage>
+  // Gemini がプロンプト自体を拒否した場合の理由 (PROHIBITED_CONTENT 等)。
+  // stream 終了時に resolve される。拒否がなければ undefined。
+  // 空出力時に DO 側がユーザーへ原因を提示するために使う。
+  blockReason: Promise<string | undefined>
+  // Gemini に実際に送ったプロンプト全文 (同期的に確定済み)。
+  // DO が章本文と一緒に D1 へ保存し、フロントで確認できるようにする。
+  prompt: string
 }
 
 export function streamChapter(env: Env, params: StreamChapterParams): StreamChapterResult {
@@ -496,7 +502,8 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
           .map((c) => `【第${c.chapter_number}章 本文】\n${c.content}`)
           .join('\n\n')
 
-  const styleInstruction = buildStyleInstruction(style)
+  // 本文では結末指示を渡さない (章立て側に結末が織り込まれているため)。
+  const styleInstruction = buildStyleInstruction(style, false)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
   const writingRules = buildWritingRules(cast)
@@ -509,7 +516,7 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
   const positionLine = `現在執筆中: 第${chapterNumber}章 / 全${totalChapters}章`
 
   const sections: string[] = [
-    `【作品情報】\nタイトル: ${novel.title}\nジャンル: ${novel.genre}\n登場人物: ${novel.characters}\n世界観・設定: ${novel.setting}`,
+    `【作品情報】\nジャンル: ${novel.genre}\n世界観・設定: ${novel.setting}`,
     `【文体・視点】\n${styleInstruction}`,
     castSection,
     relationsSection,
@@ -549,23 +556,82 @@ ${sections.join('\n\n')}
     rejectUsage = rej
   })
 
+  let resolveBlockReason!: (value: string | undefined) => void
+  const blockReason = new Promise<string | undefined>((res) => {
+    resolveBlockReason = res
+  })
+
+  // 上流が無応答でハングすると DO が永久に「生成中」のままになるので、接続〜チャンク間の
+  // 無応答に上限を設ける。チャンク受信ごとにタイマーを張り直し、超過したら fetch を abort する。
+  const STALL_TIMEOUT_MS = 90_000
+  // 一時的な過負荷 (429/5xx) や接続失敗は数回までバックオフして再接続を試みる (本文受信前のみ)。
+  const MAX_CONNECT_ATTEMPTS = 3
+  const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
   const doStream = async () => {
-    let res: Response
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      })
-    } catch (e) {
-      rejectUsage(e)
-      await writer.abort(e)
+    const controller = new AbortController()
+    let stalled: Error | undefined
+    let stallTimer: ReturnType<typeof setTimeout> | undefined
+    const armStall = () => {
+      if (stallTimer !== undefined) clearTimeout(stallTimer)
+      stallTimer = setTimeout(() => {
+        stalled = new Error(`Gemini 応答が ${Math.round(STALL_TIMEOUT_MS / 1000)} 秒途絶えたため中断しました`)
+        controller.abort(stalled)
+      }, STALL_TIMEOUT_MS)
+    }
+    const clearStall = () => {
+      if (stallTimer !== undefined) {
+        clearTimeout(stallTimer)
+        stallTimer = undefined
+      }
+    }
+
+    // ── 接続フェーズ (本文をまだ 1 文字も受け取っていないのでリトライ可能) ──
+    let res: Response | undefined
+    for (let attempt = 1; ; attempt++) {
+      armStall()
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        })
+      } catch (e) {
+        clearStall()
+        if (stalled === undefined && attempt < MAX_CONNECT_ATTEMPTS) {
+          await sleep(500 * 2 ** (attempt - 1))
+          continue
+        }
+        const err = stalled !== undefined ? stalled : e
+        rejectUsage(err)
+        await writer.abort(err)
+        return
+      }
+      if (res.ok && res.body) {
+        clearStall()
+        break
+      }
+      const status = res.status
+      if (RETRYABLE_STATUS.has(status) && attempt < MAX_CONNECT_ATTEMPTS) {
+        const retryAfter = Number(res.headers.get('retry-after'))
+        await res.body?.cancel().catch(() => {})
+        clearStall()
+        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** (attempt - 1))
+        continue
+      }
+      const errText = await res.text().catch(() => String(status))
+      clearStall()
+      const err = new Error(`Gemini streamChapter failed: ${status} ${errText}`)
+      rejectUsage(err)
+      await writer.abort(err)
       return
     }
 
-    if (!res.ok || !res.body) {
-      const errText = await res.text().catch(() => String(res.status))
-      const err = new Error(`Gemini streamChapter failed: ${res.status} ${errText}`)
+    const responseBody = res.body
+    if (responseBody === null) {
+      const err = new Error('Gemini streamChapter failed: empty response body')
       rejectUsage(err)
       await writer.abort(err)
       return
@@ -577,9 +643,11 @@ ${sections.join('\n\n')}
     // finishReason は最終 chunk にのみ乗ることが多いので、流れる度に上書き。
     // 終了時にこれを見て途中打ち切り (MAX_TOKENS/SAFETY/RECITATION) を検出する。
     let lastFinishReason: string | undefined
+    let lastBlockReason: string | undefined
 
     try {
-      for await (const value of res.body) {
+      for await (const value of responseBody) {
+        armStall()
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
@@ -594,6 +662,8 @@ ${sections.join('\n\n')}
           } catch {
             continue
           }
+          // thinking 含む全チャンク受信時に通知 (DO 側の lastProgressAt 更新用)
+          params.onChunk?.()
           const text = extractText(chunk)
           if (text) {
             await writer.write(encoder.encode(text))
@@ -602,21 +672,34 @@ ${sections.join('\n\n')}
           if (meta) lastUsage = meta
           const fr = extractFinishReason(chunk)
           if (fr) lastFinishReason = fr
+          const br = extractBlockReason(chunk)
+          if (br) lastBlockReason = br
         }
       }
-    } finally {
+      // 正常終了: stream を閉じ、finishReason / usage を確定する。
+      clearStall()
       await writer.close()
+      resolveBlockReason(lastBlockReason)
       if (lastUsage) {
         const finishReason = lastFinishReason === undefined ? 'STOP' : lastFinishReason
         resolveUsage({ ...lastUsage, finishReason })
       } else {
         rejectUsage(new Error('Gemini stream ended without usageMetadata'))
       }
+    } catch (e) {
+      // 受信途中での中断 (ストール abort / ネットワーク切断)。graceful close せず error として
+      // 伝播させ、DO 側で「途中で止まった部分本文を done 扱い」しないようにする。
+      clearStall()
+      const err = stalled !== undefined ? stalled : e
+      resolveBlockReason(lastBlockReason)
+      rejectUsage(err)
+      await writer.abort(err).catch(() => {})
     }
   }
 
   doStream().catch(async (e) => {
     rejectUsage(e)
+    resolveBlockReason(undefined)
     try {
       await writer.abort(e)
     } catch {
@@ -624,7 +707,7 @@ ${sections.join('\n\n')}
     }
   })
 
-  return { stream: readable, usage }
+  return { stream: readable, usage, blockReason, prompt }
 }
 
 function extractUsage(chunk: unknown, model: string): Omit<StreamChapterUsage, 'finishReason'> | undefined {
@@ -654,4 +737,12 @@ function extractFinishReason(chunk: unknown): string | undefined {
   const parsed = GeminiResponseSchema.safeParse(chunk)
   if (!parsed.success) return undefined
   return parsed.data.candidates?.[0]?.finishReason
+}
+
+// chunk に乗っていれば promptFeedback.blockReason を取り出す。
+// プロンプトが拒否されると候補なしでこのフィールドだけ送られてくる (= 空出力の原因)。
+function extractBlockReason(chunk: unknown): string | undefined {
+  const parsed = GeminiResponseSchema.safeParse(chunk)
+  if (!parsed.success) return undefined
+  return parsed.data.promptFeedback?.blockReason
 }

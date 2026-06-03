@@ -1,6 +1,6 @@
 'use client'
 
-import { useMutation, useSuspenseQuery } from '@tanstack/react-query'
+import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { Loader2, Trash2 } from 'lucide-react'
 import { useParams, useRouter } from 'next/navigation'
 import { useState } from 'react'
@@ -29,43 +29,43 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
   return {
     title: novel.title,
     genre: novel.genre,
-    characters: novel.characters,
     setting: novel.setting,
     num_chapters: novel.num_chapters,
     target_chars: novel.target_chars,
     pov: novel.pov,
     tone: novel.tone,
     age_rating: novel.age_rating,
-    pov_character_id: novel.pov_character_id,
     ending: novel.ending,
     notes: novel.notes,
     // DB は NOT NULL default で常に有効値だが、型としては string なので parse で narrow する。
     // 無効値が混入したら表示時点で気付かせるため throw する (Surface or throw)。
     editor_model: GeminiModelSchema.parse(novel.editor_model),
     writer_model: GeminiModelSchema.parse(novel.writer_model),
-    character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
-    relations: novel.relations.map((r) => ({
-      source_character_id: r.source_character_id,
-      target_character_id: r.target_character_id,
-      relation: r.relation,
-      description: r.description,
-      address_override: r.address_override
-    }))
+    category_id: novel.category_id
   }
 }
 
 function NovelEditContent({ id }: { id: string }) {
   const router = useRouter()
+  const queryClient = useQueryClient()
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
+  // queryFn は正規の NovelWithChapters をそのままキャッシュに入れ、フォーム値への変換は
+  // select で行う。詳細ページ (同じ ['novel', id] キー) がこのキャッシュを読むため、
+  // ここで toFormValues した形を保存すると chapters 等が欠落して詳細ページが壊れる。
   const { data: initialValues } = useSuspenseQuery({
     queryKey: ['novel', id],
-    queryFn: () => api.getNovel({ params: { id } }).then(toFormValues)
+    queryFn: () => api.getNovel({ params: { id } }),
+    select: toFormValues
   })
 
   const updateMutation = useMutation({
     mutationFn: (data: CreateNovelInput) => api.updateNovel(data, { params: { id } }),
-    onSuccess: () => router.push(routes.novels.detail(id)),
+    onSuccess: () => {
+      // 詳細ページへ戻る前に ['novel', id] を無効化し、編集後の最新を再取得させる。
+      void queryClient.invalidateQueries({ queryKey: ['novel', id] })
+      router.push(routes.novels.detail(id))
+    },
     onError: (e) => toast.error(readApiError(e, '小説の更新に失敗しました'))
   })
 

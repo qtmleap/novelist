@@ -28,13 +28,46 @@ export const ENDING_OPTIONS = [
 ] as const
 export const DEFAULT_ENDING = '未指定'
 
-// 小説内のキャラ間関係の種別 (NovelCharacterRelation.relation のプリセット)
-export const RELATION_TYPES = ['家族', '恋愛', '友人', '幼馴染', '仲間', 'ライバル', '敵対', '師弟', 'その他'] as const
+// 小説内のキャラ間関係の種別 (NovelCharacterRelation.relation のプリセット)。
+// 家族・恋愛・社会関係をある程度細かく選べるようにしている (relation は string なので増減は自由)。
+// 関係は source → target の有向。続柄は「A から見て B は〜」の向きで選ぶ
+// (例: A→B が「兄」なら B は A の兄)。複数を組み合わせて 1 本の関係にできる
+// (例: A→B が「友人・恋愛」= 友人だが A は B に片想い)。保存時は '・' 区切りで連結する。
+export const RELATION_TYPES = [
+  '親',
+  '子',
+  '兄',
+  '弟',
+  '姉',
+  '妹',
+  '夫婦',
+  '恋人',
+  '恋愛',
+  '家族',
+  '親戚',
+  '幼馴染',
+  '親友',
+  '友人',
+  '仲間',
+  '同僚',
+  '先輩',
+  '後輩',
+  '師弟',
+  '主従',
+  'ライバル',
+  '敵対',
+  'その他'
+] as const
+
+// 複数種別の連結に使う区切り。保存値 (relation) は RELATION_TYPES をこの文字で join したもの。
+export const RELATION_SEPARATOR = '・'
 
 // 小説に登場するキャラ (辞典のキャラ + その小説での役割)
 export const NovelCharacterLinkSchema = z.object({
   character_id: z.string().nonempty(),
-  role: z.string().max(50).default('')
+  role: z.string().max(50).default(''),
+  // 使用する Character のバリエーション。null = ベース (Character 本体)。
+  variant_id: z.string().nullable().default(null)
 })
 export type NovelCharacterLink = z.infer<typeof NovelCharacterLinkSchema>
 
@@ -42,7 +75,7 @@ export type NovelCharacterLink = z.infer<typeof NovelCharacterLinkSchema>
 export const NovelCharacterRelationInputSchema = z.object({
   source_character_id: z.string().nonempty(),
   target_character_id: z.string().nonempty(),
-  relation: z.string().nonempty('関係を入力してください').max(50),
+  relation: z.string().nonempty('関係を入力してください').max(100),
   description: z.string().max(500).default(''),
   // source が target を呼ぶときの呼び方の上書き (ADDRESS_STYLES, 空=本人の既定)
   address_override: z.string().max(20).default('')
@@ -87,14 +120,12 @@ export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; p
 export const CreateNovelSchema = z.object({
   title: z.string().nonempty('タイトルを入力してください').max(100),
   genre: z.string().nonempty('ジャンルを入力してください').max(50),
-  characters: z.string().max(2000),
   setting: z.string().max(4000),
   num_chapters: z.number().int().min(1).max(30),
   target_chars: z.number().int().min(500).max(20000).default(DEFAULT_TARGET_CHARS),
   pov: z.string().max(30).default(DEFAULT_POV),
   tone: z.string().max(30).default(DEFAULT_TONE),
   age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
-  pov_character_id: z.string().max(50).default(''),
   ending: z.string().max(30).default(DEFAULT_ENDING),
   // プロンプトに追加で混ぜる自由記述 (口調の傾向、固有名詞表記、避けたい展開など)
   notes: z.string().max(2000).default(''),
@@ -102,10 +133,52 @@ export const CreateNovelSchema = z.object({
   // DB も NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値が入っている前提。
   editor_model: GeminiModelSchema,
   writer_model: GeminiModelSchema,
+  // 所属カテゴリ。未分類は null (デフォルト)。
+  category_id: z.string().nullable().default(null)
+})
+export type CreateNovelInput = z.infer<typeof CreateNovelSchema>
+
+// キャスト・関係・語り手はあらすじフォームから分離し、専用ページでまとめて保存する。
+export const SaveCastSchema = z.object({
+  // 語り手 (視点キャラ)。一人称 / 三人称一元視点 のときに有効。未指定は空文字。
+  pov_character_id: z.string().max(50).default(''),
   character_links: z.array(NovelCharacterLinkSchema).max(50).default([]),
   relations: z.array(NovelCharacterRelationInputSchema).max(100).default([])
 })
-export type CreateNovelInput = z.infer<typeof CreateNovelSchema>
+export type SaveCastInput = z.infer<typeof SaveCastSchema>
+
+// ---------------------- カテゴリ ----------------------
+
+export const CategorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  novel_count: z.number().int()
+})
+export type Category = z.infer<typeof CategorySchema>
+
+export const CreateCategorySchema = z.object({
+  name: z.string().nonempty('カテゴリ名を入力してください').max(50)
+})
+export type CreateCategoryInput = z.infer<typeof CreateCategorySchema>
+
+// カテゴリの並び替え: 新しい順の id 配列を受け取り、サーバーが position を振り直す。
+export const ReorderSchema = z.object({
+  ids: z.array(z.string()).max(1000)
+})
+export type ReorderInput = z.infer<typeof ReorderSchema>
+
+// 小説の整理 (配置保存): カテゴリごとのカード順。category_id は未分類なら null。
+export const ArrangeNovelsSchema = z.object({
+  groups: z
+    .array(
+      z.object({
+        category_id: z.string().nullable(),
+        ids: z.array(z.string()).max(1000)
+      })
+    )
+    .max(500)
+})
+export type ArrangeNovelsInput = z.infer<typeof ArrangeNovelsSchema>
 
 // ---------------------- 章立て (outline) ----------------------
 
@@ -135,11 +208,22 @@ export const ChapterSchema = z.object({
 })
 export type Chapter = z.infer<typeof ChapterSchema>
 
+// 章の生成履歴 1 件 (= 1 version)。再生成のたびに version が増え、過去分も DB に残る。
+export const ChapterVersionSchema = z.object({
+  id: z.string(),
+  version: z.number().int(),
+  title: z.string().nullable(),
+  content: z.string(),
+  // プロンプト保存機能より前に生成された version は null。
+  prompt: z.string().nullable(),
+  created_at: z.string()
+})
+export type ChapterVersion = z.infer<typeof ChapterVersionSchema>
+
 export const NovelSchema = z.object({
   id: z.string(),
   title: z.string(),
   genre: z.string(),
-  characters: z.string(),
   setting: z.string(),
   num_chapters: z.number().int(),
   target_chars: z.number().int(),
@@ -154,7 +238,15 @@ export const NovelSchema = z.object({
   // フォーム入力 (CreateNovelSchema) 側は厳密に GeminiModelSchema を要求している。
   editor_model: z.string(),
   writer_model: z.string(),
-  outline: z.string().nullable(),
+  // outline は DB では JSON 文字列で保存するが、API レスポンスではサーバーがパース・検証した
+  // オブジェクトとして返す (フロントで JSON.parse する手間と検証漏れを避ける)。未生成や
+  // 壊れた JSON の場合は null。
+  outline: OutlineSchema.nullable(),
+  // 所属カテゴリ。未分類は両方とも null。一覧のグループ表示に使うので名前も持たせる。
+  category_id: z.string().nullable(),
+  category_name: z.string().nullable(),
+  // 生成済み本文の合計文字数 (各章の最新 version の content 長の合計)。未生成は 0。
+  written_chars: z.number().int(),
   created_at: z.string(),
   updated_at: z.string()
 })
@@ -164,7 +256,9 @@ export type Novel = z.infer<typeof NovelSchema>
 export const NovelCastMemberSchema = z.object({
   character_id: z.string(),
   name: z.string(),
-  role: z.string()
+  role: z.string(),
+  // 選択中のバリエーション。null = ベース。
+  variant_id: z.string().nullable()
 })
 export type NovelCastMember = z.infer<typeof NovelCastMemberSchema>
 
@@ -197,12 +291,12 @@ export const NovelGenerationJobSchema = z.object({
 export type NovelGenerationJob = z.infer<typeof NovelGenerationJobSchema>
 
 export const NovelWithChaptersSchema = NovelSchema.extend({
-  chapters: z.array(ChapterSchema),
+  chapters: z.array(ChapterSchema).default([]),
   cast: z.array(NovelCastMemberSchema).default([]),
   relations: z.array(NovelRelationSchema).default([]),
   generation_costs: z.array(ChapterCostSchema).default([]),
   total_cost_usd: z.number().default(0),
-  gen_job: NovelGenerationJobSchema.nullable()
+  gen_job: NovelGenerationJobSchema.nullable().default(null)
 })
 export type NovelWithChapters = z.infer<typeof NovelWithChaptersSchema>
 
