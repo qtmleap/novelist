@@ -1,7 +1,7 @@
 import type { Prisma, PrismaClient } from '@/generated/prisma/client'
-import type { CreateCharacterInput } from '@/schemas/character.dto'
+import type { CharacterVariantInput, CreateCharacterInput } from '@/schemas/character.dto'
 
-// ベース (Character 本体) のフィールドを DB 形に。stages は別テーブルなので含めない。
+// ベース (Character 本体) のフィールドを DB 形に。variants は別テーブルなので含めない。
 function serializeBase(input: CreateCharacterInput) {
   return {
     name: input.name,
@@ -46,34 +46,75 @@ function shapeCharacter(row: Prisma.CharacterGetPayload<{ include: { variants: t
   }
 }
 
-// バリエーションを position 付きで作成する $transaction オペレーション群を作る。
-function variantCreateOps(prisma: PrismaClient, characterId: string, variants: CreateCharacterInput['variants']) {
-  return variants.map((v, i) =>
-    prisma.characterVariant.create({
-      data: {
-        character_id: characterId,
-        position: i,
-        label: v.label,
-        age: v.age,
-        occupation: v.occupation,
-        appearance: v.appearance,
-        first_person: v.first_person,
-        address_others: v.address_others,
-        speech_examples: JSON.stringify(v.speech_examples),
-        description: v.description
-      }
-    })
-  )
+function shapeVariant(v: Prisma.CharacterVariantGetPayload<true>) {
+  return {
+    id: v.id,
+    label: v.label,
+    age: v.age,
+    occupation: v.occupation,
+    appearance: v.appearance,
+    first_person: v.first_person,
+    address_others: v.address_others,
+    speech_examples: parseSpeech(v.speech_examples),
+    description: v.description
+  }
+}
+
+// 入力をバリエーション行の data 形に。
+function variantData(input: CharacterVariantInput) {
+  return {
+    label: input.label,
+    age: input.age,
+    occupation: input.occupation,
+    appearance: input.appearance,
+    first_person: input.first_person,
+    address_others: input.address_others,
+    speech_examples: JSON.stringify(input.speech_examples),
+    description: input.description
+  }
 }
 
 export async function createCharacter(prisma: PrismaClient, input: CreateCharacterInput) {
+  // バリエーションは別エンドポイントで管理するので本体作成では触らない。
   const character = await prisma.character.create({ data: serializeBase(input) })
-  const ops = variantCreateOps(prisma, character.id, input.variants)
-  if (ops.length > 0) await prisma.$transaction(ops)
   const created = await getCharacter(prisma, character.id)
   // 直前に作成しているので必ず存在する。
   if (created === null) throw new Error('character disappeared after create')
   return created
+}
+
+// 末尾に追加 (position = 既存最大 + 1)。
+export async function createVariant(prisma: PrismaClient, characterId: string, input: CharacterVariantInput) {
+  const agg = await prisma.characterVariant.aggregate({
+    where: { character_id: characterId },
+    _max: { position: true }
+  })
+  const maxPos = agg._max.position
+  const position = maxPos === null ? 0 : maxPos + 1
+  const row = await prisma.characterVariant.create({
+    data: { character_id: characterId, position, ...variantData(input) }
+  })
+  return shapeVariant(row)
+}
+
+// character_id でスコープして更新 (他キャラの variant を触らない)。無ければ null。
+export async function updateVariant(
+  prisma: PrismaClient,
+  characterId: string,
+  variantId: string,
+  input: CharacterVariantInput
+) {
+  const result = await prisma.characterVariant.updateMany({
+    where: { id: variantId, character_id: characterId },
+    data: variantData(input)
+  })
+  if (result.count === 0) return null
+  const row = await prisma.characterVariant.findUnique({ where: { id: variantId } })
+  return row === null ? null : shapeVariant(row)
+}
+
+export async function deleteVariant(prisma: PrismaClient, characterId: string, variantId: string) {
+  await prisma.characterVariant.deleteMany({ where: { id: variantId, character_id: characterId } })
 }
 
 export async function listCharacters(prisma: PrismaClient) {
@@ -94,14 +135,8 @@ export async function getCharacter(prisma: PrismaClient, id: string) {
 }
 
 export async function updateCharacter(prisma: PrismaClient, id: string, input: CreateCharacterInput) {
-  // D1 はインタラクティブトランザクション非対応なので $transaction([...]) で順序実行。
-  // 既存 stages は一旦消して input から入れ直す。
-  const ops: Prisma.PrismaPromise<unknown>[] = [
-    prisma.character.update({ where: { id }, data: serializeBase(input) }),
-    prisma.characterVariant.deleteMany({ where: { character_id: id } }),
-    ...variantCreateOps(prisma, id, input.variants)
-  ]
-  await prisma.$transaction(ops)
+  // バリエーションは別エンドポイントで管理するので本体更新では触らない。
+  await prisma.character.update({ where: { id }, data: serializeBase(input) })
   const updated = await getCharacter(prisma, id)
   if (updated === null) throw new Error('character disappeared after update')
   return updated

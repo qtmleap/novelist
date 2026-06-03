@@ -3,10 +3,13 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import {
   createCharacter,
+  createVariant,
   deleteCharacter,
+  deleteVariant,
   getCharacter,
   listCharacters,
-  updateCharacter
+  updateCharacter,
+  updateVariant
 } from '@/lib/character/repository'
 import { getEnv, getPrisma } from '@/lib/db'
 import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
@@ -29,7 +32,7 @@ import {
   updateNovel,
   upsertGenerationJob
 } from '@/lib/novel/repository'
-import { type CharacterVariant, CreateCharacterSchema } from '@/schemas/character.dto'
+import { type CharacterVariant, CharacterVariantInputSchema, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
   ArrangeNovelsSchema,
   CreateCategorySchema,
@@ -700,6 +703,48 @@ export const app = new Hono()
       const err = e as { code?: string }
       if (err.code === 'P2025') return c.json({ error: 'not_found' }, 404)
       throw e
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+
+  // ── Character variants (別の姿・状態。専用ページから管理) ──────────────
+  .post('/characters/:id/variants', requireAuth, zValidator('json', CharacterVariantInputSchema), async (c) => {
+    const id = c.req.param('id')
+    const input = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      const variant = await createVariant(prisma, id, input)
+      return c.json(variant, 201)
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+  .put(
+    '/characters/:id/variants/:variantId',
+    requireAuth,
+    zValidator('json', CharacterVariantInputSchema),
+    async (c) => {
+      const id = c.req.param('id')
+      const variantId = c.req.param('variantId')
+      const input = c.req.valid('json')
+      const prisma = getPrisma()
+      try {
+        const variant = await updateVariant(prisma, id, variantId, input)
+        if (variant === null) return c.json({ error: 'not_found' }, 404)
+        return c.json(variant)
+      } finally {
+        await prisma.$disconnect()
+      }
+    }
+  )
+  .delete('/characters/:id/variants/:variantId', requireAuth, async (c) => {
+    const id = c.req.param('id')
+    const variantId = c.req.param('variantId')
+    const prisma = getPrisma()
+    try {
+      await deleteVariant(prisma, id, variantId)
+      return c.body(null, 204)
     } finally {
       await prisma.$disconnect()
     }
