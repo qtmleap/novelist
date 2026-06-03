@@ -20,6 +20,8 @@ const ErrorBodySchema = z.object({
 
 const OutlineWrapperSchema = z.object({ outline: OutlineSchema })
 const PromptPreviewSchema = z.object({ prompt: z.string() })
+// 章本文プロンプトは保存済みのものを返すため、この機能より前に生成された章では null になる。
+const ChapterPromptSchema = z.object({ prompt: z.string().nullable() })
 const GenerateAckSchema = z.object({ status: z.enum(['started', 'already_streaming']) })
 // /auth/me は常に 200 を返し、未認証なら email=null。これでフロントは「未認証 vs API ダウン」を切り分け可能。
 const AuthStateSchema = z.object({ email: z.string().nullable() })
@@ -105,6 +107,14 @@ export const api = makeApi([
     description: '指定章の章立てを再生成',
     parameters: [{ name: 'body', type: 'Body', schema: GenerateOptionsSchema }],
     response: OutlineWrapperSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'get',
+    path: '/api/novels/:id/chapters/:number/prompt',
+    alias: 'getChapterPrompt',
+    description: '本文生成時に実際に送ったプロンプト (最新 version)。未保存の章は null',
+    response: ChapterPromptSchema,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   {

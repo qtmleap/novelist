@@ -367,7 +367,14 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       const prisma = this.makePrisma()
       let saved: { id: string }
       try {
-        saved = await saveChapter(prisma, payload.novelId, payload.chapterNumber, this.buffer, payload.chapterTitle)
+        saved = await saveChapter(
+          prisma,
+          payload.novelId,
+          payload.chapterNumber,
+          this.buffer,
+          payload.chapterTitle,
+          result.prompt
+        )
       } catch (e) {
         await prisma.$disconnect()
         const msg = e instanceof Error ? e.message : String(e)

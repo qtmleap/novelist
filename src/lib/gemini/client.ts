@@ -478,6 +478,9 @@ export type StreamChapterResult = {
   // stream 終了時に resolve される。拒否がなければ undefined。
   // 空出力時に DO 側がユーザーへ原因を提示するために使う。
   blockReason: Promise<string | undefined>
+  // Gemini に実際に送ったプロンプト全文 (同期的に確定済み)。
+  // DO が章本文と一緒に D1 へ保存し、フロントで確認できるようにする。
+  prompt: string
 }
 
 export function streamChapter(env: Env, params: StreamChapterParams): StreamChapterResult {
@@ -643,7 +646,7 @@ ${sections.join('\n\n')}
     }
   })
 
-  return { stream: readable, usage, blockReason }
+  return { stream: readable, usage, blockReason, prompt }
 }
 
 function extractUsage(chunk: unknown, model: string): Omit<StreamChapterUsage, 'finishReason'> | undefined {
