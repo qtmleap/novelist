@@ -65,6 +65,11 @@ type Props = {
   mode?: 'create' | 'edit'
 }
 
+// 必須項目を示す赤い * (React Hook Form は自動では付けないので明示する)。
+function RequiredMark() {
+  return <span className='ml-0.5 text-destructive'>*</span>
+}
+
 // その項目が生成プロンプトのどこに渡るかをラベル横にバッジで示す。
 // 'both' は「章立て」「本文」を別々のバッジに分けて出す。
 function ScopeTag({ scope }: { scope: 'both' | 'outline' | 'body' }) {
@@ -192,7 +197,12 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             name='title'
             render={({ field }) => (
               <FormItem className='space-y-2'>
-                <FormLabel>タイトル</FormLabel>
+                <FormLabel>
+                  <span>
+                    タイトル
+                    <RequiredMark />
+                  </span>
+                </FormLabel>
                 <FormControl>
                   <Input placeholder='例: 星降る王国の伝説' {...field} />
                 </FormControl>
@@ -207,7 +217,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             render={({ field }) => (
               <FormItem className='space-y-2'>
                 <FormLabel>
-                  ジャンル
+                  <span>
+                    ジャンル
+                    <RequiredMark />
+                  </span>
                   <ScopeTag scope='both' />
                 </FormLabel>
                 <Select value={field.value} onValueChange={field.onChange}>
@@ -234,9 +247,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             name='category_id'
             render={({ field }) => (
               <FormItem className='space-y-2'>
-                <FormLabel>
-                  カテゴリ <span className='text-muted-foreground font-normal'>（任意）</span>
-                </FormLabel>
+                <FormLabel>カテゴリ</FormLabel>
                 <div className='flex flex-wrap items-center gap-2'>
                   <Select
                     value={field.value === null ? NO_CATEGORY : field.value}
@@ -341,7 +352,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             render={({ field }) => (
               <FormItem className='space-y-2'>
                 <FormLabel>
-                  物語に入れたいシーン・展開 <span className='text-muted-foreground font-normal'>（任意）</span>
+                  物語に入れたいシーン・展開
                   <ScopeTag scope='outline' />
                 </FormLabel>
                 <FormControl>
