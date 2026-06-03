@@ -67,7 +67,8 @@ export async function saveChapter(
   novelId: string,
   chapterNumber: number,
   content: string,
-  title: string | null
+  title: string | null,
+  prompt: string
 ) {
   const latest = await prisma.chapter.findFirst({
     where: { novel_id: novelId, chapter_number: chapterNumber },
@@ -81,7 +82,8 @@ export async function saveChapter(
       chapter_number: chapterNumber,
       version: (latest?.version ?? 0) + 1,
       content,
-      title
+      title,
+      prompt
     }
   })
 }

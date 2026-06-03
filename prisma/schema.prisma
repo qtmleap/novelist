@@ -111,6 +111,9 @@ model Chapter {
   version        Int      @default(1)
   title          String?
   content        String
+  // 生成時に Gemini へ実際に送ったプロンプト全文。version ごとに 1:1。
+  // この列追加より前に生成された章は null (フロントは「未保存」と表示する)。
+  prompt         String?
   created_at     DateTime @default(now())
 
   novel Novel @relation(fields: [novel_id], references: [id], onDelete: Cascade)
