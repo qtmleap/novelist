@@ -90,7 +90,7 @@ export function VariantForm({ defaultValues, submitLabel, onSubmit, onCancel, is
           )}
         />
 
-        <div className='grid grid-cols-1 gap-3 sm:grid-cols-3'>
+        <div className='grid grid-cols-1 items-start gap-3 sm:grid-cols-3'>
           <FormField
             control={form.control}
             name='age'
