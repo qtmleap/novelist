@@ -1,8 +1,8 @@
 'use client'
 
 import { zodResolver } from '@hookform/resolvers/zod'
-import { Loader2, Save, X } from 'lucide-react'
-import { type Resolver, useForm } from 'react-hook-form'
+import { Loader2, Plus, Save, Trash2, X } from 'lucide-react'
+import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { z } from 'zod'
 import { Button } from '@/components/ui/button'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
@@ -17,9 +17,12 @@ import {
   OCCUPATION_OPTIONS
 } from '@/schemas/character.dto'
 
-// 口調は 1 行 1 例の textarea で持ち、送信時に配列へ分解する。
+// 口調は 1 例ずつ個別入力で持ち、送信時に配列へ。
 const VariantFormSchema = CharacterVariantInputSchema.omit({ speech_examples: true }).extend({
-  speech: z.string().max(6200).default('')
+  speech_examples: z
+    .array(z.object({ value: z.string().max(300) }))
+    .max(20)
+    .default([])
 })
 type VariantFormValues = z.infer<typeof VariantFormSchema>
 
@@ -42,9 +45,14 @@ export function VariantForm({ defaultValues, submitLabel, onSubmit, onCancel, is
       first_person: defaultValues ? defaultValues.first_person : '',
       address_others: defaultValues ? defaultValues.address_others : '',
       description: defaultValues ? defaultValues.description : '',
-      speech: defaultValues ? defaultValues.speech_examples.join('\n') : ''
+      speech_examples: (defaultValues ? defaultValues.speech_examples : []).map((v) => ({ value: v }))
     },
     mode: 'onSubmit'
+  })
+
+  const { fields, append, remove } = useFieldArray<VariantFormValues, 'speech_examples'>({
+    control: form.control,
+    name: 'speech_examples'
   })
 
   const handleSubmit = form.handleSubmit((data) => {
@@ -56,10 +64,7 @@ export function VariantForm({ defaultValues, submitLabel, onSubmit, onCancel, is
       first_person: data.first_person,
       address_others: data.address_others,
       description: data.description,
-      speech_examples: data.speech
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line !== '')
+      speech_examples: data.speech_examples.map((r) => r.value).filter((v) => v.trim() !== '')
     }
     return onSubmit(input)
   })
@@ -188,19 +193,51 @@ export function VariantForm({ defaultValues, submitLabel, onSubmit, onCancel, is
           )}
         />
 
-        <FormField
-          control={form.control}
-          name='speech'
-          render={({ field }) => (
-            <FormItem className='space-y-2'>
-              <FormLabel>口調の例</FormLabel>
-              <FormControl>
-                <Textarea placeholder='1行に1つ（空欄ならベースのまま）' rows={3} {...field} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
+        <div className='space-y-2'>
+          <p className='text-sm font-medium'>口調の例</p>
+          <p className='text-xs text-muted-foreground'>空のままならベースの口調を引き継ぎます。</p>
+          {fields.length > 0 && (
+            <div className='space-y-2'>
+              {fields.map((field, idx) => (
+                <FormField
+                  key={field.id}
+                  control={form.control}
+                  name={`speech_examples.${idx}.value`}
+                  render={({ field: itemField }) => (
+                    <FormItem>
+                      <div className='flex items-center gap-2'>
+                        <FormControl>
+                          <Input placeholder={`例 ${idx + 1}`} {...itemField} />
+                        </FormControl>
+                        <Button
+                          type='button'
+                          variant='ghost'
+                          size='icon'
+                          aria-label='削除'
+                          className='size-8 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive [&_svg]:size-5!'
+                          onClick={() => remove(idx)}
+                        >
+                          <Trash2 />
+                        </Button>
+                      </div>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              ))}
+            </div>
           )}
-        />
+          <Button
+            type='button'
+            variant='outline'
+            size='sm'
+            className='[&_svg]:size-5!'
+            onClick={() => append({ value: '' })}
+          >
+            <Plus />
+            口調の例を追加
+          </Button>
+        </div>
 
         <FormField
           control={form.control}
