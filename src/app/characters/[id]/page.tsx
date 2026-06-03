@@ -1,7 +1,7 @@
 'use client'
 
 import { useMutation, useSuspenseQuery } from '@tanstack/react-query'
-import { Copy, Loader2, Pencil } from 'lucide-react'
+import { Copy, Layers, Loader2, Pencil } from 'lucide-react'
 import { useParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import { PageHeader } from '@/components/PageHeader'
@@ -53,17 +53,7 @@ function CharacterDetailContent({ id }: { id: string }) {
         first_person: c.first_person,
         address_others: c.address_others,
         speech_examples: c.speech_examples,
-        description: c.description,
-        variants: c.variants.map((s) => ({
-          label: s.label,
-          age: s.age,
-          occupation: s.occupation,
-          appearance: s.appearance,
-          first_person: s.first_person,
-          address_others: s.address_others,
-          speech_examples: s.speech_examples,
-          description: s.description
-        }))
+        description: c.description
       }),
     onSuccess: (created) => router.push(routes.characters.edit(created.id)),
     onError: (e) => toast.error(readApiError(e, '登場人物のコピーに失敗しました'))
@@ -88,6 +78,12 @@ function CharacterDetailContent({ id }: { id: string }) {
           >
             {copyMutation.isPending ? <Loader2 className='animate-spin' /> : <Copy />}
             コピー
+          </Button>
+          <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
+            <a href={routes.characters.variants(id)}>
+              <Layers />
+              バリエーション
+            </a>
           </Button>
           {editAllowed ? (
             <Button asChild size='sm' className='[&_svg]:size-5!'>

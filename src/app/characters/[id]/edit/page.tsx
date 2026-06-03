@@ -35,17 +35,7 @@ function characterToInput(c: Character): CreateCharacterInput {
     first_person: c.first_person,
     address_others: c.address_others,
     speech_examples: c.speech_examples,
-    description: c.description,
-    variants: c.variants.map((s) => ({
-      label: s.label,
-      age: s.age,
-      occupation: s.occupation,
-      appearance: s.appearance,
-      first_person: s.first_person,
-      address_others: s.address_others,
-      speech_examples: s.speech_examples,
-      description: s.description
-    }))
+    description: c.description
   }
 }
 

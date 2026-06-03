@@ -84,9 +84,7 @@ export const CreateCharacterSchema = z.object({
   first_person: z.string().max(20).default(''),
   address_others: z.string().max(500).default(''),
   speech_examples: z.array(z.string().max(300)).max(20).default([]),
-  description: z.string().max(4000).default(''),
-  // バリエーション (任意・順序あり)。別の姿・状態を持たせる。
-  variants: z.array(CharacterVariantInputSchema).max(20).default([])
+  description: z.string().max(4000).default('')
 })
 export type CreateCharacterInput = z.infer<typeof CreateCharacterSchema>
 
