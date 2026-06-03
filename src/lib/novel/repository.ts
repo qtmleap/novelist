@@ -32,7 +32,11 @@ export async function saveNovelCast(prisma: PrismaClient, id: string, input: Sav
     prisma.novelCharacter.deleteMany({ where: { novel_id: id } })
   ]
   for (const link of input.character_links) {
-    ops.push(prisma.novelCharacter.create({ data: { novel_id: id, character_id: link.character_id, role: link.role } }))
+    ops.push(
+      prisma.novelCharacter.create({
+        data: { novel_id: id, character_id: link.character_id, role: link.role, variant_id: link.variant_id }
+      })
+    )
   }
   for (const rel of input.relations) {
     ops.push(
@@ -115,7 +119,20 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
               first_person: true,
               address_others: true,
               speech_examples: true,
-              description: true
+              description: true,
+              // バリエーション本体も読む。生成時に variant_id で選び、空欄項目はベース継承でマージする。
+              variants: {
+                select: {
+                  id: true,
+                  age: true,
+                  occupation: true,
+                  appearance: true,
+                  first_person: true,
+                  address_others: true,
+                  speech_examples: true,
+                  description: true
+                }
+              }
             }
           }
         }
@@ -165,7 +182,8 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
     cast: novel.character_links.map((l) => ({
       character_id: l.character_id,
       name: l.character.name,
-      role: l.role
+      role: l.role,
+      variant_id: l.variant_id
     })),
     relations: novel.relations.map((r) => ({
       source_character_id: r.source_character_id,

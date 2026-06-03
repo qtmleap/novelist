@@ -4,13 +4,13 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2, Plus, Save, Trash2 } from 'lucide-react'
 import { type DefaultValues, type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { z } from 'zod'
+import { AddressSuggestions } from '@/components/AddressSuggestions'
 import { Button } from '@/components/ui/button'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import {
-  ADDRESS_STYLES,
   type CreateCharacterInput,
   CreateCharacterSchema,
   FIRST_PERSON_OPTIONS,
@@ -203,20 +203,10 @@ export function CharacterForm({ defaultValues, submitLabel, onSubmit, isSubmitti
               render={({ field }) => (
                 <FormItem className='space-y-2'>
                   <FormLabel>他の人への呼び方</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange}>
-                    <FormControl>
-                      <SelectTrigger className='w-full'>
-                        <SelectValue placeholder='呼び方を選択（任意）' />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {ADDRESS_STYLES.map((s) => (
-                        <SelectItem key={s} value={s}>
-                          {s}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <FormControl>
+                    <Input maxLength={500} placeholder='呼び方（自由入力可・任意）' {...field} />
+                  </FormControl>
+                  <AddressSuggestions value={field.value} onPick={field.onChange} />
                   <FormMessage />
                 </FormItem>
               )}

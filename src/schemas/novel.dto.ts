@@ -28,13 +28,46 @@ export const ENDING_OPTIONS = [
 ] as const
 export const DEFAULT_ENDING = '未指定'
 
-// 小説内のキャラ間関係の種別 (NovelCharacterRelation.relation のプリセット)
-export const RELATION_TYPES = ['家族', '恋愛', '友人', '幼馴染', '仲間', 'ライバル', '敵対', '師弟', 'その他'] as const
+// 小説内のキャラ間関係の種別 (NovelCharacterRelation.relation のプリセット)。
+// 家族・恋愛・社会関係をある程度細かく選べるようにしている (relation は string なので増減は自由)。
+// 関係は source → target の有向。続柄は「A から見て B は〜」の向きで選ぶ
+// (例: A→B が「兄」なら B は A の兄)。複数を組み合わせて 1 本の関係にできる
+// (例: A→B が「友人・恋愛」= 友人だが A は B に片想い)。保存時は '・' 区切りで連結する。
+export const RELATION_TYPES = [
+  '親',
+  '子',
+  '兄',
+  '弟',
+  '姉',
+  '妹',
+  '夫婦',
+  '恋人',
+  '恋愛',
+  '家族',
+  '親戚',
+  '幼馴染',
+  '親友',
+  '友人',
+  '仲間',
+  '同僚',
+  '先輩',
+  '後輩',
+  '師弟',
+  '主従',
+  'ライバル',
+  '敵対',
+  'その他'
+] as const
+
+// 複数種別の連結に使う区切り。保存値 (relation) は RELATION_TYPES をこの文字で join したもの。
+export const RELATION_SEPARATOR = '・'
 
 // 小説に登場するキャラ (辞典のキャラ + その小説での役割)
 export const NovelCharacterLinkSchema = z.object({
   character_id: z.string().nonempty(),
-  role: z.string().max(50).default('')
+  role: z.string().max(50).default(''),
+  // 使用する Character のバリエーション。null = ベース (Character 本体)。
+  variant_id: z.string().nullable().default(null)
 })
 export type NovelCharacterLink = z.infer<typeof NovelCharacterLinkSchema>
 
@@ -42,7 +75,7 @@ export type NovelCharacterLink = z.infer<typeof NovelCharacterLinkSchema>
 export const NovelCharacterRelationInputSchema = z.object({
   source_character_id: z.string().nonempty(),
   target_character_id: z.string().nonempty(),
-  relation: z.string().nonempty('関係を入力してください').max(50),
+  relation: z.string().nonempty('関係を入力してください').max(100),
   description: z.string().max(500).default(''),
   // source が target を呼ぶときの呼び方の上書き (ADDRESS_STYLES, 空=本人の既定)
   address_override: z.string().max(20).default('')
@@ -223,7 +256,9 @@ export type Novel = z.infer<typeof NovelSchema>
 export const NovelCastMemberSchema = z.object({
   character_id: z.string(),
   name: z.string(),
-  role: z.string()
+  role: z.string(),
+  // 選択中のバリエーション。null = ベース。
+  variant_id: z.string().nullable()
 })
 export type NovelCastMember = z.infer<typeof NovelCastMemberSchema>
 
