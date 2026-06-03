@@ -87,7 +87,6 @@ export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; p
 export const CreateNovelSchema = z.object({
   title: z.string().nonempty('タイトルを入力してください').max(100),
   genre: z.string().nonempty('ジャンルを入力してください').max(50),
-  characters: z.string().max(2000),
   setting: z.string().max(4000),
   num_chapters: z.number().int().min(1).max(30),
   target_chars: z.number().int().min(500).max(20000).default(DEFAULT_TARGET_CHARS),
@@ -186,7 +185,6 @@ export const NovelSchema = z.object({
   id: z.string(),
   title: z.string(),
   genre: z.string(),
-  characters: z.string(),
   setting: z.string(),
   num_chapters: z.number().int(),
   target_chars: z.number().int(),

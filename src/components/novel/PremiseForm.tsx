@@ -66,7 +66,6 @@ type Props = {
 export const EMPTY_DEFAULTS: CreateNovelInput = {
   title: '',
   genre: '',
-  characters: '',
   setting: '',
   num_chapters: 3,
   target_chars: DEFAULT_TARGET_CHARS,
@@ -299,30 +298,6 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                     {...field}
                   />
                 </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-
-          <FormField
-            control={form.control}
-            name='characters'
-            render={({ field }) => (
-              <FormItem className='space-y-2'>
-                <FormLabel>
-                  登場人物メモ <span className='text-muted-foreground font-normal'>（任意）</span>
-                </FormLabel>
-                <FormControl>
-                  <Textarea
-                    placeholder='例: 主人公・ルカ（17歳、孤独な魔法使いの見習い）、ヒロイン・アリア（謎の精霊）'
-                    rows={3}
-                    className='resize-none'
-                    {...field}
-                  />
-                </FormControl>
-                <p className='text-xs text-muted-foreground'>
-                  登場人物辞典を使う場合は下の「登場人物」で選択してください。
-                </p>
                 <FormMessage />
               </FormItem>
             )}
