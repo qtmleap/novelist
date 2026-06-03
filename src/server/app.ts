@@ -27,6 +27,7 @@ import {
   listNovels,
   renameCategory,
   reorderCategories,
+  saveNovelCast,
   saveOutline,
   stopGenerationJob,
   updateNovel,
@@ -41,7 +42,8 @@ import {
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   OutlineSchema,
-  ReorderSchema
+  ReorderSchema,
+  SaveCastSchema
 } from '@/schemas/novel.dto'
 import { readAuthEmail, requireAuth } from '@/server/auth'
 
@@ -308,6 +310,18 @@ export const app = new Hono()
       const err = e as { code?: string }
       if (err.code === 'P2025') return c.json({ error: 'not_found' }, 404)
       throw e
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+  // 小説のキャスト・関係・語り手を専用ページからまとめて保存。
+  .put('/novels/:id/cast', requireAuth, zValidator('json', SaveCastSchema), async (c) => {
+    const id = c.req.param('id')
+    const input = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      await saveNovelCast(prisma, id, input)
+      return c.json({ ok: true })
     } finally {
       await prisma.$disconnect()
     }

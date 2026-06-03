@@ -1,7 +1,7 @@
 'use client'
 
 import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { Copy, Loader2, Pencil, RefreshCw, Sparkles } from 'lucide-react'
+import { Copy, Loader2, Pencil, RefreshCw, Sparkles, Users } from 'lucide-react'
 import { useParams, useRouter } from 'next/navigation'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { toast } from 'sonner'
@@ -231,20 +231,27 @@ function NovelDetailContent({ id }: { id: string }) {
         pov: novel.pov,
         tone: novel.tone,
         age_rating: novel.age_rating,
-        pov_character_id: novel.pov_character_id,
         ending: novel.ending,
         notes: novel.notes,
         editor_model: asGeminiModel(novel.editor_model),
         writer_model: asGeminiModel(novel.writer_model),
-        character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
-        relations: novel.relations.map((r) => ({
-          source_character_id: r.source_character_id,
-          target_character_id: r.target_character_id,
-          relation: r.relation,
-          description: r.description,
-          address_override: r.address_override
-        }))
+        category_id: novel.category_id
       })
+      // キャスト・関係・語り手は別エンドポイントで複製する。
+      await api.saveNovelCast(
+        {
+          pov_character_id: novel.pov_character_id,
+          character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
+          relations: novel.relations.map((r) => ({
+            source_character_id: r.source_character_id,
+            target_character_id: r.target_character_id,
+            relation: r.relation,
+            description: r.description,
+            address_override: r.address_override
+          }))
+        },
+        { params: { id: created.id } }
+      )
       router.push(routes.novels.edit(created.id))
     } catch (e) {
       toast.error(readApiError(e, '小説のコピーに失敗しました'))
@@ -381,6 +388,12 @@ function NovelDetailContent({ id }: { id: string }) {
           >
             {isCopying ? <Loader2 className='animate-spin' /> : <Copy />}
             コピー
+          </Button>
+          <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
+            <a href={routes.novels.cast(novel.id)}>
+              <Users />
+              登場人物
+            </a>
           </Button>
           {editAllowed ? (
             <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>

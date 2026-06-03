@@ -18,7 +18,8 @@ import {
   NovelSchema,
   NovelWithChaptersSchema,
   OutlineSchema,
-  ReorderSchema
+  ReorderSchema,
+  SaveCastSchema
 } from '@/schemas/novel.dto'
 
 // API レスポンスのラッパースキーマ。サーバー側は Hono のままで、
@@ -128,6 +129,15 @@ export const api = makeApi([
     description: '小説を更新',
     parameters: [{ name: 'body', type: 'Body', schema: CreateNovelSchema }],
     response: NovelSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/novels/:id/cast',
+    alias: 'saveNovelCast',
+    description: 'キャスト・関係・語り手を保存',
+    parameters: [{ name: 'body', type: 'Body', schema: SaveCastSchema }],
+    response: z.object({ ok: z.boolean() }),
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   {
