@@ -4,8 +4,10 @@ import { useMutation } from '@tanstack/react-query'
 import { useAtomValue } from 'jotai'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
+import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
 import { EMPTY_DEFAULTS, PremiseForm } from '@/components/novel/PremiseForm'
 import { PageHeader } from '@/components/PageHeader'
+import { QueryBoundary } from '@/components/QueryBoundary'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import type { CreateNovelInput } from '@/schemas/novel.dto'
@@ -39,13 +41,15 @@ export default function NewNovelPage() {
         </p>
       </div>
 
-      <PremiseForm
-        onSubmit={async (data) => {
-          await createMutation.mutateAsync(data)
-        }}
-        isSubmitting={createMutation.isPending}
-        defaultValues={defaults}
-      />
+      <QueryBoundary fallback={<NovelSkeleton />}>
+        <PremiseForm
+          onSubmit={async (data) => {
+            await createMutation.mutateAsync(data)
+          }}
+          isSubmitting={createMutation.isPending}
+          defaultValues={defaults}
+        />
+      </QueryBoundary>
     </div>
   )
 }

@@ -25,6 +25,9 @@ model Novel {
   editor_model     String                   @default("gemini-3.1-flash-lite")
   writer_model     String                   @default("gemini-3.1-flash-lite")
   outline          String?
+  // ユーザーが作成するカテゴリ (フォルダ式)。未割り当て (= 未分類) は null。
+  category_id      String?
+  category         Category?                @relation(fields: [category_id], references: [id], onDelete: SetNull)
   created_at      DateTime                 @default(now())
   updated_at      DateTime                 @updatedAt
   chapters         Chapter[]
@@ -32,6 +35,16 @@ model Novel {
   relations        NovelCharacterRelation[]
   generation_costs ChapterGenerationCost[]
   generation_job   NovelGenerationJob?
+
+  @@index([category_id])
+}
+
+// ユーザーが自由に作成するカテゴリ。小説を 1 つだけ所属させる (フォルダ式)。
+model Category {
+  id         String   @id @default(uuid())
+  name       String   @unique
+  created_at DateTime @default(now())
+  novels     Novel[]
 }
 
 model NovelGenerationJob {
