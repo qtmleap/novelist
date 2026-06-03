@@ -56,7 +56,6 @@ function serializeNovel(n: {
   id: string
   title: string
   genre: string
-  characters: string
   setting: string
   num_chapters: number
   target_chars: number
@@ -78,7 +77,6 @@ function serializeNovel(n: {
     id: n.id,
     title: n.title,
     genre: n.genre,
-    characters: n.characters,
     setting: n.setting,
     num_chapters: n.num_chapters,
     target_chars: n.target_chars,
@@ -340,7 +338,6 @@ export const app = new Hono()
       const params = {
         title: novel.title,
         genre: novel.genre,
-        characters: novel.characters,
         setting: novel.setting,
         num_chapters: novel.num_chapters,
         notes: novel.notes
@@ -426,7 +423,6 @@ export const app = new Hono()
       const params = {
         title: novel.title,
         genre: novel.genre,
-        characters: novel.characters,
         setting: novel.setting,
         num_chapters: novel.num_chapters,
         notes: novel.notes
@@ -513,7 +509,6 @@ export const app = new Hono()
             {
               title: novel.title,
               genre: novel.genre,
-              characters: novel.characters,
               setting: novel.setting,
               num_chapters: novel.num_chapters,
               notes: novel.notes

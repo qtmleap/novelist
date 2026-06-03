@@ -6,7 +6,6 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
     data: {
       title: input.title,
       genre: input.genre,
-      characters: input.characters,
       setting: input.setting,
       num_chapters: input.num_chapters,
       target_chars: input.target_chars,
@@ -214,7 +213,6 @@ export async function listNovels(prisma: PrismaClient) {
       id: true,
       title: true,
       genre: true,
-      characters: true,
       setting: true,
       num_chapters: true,
       target_chars: true,
@@ -328,7 +326,6 @@ export async function updateNovel(prisma: PrismaClient, id: string, input: Creat
       data: {
         title: input.title,
         genre: input.genre,
-        characters: input.characters,
         setting: input.setting,
         num_chapters: input.num_chapters,
         target_chars: input.target_chars,

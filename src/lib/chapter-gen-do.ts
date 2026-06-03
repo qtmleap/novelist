@@ -59,7 +59,6 @@ export type StartChapterGenPayload = {
   novel: {
     title: string
     genre: string
-    characters: string
     setting: string
     num_chapters: number
     notes: string

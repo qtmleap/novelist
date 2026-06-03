@@ -104,7 +104,6 @@ export async function buildChapterPayload(
     novel: {
       title: novel.title,
       genre: novel.genre,
-      characters: novel.characters,
       setting: novel.setting,
       num_chapters: novel.num_chapters,
       notes: novel.notes

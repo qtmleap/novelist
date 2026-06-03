@@ -46,7 +46,6 @@ type GeminiResponse = z.infer<typeof GeminiResponseSchema>
 type GeminiNovelParams = {
   title: string
   genre: string
-  characters: string
   setting: string
   num_chapters: number
   // ユーザーが PremiseForm の備考欄に書いた追加指示 (任意)。
@@ -271,7 +270,6 @@ export function buildOutlinePrompt(
 
 タイトル: ${novel.title}
 ジャンル: ${novel.genre}
-登場人物: ${novel.characters}
 世界観・設定: ${novel.setting}
 章数: ${novel.num_chapters}
 ${styleInstruction}
@@ -391,7 +389,6 @@ export async function regenerateOutlineChapter(
 【作品情報】
 タイトル: ${novel.title}
 ジャンル: ${novel.genre}
-登場人物: ${novel.characters}
 世界観・設定: ${novel.setting}
 章数: ${novel.num_chapters}
 
@@ -519,7 +516,7 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
   const positionLine = `現在執筆中: 第${chapterNumber}章 / 全${totalChapters}章`
 
   const sections: string[] = [
-    `【作品情報】\nタイトル: ${novel.title}\nジャンル: ${novel.genre}\n登場人物: ${novel.characters}\n世界観・設定: ${novel.setting}`,
+    `【作品情報】\nタイトル: ${novel.title}\nジャンル: ${novel.genre}\n世界観・設定: ${novel.setting}`,
     `【文体・視点】\n${styleInstruction}`,
     castSection,
     relationsSection,
