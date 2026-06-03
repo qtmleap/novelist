@@ -249,7 +249,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                         size='sm'
                         disabled={creatingCategory || newCategoryName.trim().length === 0}
                         onClick={handleCreateCategory}
-                        className='[&_svg]:size-5!'
+                        className='h-9 [&_svg]:size-5!'
                       >
                         {creatingCategory ? <Loader2 className='animate-spin' /> : <Plus />}
                         追加
@@ -262,6 +262,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                           setNewCategoryOpen(false)
                           setNewCategoryName('')
                         }}
+                        className='h-9'
                       >
                         キャンセル
                       </Button>
@@ -272,7 +273,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       variant='outline'
                       size='sm'
                       onClick={() => setNewCategoryOpen(true)}
-                      className='[&_svg]:size-5!'
+                      className='h-9 [&_svg]:size-5!'
                     >
                       <Plus />
                       新規カテゴリ
@@ -396,7 +397,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             <p className='mt-0.5 text-sm text-muted-foreground'>視点・文体トーン・エンディングを選択してください。</p>
           </div>
 
-          <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+          <div className='grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-4'>
             <FormField
               control={form.control}
               name='pov'
