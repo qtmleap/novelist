@@ -1,7 +1,7 @@
 'use client'
 
 import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { Copy, Loader2, Pencil, RefreshCw, Sparkles } from 'lucide-react'
+import { Copy, Loader2, Pencil, RefreshCw, Sparkles, Users } from 'lucide-react'
 import { useParams, useRouter } from 'next/navigation'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { toast } from 'sonner'
@@ -20,29 +20,12 @@ import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
-import {
-  type Chapter,
-  type ChapterCost,
-  type GeminiModel,
-  GeminiModelSchema,
-  type Outline,
-  OutlineSchema
-} from '@/schemas/novel.dto'
+import { type Chapter, type ChapterCost, type GeminiModel, GeminiModelSchema, type Outline } from '@/schemas/novel.dto'
 
 function asGeminiModel(model: string): GeminiModel {
   const result = GeminiModelSchema.safeParse(model)
   if (!result.success) throw new Error(`Invalid model: ${model}`)
   return result.data
-}
-
-function parseOutline(raw: string | null): Outline | null {
-  if (!raw) return null
-  try {
-    const parsed = OutlineSchema.safeParse(JSON.parse(raw))
-    return parsed.success ? parsed.data : null
-  } catch {
-    return null
-  }
 }
 
 function chaptersFromApi(apiChapters: Chapter[]): ChapterData[] {
@@ -155,21 +138,18 @@ function NovelTotals({
   const totalChars = chapters.reduce((sum, c) => sum + (c.done ? c.content.length : 0), 0)
   if (totalChars === 0 && costs.length === 0) return null
   return (
-    <div className='border-t pt-3'>
-      <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>全体の合計</p>
-      <div className='mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm'>
+    <p className='mt-0.5 flex flex-wrap items-baseline gap-x-4 gap-y-0.5 text-sm text-muted-foreground'>
+      <span>
+        {'文字数 '}
+        <span className='tabular-nums'>{totalChars.toLocaleString()}</span>
+      </span>
+      {costs.length > 0 && (
         <span>
-          <span className='text-muted-foreground'>文字数 </span>
-          <span className='font-medium tabular-nums'>{totalChars.toLocaleString()}</span>
+          {'コスト '}
+          <span className='tabular-nums'>${totalCostUsd.toFixed(4)} USD</span>
         </span>
-        {costs.length > 0 && (
-          <span>
-            <span className='text-muted-foreground'>コスト </span>
-            <span className='font-medium tabular-nums'>${totalCostUsd.toFixed(4)} USD</span>
-          </span>
-        )}
-      </div>
-    </div>
+      )}
+    </p>
   )
 }
 
@@ -188,7 +168,7 @@ function NovelDetailContent({ id }: { id: string }) {
     genReducer,
     novel,
     (n): GenState => ({
-      outline: parseOutline(n.outline),
+      outline: n.outline,
       chapters: chaptersFromApi(n.chapters),
       streamingIndex: null,
       buffer: '',
@@ -199,7 +179,9 @@ function NovelDetailContent({ id }: { id: string }) {
 
   const abortRef = useRef<AbortController | null>(null)
 
-  const genJobCurrentKey = novel.gen_job !== null && novel.gen_job.status === 'running' ? novel.gen_job.current : null
+  const genJob = novel.gen_job
+  const genJobCurrentKey =
+    genJob !== null && genJob !== undefined && genJob.status === 'running' ? genJob.current : null
 
   useEffect(() => {
     if (genJobCurrentKey === null) return
@@ -243,27 +225,33 @@ function NovelDetailContent({ id }: { id: string }) {
       const created = await api.createNovel({
         title: `${novel.title} (コピー)`,
         genre: novel.genre,
-        characters: novel.characters,
         setting: novel.setting,
         num_chapters: novel.num_chapters,
         target_chars: novel.target_chars,
         pov: novel.pov,
         tone: novel.tone,
         age_rating: novel.age_rating,
-        pov_character_id: novel.pov_character_id,
         ending: novel.ending,
         notes: novel.notes,
         editor_model: asGeminiModel(novel.editor_model),
         writer_model: asGeminiModel(novel.writer_model),
-        character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
-        relations: novel.relations.map((r) => ({
-          source_character_id: r.source_character_id,
-          target_character_id: r.target_character_id,
-          relation: r.relation,
-          description: r.description,
-          address_override: r.address_override
-        }))
+        category_id: novel.category_id
       })
+      // キャスト・関係・語り手は別エンドポイントで複製する。
+      await api.saveNovelCast(
+        {
+          pov_character_id: novel.pov_character_id,
+          character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
+          relations: novel.relations.map((r) => ({
+            source_character_id: r.source_character_id,
+            target_character_id: r.target_character_id,
+            relation: r.relation,
+            description: r.description,
+            address_override: r.address_override
+          }))
+        },
+        { params: { id: created.id } }
+      )
       router.push(routes.novels.edit(created.id))
     } catch (e) {
       toast.error(readApiError(e, '小説のコピーに失敗しました'))
@@ -336,7 +324,7 @@ function NovelDetailContent({ id }: { id: string }) {
     <div className='space-y-6'>
       <PageHeader crumbs={[{ label: '小説一覧', href: routes.novels.list }, { label: novel.title }]} />
 
-      <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
+      <div className='flex flex-col gap-3'>
         <div className='min-w-0'>
           <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>{novel.genre}</p>
           <h1 className='mt-1 text-xl font-semibold'>{novel.title}</h1>
@@ -346,8 +334,11 @@ function NovelDetailContent({ id }: { id: string }) {
             <span className='tabular-nums'>{novel.num_chapters}</span>
             {' 章 生成済み'}
           </p>
+          {!isGenerating && (
+            <NovelTotals chapters={chapters} costs={novel.generation_costs} totalCostUsd={novel.total_cost_usd} />
+          )}
         </div>
-        <div className='flex flex-wrap items-center gap-2 sm:shrink-0'>
+        <div className='flex flex-wrap items-center justify-end gap-2'>
           <Button
             type='button'
             size='sm'
@@ -397,6 +388,12 @@ function NovelDetailContent({ id }: { id: string }) {
           >
             {isCopying ? <Loader2 className='animate-spin' /> : <Copy />}
             コピー
+          </Button>
+          <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
+            <a href={routes.novels.cast(novel.id)}>
+              <Users />
+              登場人物
+            </a>
           </Button>
           {editAllowed ? (
             <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
@@ -504,10 +501,6 @@ function NovelDetailContent({ id }: { id: string }) {
             if (targets.length > 0) handleStartGeneration(targets, asGeminiModel(novel.writer_model))
           }}
         />
-      )}
-
-      {!isGenerating && (
-        <NovelTotals chapters={chapters} costs={novel.generation_costs} totalCostUsd={novel.total_cost_usd} />
       )}
     </div>
   )

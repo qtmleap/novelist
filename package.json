@@ -7,11 +7,16 @@
     "dev": "vinext dev --port 11675 --hostname 0.0.0.0",
     "build": "vinext build",
     "predeploy": "vinext build",
-    "deploy": "vinext deploy"
+    "deploy": "bun wrangler deploy --keep-vars",
+    "deploy:staging": "bun scripts/deploy.ts staging",
+    "deploy:production": "bun scripts/deploy.ts production"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
     "@cloudflare/vite-plugin": "^1.35.0",
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@fontsource-variable/figtree": "^5.2.10",
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/inter": "^5.2.8",
@@ -28,6 +33,7 @@
     "@tailwindcss/vite": "^4.2.4",
     "@tanstack/react-query": "^5.100.14",
     "@vitejs/plugin-react": "^6.0.1",
+    "@xyflow/react": "^12.11.0",
     "@zodios/core": "^10.9.6",
     "axios": "^1.16.1",
     "class-variance-authority": "^0.7.1",
