@@ -11,7 +11,8 @@ export const routes = {
     list: '/characters',
     new: '/characters/new',
     detail: (id: string) => `/characters/${id}`,
-    edit: (id: string) => `/characters/${id}/edit`
+    edit: (id: string) => `/characters/${id}/edit`,
+    variants: (id: string) => `/characters/${id}/variants`
   },
   categories: {
     list: '/categories'

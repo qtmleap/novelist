@@ -1,6 +1,11 @@
 import { makeApi, Zodios, type ZodiosOptions } from '@zodios/core'
 import { z } from 'zod'
-import { CharacterSchema, CreateCharacterSchema } from '@/schemas/character.dto'
+import {
+  CharacterSchema,
+  CharacterVariantInputSchema,
+  CharacterVariantSchema,
+  CreateCharacterSchema
+} from '@/schemas/character.dto'
 import {
   ArrangeNovelsSchema,
   CategorySchema,
@@ -272,6 +277,34 @@ export const api = makeApi([
     path: '/api/characters/:id',
     alias: 'deleteCharacter',
     description: '登場人物を削除',
+    response: z.unknown(),
+    status: 204,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'post',
+    path: '/api/characters/:id/variants',
+    alias: 'createVariant',
+    description: 'バリエーションを追加',
+    parameters: [{ name: 'body', type: 'Body', schema: CharacterVariantInputSchema }],
+    response: CharacterVariantSchema,
+    status: 201,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/characters/:id/variants/:variantId',
+    alias: 'updateVariant',
+    description: 'バリエーションを更新',
+    parameters: [{ name: 'body', type: 'Body', schema: CharacterVariantInputSchema }],
+    response: CharacterVariantSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'delete',
+    path: '/api/characters/:id/variants/:variantId',
+    alias: 'deleteVariant',
+    description: 'バリエーションを削除',
     response: z.unknown(),
     status: 204,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
