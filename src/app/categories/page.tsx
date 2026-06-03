@@ -142,7 +142,7 @@ function CategoryListContent() {
   return (
     <>
       <div>
-        <h1 className='text-xl font-semibold'>カテゴリ</h1>
+        <h1 className='text-xl font-semibold'>カテゴリ一覧</h1>
         <p className='mt-0.5 text-sm text-muted-foreground'>
           小説を分類するカテゴリを管理します。割り当ては各小説の作成・編集画面で行います。
         </p>
@@ -311,7 +311,7 @@ function CategoryListContent() {
 export default function CategoriesPage() {
   return (
     <div className='space-y-6'>
-      <PageHeader crumbs={[{ label: 'カテゴリ' }]} />
+      <PageHeader crumbs={[{ label: 'カテゴリ一覧' }]} />
       <QueryBoundary fallback={<CategorySkeletonList />}>
         <CategoryListContent />
       </QueryBoundary>
