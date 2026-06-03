@@ -121,6 +121,7 @@ function serializeCharacter(c: {
   address_others: string
   speech_examples: string[]
   description: string
+  stages: Array<{ id: string; label: string; appearance: string; description: string; speech_examples: string[] }>
   created_at: Date
   updated_at: Date
 }) {
@@ -135,6 +136,7 @@ function serializeCharacter(c: {
     address_others: c.address_others,
     speech_examples: c.speech_examples,
     description: c.description,
+    stages: c.stages,
     created_at: c.created_at.toISOString(),
     updated_at: c.updated_at.toISOString()
   }

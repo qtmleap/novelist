@@ -79,6 +79,22 @@ model Character {
   novel_links         NovelCharacter[]
   relations_as_source NovelCharacterRelation[] @relation("RelationSource")
   relations_as_target NovelCharacterRelation[] @relation("RelationTarget")
+  stages              CharacterStage[]
+}
+
+// キャラクターの成長段階。話の進行で変化する外見・背景・口調を段階ごとに上書き保持する。
+// 空文字のフィールドはベース (Character) の値を継承する想定 (マージは生成時に行う)。
+model CharacterStage {
+  id              String    @id @default(uuid())
+  character_id    String
+  position        Int       @default(0)
+  label           String
+  appearance      String    @default("")
+  description     String    @default("")
+  speech_examples String    @default("[]")
+  character       Character @relation(fields: [character_id], references: [id], onDelete: Cascade)
+
+  @@index([character_id])
 }
 
 model NovelCharacter {
