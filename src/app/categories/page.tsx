@@ -202,6 +202,16 @@ function CategoryListContent() {
                       >
                         <X />
                       </Button>
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='icon'
+                        aria-label='削除'
+                        onClick={() => setDeleteTarget(cat)}
+                        className='size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive [&_svg]:size-5!'
+                      >
+                        <Trash2 />
+                      </Button>
                     </div>
                   </>
                 ) : (
@@ -211,28 +221,16 @@ function CategoryListContent() {
                       {cat.novel_count} 作品
                     </span>
                     {editAllowed && (
-                      <div className='flex shrink-0 items-center gap-1'>
-                        <Button
-                          type='button'
-                          variant='ghost'
-                          size='icon'
-                          aria-label='名前を変更'
-                          onClick={() => startEdit(cat)}
-                          className='size-8 text-muted-foreground [&_svg]:size-5!'
-                        >
-                          <Pencil />
-                        </Button>
-                        <Button
-                          type='button'
-                          variant='ghost'
-                          size='icon'
-                          aria-label='削除'
-                          onClick={() => setDeleteTarget(cat)}
-                          className='size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive [&_svg]:size-5!'
-                        >
-                          <Trash2 />
-                        </Button>
-                      </div>
+                      <Button
+                        type='button'
+                        variant='ghost'
+                        size='icon'
+                        aria-label='編集'
+                        onClick={() => startEdit(cat)}
+                        className='size-8 shrink-0 text-muted-foreground [&_svg]:size-5!'
+                      >
+                        <Pencil />
+                      </Button>
                     )}
                   </>
                 )}
