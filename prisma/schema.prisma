@@ -28,6 +28,8 @@ model Novel {
   // ユーザーが作成するカテゴリ (フォルダ式)。未割り当て (= 未分類) は null。
   category_id      String?
   category         Category?                @relation(fields: [category_id], references: [id], onDelete: SetNull)
+  // 一覧でのユーザー手動並び順。未設定 (既存行) は 0 で、表示は created_at をタイブレークに使う。
+  position         Int                      @default(0)
   created_at      DateTime                 @default(now())
   updated_at      DateTime                 @updatedAt
   chapters         Chapter[]
@@ -43,6 +45,8 @@ model Novel {
 model Category {
   id         String   @id @default(uuid())
   name       String   @unique
+  // メニューでのユーザー手動並び順。未設定 (既存行) は 0 で、表示は name をタイブレークに使う。
+  position   Int      @default(0)
   created_at DateTime @default(now())
   novels     Novel[]
 }

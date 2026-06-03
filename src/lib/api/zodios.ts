@@ -8,9 +8,11 @@ import {
   GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
+  ArrangeNovelsSchema,
   NovelSchema,
   NovelWithChaptersSchema,
-  OutlineSchema
+  OutlineSchema,
+  ReorderSchema
 } from '@/schemas/novel.dto'
 
 // API レスポンスのラッパースキーマ。サーバー側は Hono のままで、
@@ -65,6 +67,24 @@ export const api = makeApi([
     alias: 'deleteCategory',
     description: 'カテゴリを削除 (所属小説は未分類に戻る)',
     response: z.object({ id: z.string() }),
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/categories/reorder',
+    alias: 'reorderCategories',
+    description: 'カテゴリの並び替え',
+    parameters: [{ name: 'body', type: 'Body', schema: ReorderSchema }],
+    response: z.array(CategorySchema),
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/novels/arrangement',
+    alias: 'arrangeNovels',
+    description: '小説の整理 (カテゴリ移動 + 並び替え) を保存',
+    parameters: [{ name: 'body', type: 'Body', schema: ArrangeNovelsSchema }],
+    response: z.object({ ok: z.boolean() }),
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
 

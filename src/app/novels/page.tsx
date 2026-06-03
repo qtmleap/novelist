@@ -1,7 +1,7 @@
 'use client'
 
 import { useSuspenseQuery } from '@tanstack/react-query'
-import { SquarePen } from 'lucide-react'
+import { ArrowDownUp, SquarePen } from 'lucide-react'
 import { EmptyNovels } from '@/components/novel/EmptyNovels'
 import { NovelCard } from '@/components/novel/NovelCard'
 import { NovelSkeletonList } from '@/components/novel/NovelSkeleton'
@@ -51,19 +51,29 @@ function NovelListContent() {
           <h1 className='text-xl font-semibold'>小説一覧</h1>
           <p className='mt-0.5 text-sm text-muted-foreground'>AI が自動生成した小説の一覧です。</p>
         </div>
-        {editAllowed ? (
-          <Button asChild size='sm' className='[&_svg]:size-5!'>
-            <a href={routes.novels.new}>
+        <div className='flex items-center gap-2'>
+          {editAllowed && novels.length > 0 && (
+            <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
+              <a href={routes.novels.organize}>
+                <ArrowDownUp />
+                整理
+              </a>
+            </Button>
+          )}
+          {editAllowed ? (
+            <Button asChild size='sm' className='[&_svg]:size-5!'>
+              <a href={routes.novels.new}>
+                <SquarePen />
+                新規作成
+              </a>
+            </Button>
+          ) : (
+            <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
               <SquarePen />
               新規作成
-            </a>
-          </Button>
-        ) : (
-          <Button size='sm' className='[&_svg]:size-5!' disabled title='ログインが必要です'>
-            <SquarePen />
-            新規作成
-          </Button>
-        )}
+            </Button>
+          )}
+        </div>
       </div>
 
       {novels.length === 0 ? (

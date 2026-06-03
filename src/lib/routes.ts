@@ -2,6 +2,7 @@ export const routes = {
   novels: {
     list: '/novels',
     new: '/novels/new',
+    organize: '/novels/organize',
     detail: (id: string) => `/novels/${id}`,
     edit: (id: string) => `/novels/${id}/edit`,
     chapter: (id: string, number: number) => `/novels/${id}/chapters/${number}`

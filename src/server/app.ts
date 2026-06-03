@@ -12,6 +12,7 @@ import { getEnv, getPrisma } from '@/lib/db'
 import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
 import { buildCastForGemini, buildChapterPayload, buildRelationsForGemini } from '@/lib/novel/chapter-payload'
 import {
+  arrangeNovels,
   createCategory,
   createNovel,
   deleteCategory,
@@ -20,6 +21,7 @@ import {
   listCategories,
   listNovels,
   renameCategory,
+  reorderCategories,
   saveOutline,
   stopGenerationJob,
   updateNovel,
@@ -27,12 +29,14 @@ import {
 } from '@/lib/novel/repository'
 import { CreateCharacterSchema } from '@/schemas/character.dto'
 import {
+  ArrangeNovelsSchema,
   CreateCategorySchema,
   CreateNovelSchema,
   GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
-  OutlineSchema
+  OutlineSchema,
+  ReorderSchema
 } from '@/schemas/novel.dto'
 import { readAuthEmail, requireAuth } from '@/server/auth'
 
@@ -143,6 +147,17 @@ export const app = new Hono()
       await prisma.$disconnect()
     }
   })
+  // 整理ページの配置保存 (カテゴリ移動 + 並び替え)。:id ルートより前に置く (static 優先だが念のため)。
+  .put('/novels/arrangement', requireAuth, zValidator('json', ArrangeNovelsSchema), async (c) => {
+    const input = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      await arrangeNovels(prisma, input.groups)
+      return c.json({ ok: true })
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
 
   // ── Categories (ユーザー作成のフォルダ式カテゴリ) ──────────────────────
   .get('/categories', async (c) => {
@@ -160,6 +175,16 @@ export const app = new Hono()
     try {
       const category = await createCategory(prisma, input.name)
       return c.json({ id: category.id, name: category.name, novel_count: 0 }, 201)
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+  .put('/categories/reorder', requireAuth, zValidator('json', ReorderSchema), async (c) => {
+    const input = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      const categories = await reorderCategories(prisma, input.ids)
+      return c.json(categories.map((cat) => ({ id: cat.id, name: cat.name, novel_count: cat._count.novels })))
     } finally {
       await prisma.$disconnect()
     }
