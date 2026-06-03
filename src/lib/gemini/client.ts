@@ -201,7 +201,7 @@ function buildWritingRules(cast: CastMember[] | undefined): string {
   ].join('\n')
 }
 
-function buildStyleInstruction(style: StyleParams): string {
+function buildStyleInstruction(style: StyleParams, includeEnding = true): string {
   const { pov, tone, ending, age_rating, viewpointChar: vc } = style
 
   let povLine: string
@@ -249,7 +249,8 @@ function buildStyleInstruction(style: StyleParams): string {
 
   const lines = [`視点: ${povLine}`, `文体: ${toneLine}`]
   if (ratingLine) lines.push(`年齢指定: ${ratingLine}`)
-  if (endingLine) lines.push(`結末: ${endingLine}`)
+  // 結末は章立て時にだけ渡す。本文は章立て(概要)経由で結末に沿うので再注入しない。
+  if (includeEnding && endingLine) lines.push(`結末: ${endingLine}`)
   return lines.join('\n')
 }
 
@@ -268,7 +269,6 @@ export function buildOutlinePrompt(
 
   return `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
 
-タイトル: ${novel.title}
 ジャンル: ${novel.genre}
 世界観・設定: ${novel.setting}
 章数: ${novel.num_chapters}
@@ -387,7 +387,6 @@ export async function regenerateOutlineChapter(
   const prompt = `あなたはプロの小説家です。既存の章立てのうち、指定された 1 章だけを書き直してください。
 
 【作品情報】
-タイトル: ${novel.title}
 ジャンル: ${novel.genre}
 世界観・設定: ${novel.setting}
 章数: ${novel.num_chapters}
@@ -503,7 +502,8 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
           .map((c) => `【第${c.chapter_number}章 本文】\n${c.content}`)
           .join('\n\n')
 
-  const styleInstruction = buildStyleInstruction(style)
+  // 本文では結末指示を渡さない (章立て側に結末が織り込まれているため)。
+  const styleInstruction = buildStyleInstruction(style, false)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
   const writingRules = buildWritingRules(cast)
@@ -516,7 +516,7 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
   const positionLine = `現在執筆中: 第${chapterNumber}章 / 全${totalChapters}章`
 
   const sections: string[] = [
-    `【作品情報】\nタイトル: ${novel.title}\nジャンル: ${novel.genre}\n世界観・設定: ${novel.setting}`,
+    `【作品情報】\nジャンル: ${novel.genre}\n世界観・設定: ${novel.setting}`,
     `【文体・視点】\n${styleInstruction}`,
     castSection,
     relationsSection,

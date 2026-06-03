@@ -70,12 +70,12 @@ type Props = {
 function ScopeTag({ scope }: { scope: 'both' | 'outline' | 'body' }) {
   const scopes = scope === 'both' ? (['outline', 'body'] as const) : ([scope] as const)
   return (
-    <>
+    <span className='inline-flex gap-1'>
       {scopes.map((s) => (
         <Badge
           key={s}
           className={cn(
-            'ml-1.5 align-middle border-transparent text-xs font-medium',
+            'border-transparent text-xs font-medium',
             s === 'outline'
               ? 'bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300'
               : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
@@ -84,7 +84,7 @@ function ScopeTag({ scope }: { scope: 'both' | 'outline' | 'body' }) {
           {s === 'outline' ? '章立て' : '本文'}
         </Badge>
       ))}
-    </>
+    </span>
   )
 }
 
@@ -192,10 +192,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             name='title'
             render={({ field }) => (
               <FormItem className='space-y-2'>
-                <FormLabel>
-                  タイトル
-                  <ScopeTag scope='both' />
-                </FormLabel>
+                <FormLabel>タイトル</FormLabel>
                 <FormControl>
                   <Input placeholder='例: 星降る王国の伝説' {...field} />
                 </FormControl>
@@ -538,7 +535,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                 <FormItem className='space-y-2'>
                   <FormLabel>
                     エンディング
-                    <ScopeTag scope='both' />
+                    <ScopeTag scope='outline' />
                   </FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
