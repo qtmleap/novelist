@@ -2,13 +2,14 @@ import { makeApi, Zodios, type ZodiosOptions } from '@zodios/core'
 import { z } from 'zod'
 import { CharacterSchema, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
+  ArrangeNovelsSchema,
   CategorySchema,
+  ChapterVersionSchema,
   CreateCategorySchema,
   CreateNovelSchema,
   GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
-  ArrangeNovelsSchema,
   NovelSchema,
   NovelWithChaptersSchema,
   OutlineSchema,
@@ -174,6 +175,14 @@ export const api = makeApi([
     alias: 'getChapterPrompt',
     description: '本文生成時に実際に送ったプロンプト (最新 version)。未保存の章は null',
     response: ChapterPromptSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'get',
+    path: '/api/novels/:id/chapters/:number/versions',
+    alias: 'getChapterVersions',
+    description: '章の生成履歴 (全 version, 新しい順)',
+    response: z.array(ChapterVersionSchema),
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   {

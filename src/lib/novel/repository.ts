@@ -90,6 +90,15 @@ export async function saveChapter(
   })
 }
 
+// 指定章の全 version を新しい順で返す (生成履歴の閲覧用)。
+export async function listChapterVersions(prisma: PrismaClient, novelId: string, chapterNumber: number) {
+  return prisma.chapter.findMany({
+    where: { novel_id: novelId, chapter_number: chapterNumber },
+    orderBy: { version: 'desc' },
+    select: { id: true, version: true, title: true, content: true, prompt: true, created_at: true }
+  })
+}
+
 export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
   const novel = await prisma.novel.findUnique({
     where: { id },
