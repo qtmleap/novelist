@@ -89,9 +89,14 @@ model CharacterStage {
   character_id    String
   position        Int       @default(0)
   label           String
+  // 名前・性別は不変。それ以外は空文字ならベース継承、入力があればその段階で上書き。
+  age             String    @default("")
+  occupation      String    @default("")
   appearance      String    @default("")
-  description     String    @default("")
+  first_person    String    @default("")
+  address_others  String    @default("")
   speech_examples String    @default("[]")
+  description     String    @default("")
   character       Character @relation(fields: [character_id], references: [id], onDelete: Cascade)
 
   @@index([character_id])
