@@ -4,13 +4,13 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2, Plus, Save, Trash2, X } from 'lucide-react'
 import { type Resolver, useFieldArray, useForm } from 'react-hook-form'
 import { z } from 'zod'
+import { AddressSuggestions } from '@/components/AddressSuggestions'
 import { Button } from '@/components/ui/button'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import {
-  ADDRESS_STYLES,
   type CharacterVariantInput,
   CharacterVariantInputSchema,
   FIRST_PERSON_OPTIONS,
@@ -160,20 +160,10 @@ export function VariantForm({ defaultValues, submitLabel, onSubmit, onCancel, is
           render={({ field }) => (
             <FormItem className='space-y-2'>
               <FormLabel>他者の呼び方</FormLabel>
-              <Select value={field.value} onValueChange={field.onChange}>
-                <FormControl>
-                  <SelectTrigger className='w-full sm:w-52'>
-                    <SelectValue placeholder='ベース継承' />
-                  </SelectTrigger>
-                </FormControl>
-                <SelectContent>
-                  {ADDRESS_STYLES.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <FormControl>
+                <Input className='sm:w-52' maxLength={500} placeholder='ベース継承（自由入力可）' {...field} />
+              </FormControl>
+              <AddressSuggestions value={field.value} onPick={field.onChange} />
               <FormMessage />
             </FormItem>
           )}

@@ -13,7 +13,12 @@ import {
 } from '@/lib/character/repository'
 import { getEnv, getPrisma } from '@/lib/db'
 import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
-import { buildCastForGemini, buildChapterPayload, buildRelationsForGemini } from '@/lib/novel/chapter-payload'
+import {
+  buildCastForGemini,
+  buildChapterPayload,
+  buildRelationsForGemini,
+  viewpointCharFor
+} from '@/lib/novel/chapter-payload'
 import {
   arrangeNovels,
   createCategory,
@@ -336,15 +341,12 @@ export const app = new Hono()
       if (!novel) return c.json({ error: 'not_found' }, 404)
 
       const env = getEnv()
-      const povChar = novel.pov_character_id
-        ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
-        : undefined
       const style = {
         pov: novel.pov,
         tone: novel.tone,
         age_rating: novel.age_rating,
         ending: novel.ending,
-        viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
+        viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
       }
       const cast = buildCastForGemini(novel.character_links)
       const relations = buildRelationsForGemini(novel.relations)
@@ -422,15 +424,12 @@ export const app = new Hono()
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
 
-      const povChar = novel.pov_character_id
-        ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
-        : undefined
       const style = {
         pov: novel.pov,
         tone: novel.tone,
         age_rating: novel.age_rating,
         ending: novel.ending,
-        viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
+        viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
       }
       const cast = buildCastForGemini(novel.character_links)
       const relations = buildRelationsForGemini(novel.relations)
@@ -504,15 +503,12 @@ export const app = new Hono()
         if (!parsedOutline.success) return c.json({ error: 'invalid_outline' }, 500)
 
         const env = getEnv()
-        const povChar = novel.pov_character_id
-          ? novel.character_links.find((l) => l.character_id === novel.pov_character_id)?.character
-          : undefined
         const style = {
           pov: novel.pov,
           tone: novel.tone,
           age_rating: novel.age_rating,
           ending: novel.ending,
-          viewpointChar: povChar ? { name: povChar.name, first_person: povChar.first_person } : undefined
+          viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
         }
         const cast = buildCastForGemini(novel.character_links)
         const relations = buildRelationsForGemini(novel.relations)
