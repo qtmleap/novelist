@@ -122,6 +122,10 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   // run() を完走できないので、payload も storage に格納する。
   private payload: StartChapterGenPayload | null = null
 
+  // run() が実行中か (in-memory のみ。DO インスタンス内での二重起動・buffer リセットのレース防止用)。
+  // evict で消えても false に戻るだけなので永続化しない。
+  private running = false
+
   constructor(state: DurableObjectState, env: Env) {
     super(state, env)
     void state.blockConcurrencyWhile(async () => {
@@ -143,6 +147,8 @@ export class ChapterGenerationDO extends DurableObject<Env> {
 
   // 生成開始 (idempotent: streaming 中なら no-op、done なら新しい生成で上書き)
   async start(payload: StartChapterGenPayload): Promise<{ status: 'started' | 'already_streaming' }> {
+    // run() が生きている間は触らない (buffer リセットや二重 Gemini 呼び出しのレースを防ぐ)。
+    if (this.running) return { status: 'already_streaming' }
     if (this.phase === 'streaming') {
       // DO が evict されると run() の Promise が静かに失われ、phase だけ 'streaming' のまま残ることがある。
       // 一定時間進捗が無いものは stale 扱いで再起動させる。生きてる run() がたまたま残っていた場合は
@@ -174,7 +180,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   async alarm() {
     if (this.phase !== 'streaming') return
     const sinceProgress = Date.now() - this.lastProgressAt
-    if (sinceProgress > STALE_STREAMING_MS && this.payload !== null) {
+    if (sinceProgress > STALE_STREAMING_MS && this.payload !== null && !this.running) {
       // run() の Promise が消えているはずなので新しく起動。buffer 等は start() と同じ初期化を行う。
       this.buffer = ''
       this.errMsg = null
@@ -198,7 +204,10 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     // ここで先に更新しておくことで、ほぼ同時に複数 subscriber が来ても run() が二重起動しない。
     // (実際の run() 再開と storage への永続化は priming 側に委ねる)
     const needsSelfHeal =
-      this.phase === 'streaming' && Date.now() - this.lastProgressAt > STALE_STREAMING_MS && this.payload !== null
+      this.phase === 'streaming' &&
+      Date.now() - this.lastProgressAt > STALE_STREAMING_MS &&
+      this.payload !== null &&
+      !this.running
     if (needsSelfHeal) {
       this.buffer = ''
       this.errMsg = null
@@ -281,7 +290,18 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     }
   }
 
+  // 二重起動ガード。start()/alarm()/openStream() が並行して呼んでも run 本体は 1 つだけ走る。
   private async run() {
+    if (this.running) return
+    this.running = true
+    try {
+      await this.runInner()
+    } finally {
+      this.running = false
+    }
+  }
+
+  private async runInner() {
     const encoder = new TextEncoder()
     const payload = this.payload
     if (!payload) {
