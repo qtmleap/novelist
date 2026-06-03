@@ -218,17 +218,6 @@ export default function ChapterDetailPage() {
             <div className='mt-2'>
               <ChapterMeta chars={displayContent.length} cost={cost} />
             </div>
-            <Button
-              type='button'
-              variant='outline'
-              size='sm'
-              disabled={busy}
-              onClick={handleViewPrompt}
-              className='mt-3 [&_svg]:size-4!'
-            >
-              <FileText />
-              生成プロンプトを見る
-            </Button>
           </div>
 
           <article className='whitespace-pre-wrap text-sm leading-relaxed text-foreground/90'>
@@ -259,6 +248,20 @@ export default function ChapterDetailPage() {
               className={cn(!nextHref && 'invisible')}
             >
               {nextHref ? <Link href={nextHref}>第 {chapterNumber + 1} 章 →</Link> : <span />}
+            </Button>
+          </div>
+
+          <div className='border-t pt-6'>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={busy}
+              onClick={handleViewPrompt}
+              className='[&_svg]:size-4!'
+            >
+              <FileText />
+              生成プロンプトを見る
             </Button>
           </div>
 
