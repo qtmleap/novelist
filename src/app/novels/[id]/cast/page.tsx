@@ -31,7 +31,7 @@ function CastContent({ id }: { id: string }) {
 
   const defaultValues: SaveCastInput = {
     pov_character_id: novel.pov_character_id,
-    character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role })),
+    character_links: novel.cast.map((c) => ({ character_id: c.character_id, role: c.role, variant_id: c.variant_id })),
     relations: novel.relations.map((r) => ({
       source_character_id: r.source_character_id,
       target_character_id: r.target_character_id,
@@ -50,6 +50,7 @@ function CastContent({ id }: { id: string }) {
         </p>
       </div>
       <CastForm
+        novelId={id}
         pov={novel.pov}
         defaultValues={defaultValues}
         isSubmitting={saveMutation.isPending}

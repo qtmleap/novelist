@@ -105,6 +105,9 @@ model NovelCharacter {
   novel_id     String
   character_id String
   role         String    @default("")
+  // この小説で使う Character のバリエーション。null = ベース (Character 本体) を使う。
+  // CharacterVariant への FK は張らない (variant 削除時はベースにフォールバックさせたいため)。
+  variant_id   String?
   novel        Novel     @relation(fields: [novel_id], references: [id], onDelete: Cascade)
   character    Character @relation(fields: [character_id], references: [id], onDelete: Cascade)
 
