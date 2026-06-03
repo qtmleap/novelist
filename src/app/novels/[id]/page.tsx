@@ -138,21 +138,18 @@ function NovelTotals({
   const totalChars = chapters.reduce((sum, c) => sum + (c.done ? c.content.length : 0), 0)
   if (totalChars === 0 && costs.length === 0) return null
   return (
-    <div className='border-t pt-3'>
-      <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>全体の合計</p>
-      <div className='mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm'>
+    <p className='mt-0.5 flex flex-wrap items-baseline gap-x-4 gap-y-0.5 text-sm text-muted-foreground'>
+      <span>
+        {'文字数 '}
+        <span className='tabular-nums'>{totalChars.toLocaleString()}</span>
+      </span>
+      {costs.length > 0 && (
         <span>
-          <span className='text-muted-foreground'>文字数 </span>
-          <span className='font-medium tabular-nums'>{totalChars.toLocaleString()}</span>
+          {'コスト '}
+          <span className='tabular-nums'>${totalCostUsd.toFixed(4)} USD</span>
         </span>
-        {costs.length > 0 && (
-          <span>
-            <span className='text-muted-foreground'>コスト </span>
-            <span className='font-medium tabular-nums'>${totalCostUsd.toFixed(4)} USD</span>
-          </span>
-        )}
-      </div>
-    </div>
+      )}
+    </p>
   )
 }
 
@@ -321,7 +318,7 @@ function NovelDetailContent({ id }: { id: string }) {
     <div className='space-y-6'>
       <PageHeader crumbs={[{ label: '小説一覧', href: routes.novels.list }, { label: novel.title }]} />
 
-      <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
+      <div className='flex flex-col gap-3'>
         <div className='min-w-0'>
           <p className='text-xs font-medium uppercase tracking-wider text-muted-foreground'>{novel.genre}</p>
           <h1 className='mt-1 text-xl font-semibold'>{novel.title}</h1>
@@ -331,8 +328,11 @@ function NovelDetailContent({ id }: { id: string }) {
             <span className='tabular-nums'>{novel.num_chapters}</span>
             {' 章 生成済み'}
           </p>
+          {!isGenerating && (
+            <NovelTotals chapters={chapters} costs={novel.generation_costs} totalCostUsd={novel.total_cost_usd} />
+          )}
         </div>
-        <div className='flex flex-wrap items-center gap-2 sm:shrink-0'>
+        <div className='flex flex-wrap items-center justify-end gap-2'>
           <Button
             type='button'
             size='sm'
@@ -489,10 +489,6 @@ function NovelDetailContent({ id }: { id: string }) {
             if (targets.length > 0) handleStartGeneration(targets, asGeminiModel(novel.writer_model))
           }}
         />
-      )}
-
-      {!isGenerating && (
-        <NovelTotals chapters={chapters} costs={novel.generation_costs} totalCostUsd={novel.total_cost_usd} />
       )}
     </div>
   )
