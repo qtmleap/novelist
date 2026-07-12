@@ -10,7 +10,9 @@
     "CLOUDFLARE_ACCOUNT_ID": "${localEnv:CLOUDFLARE_ACCOUNT_ID}",
     "WAKATIME_API_KEY": "${localEnv:WAKATIME_API_KEY}",
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
-    "UV_LINK_MODE": "copy"
+    "UV_LINK_MODE": "copy",
+    "ANTHROPIC_BASE_URL": "${localEnv:ANTHROPIC_BASE_URL}",
+    "ANTHROPIC_AUTH_TOKEN": "${localEnv:ANTHROPIC_AUTH_TOKEN}"
   },
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
@@ -42,23 +44,17 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        "Anthropic.claude-code",
         "EditorConfig.EditorConfig",
-        "GitHub.copilot",
-        "GitHub.copilot-chat",
         "Lokalise.i18n-ally",
         "PKief.material-icon-theme",
         "Prisma.prisma",
         "antfu.file-nesting",
-        "bierner.github-markdown-preview",
         "bierner.markdown-preview-github-styles",
         "biomejs.biome",
-        "eamodio.gitlens",
         "ms-vscode.vscode-typescript-next",
         "pHofer94.vscode-taskviewexplorer",
         "redhat.vscode-yaml",
-        "tamasfe.even-better-toml",
-        "vsls-contrib.gitdoc"
+        "tamasfe.even-better-toml"
       ],
       "settings": {
       }
