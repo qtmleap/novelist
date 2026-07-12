@@ -14,7 +14,8 @@ const queryClient = new QueryClient()
 const WIDE_ROUTE = /^\/novels\/[^/]+\/cast$/
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const pathname = usePathname()
+  const rawPathname = usePathname()
+  const pathname = rawPathname === null ? '' : rawPathname
   const wide = WIDE_ROUTE.test(pathname)
 
   return (

@@ -134,7 +134,9 @@ function NovelEditContent({ id }: { id: string }) {
 }
 
 export default function NovelEditPage() {
-  const { id } = useParams<{ id: string }>()
+  const params = useParams<{ id: string }>()
+  if (!params) return null
+  const { id } = params
   return (
     <div className='space-y-6'>
       <PageHeader

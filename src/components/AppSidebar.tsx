@@ -29,7 +29,8 @@ const NAV_ITEMS = [
 ]
 
 export function AppSidebar() {
-  const pathname = usePathname()
+  const rawPathname = usePathname()
+  const pathname = rawPathname === null ? '' : rawPathname
   const { isMobile, setOpenMobile } = useSidebar()
   const auth = useAuth()
 
