@@ -1,7 +1,7 @@
 'use client'
 
 import { useMutation, useSuspenseQuery } from '@tanstack/react-query'
-import { Copy, Loader2, Pencil } from 'lucide-react'
+import { Copy, Layers, Loader2, Pencil } from 'lucide-react'
 import { useParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import { PageHeader } from '@/components/PageHeader'
@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import { formatAge } from '@/lib/character/format'
 import { routes } from '@/lib/routes'
 import type { Character } from '@/schemas/character.dto'
 
@@ -79,6 +80,12 @@ function CharacterDetailContent({ id }: { id: string }) {
             {copyMutation.isPending ? <Loader2 className='animate-spin' /> : <Copy />}
             コピー
           </Button>
+          <Button asChild size='sm' variant='outline' className='[&_svg]:size-5!'>
+            <a href={routes.characters.variants(id)}>
+              <Layers />
+              バリエーション
+            </a>
+          </Button>
           {editAllowed ? (
             <Button asChild size='sm' className='[&_svg]:size-5!'>
               <a href={routes.characters.edit(id)}>
@@ -97,7 +104,7 @@ function CharacterDetailContent({ id }: { id: string }) {
 
       <div className='divide-y border-y'>
         {character.gender && <Field label='性別'>{character.gender}</Field>}
-        {character.age && <Field label='年齢'>{character.age}</Field>}
+        {character.age && <Field label='年齢'>{formatAge(character.age)}</Field>}
         {character.occupation && <Field label='職業'>{character.occupation}</Field>}
         {character.appearance && <Field label='外見'>{character.appearance}</Field>}
         {character.first_person && <Field label='一人称'>{character.first_person}</Field>}
@@ -116,12 +123,50 @@ function CharacterDetailContent({ id }: { id: string }) {
         )}
         {character.description && <Field label='説明'>{character.description}</Field>}
       </div>
+
+      {character.variants.length > 0 && (
+        <div className='space-y-2'>
+          <div>
+            <h2 className='text-sm font-semibold'>バリエーション</h2>
+            <p className='mt-0.5 text-xs text-muted-foreground'>表示されていない項目はベースの設定を引き継ぎます。</p>
+          </div>
+          <div className='divide-y border-y'>
+            {character.variants.map((s) => (
+              <div key={s.id} className='py-3'>
+                <p className='text-sm font-medium'>{s.label}</p>
+                <div className='mt-1 divide-y'>
+                  {s.age && <Field label='年齢'>{formatAge(s.age)}</Field>}
+                  {s.occupation && <Field label='職業'>{s.occupation}</Field>}
+                  {s.appearance && <Field label='外見'>{s.appearance}</Field>}
+                  {s.first_person && <Field label='一人称'>{s.first_person}</Field>}
+                  {s.address_others && <Field label='他者の呼び方'>{s.address_others}</Field>}
+                  {s.speech_examples.length > 0 && (
+                    <Field label='口調の例'>
+                      <ul className='space-y-1'>
+                        {s.speech_examples.map((ex, i) => (
+                          // biome-ignore lint/suspicious/noArrayIndexKey: 表示専用で順序固定
+                          <li key={i} className='text-foreground/90'>
+                            「{ex}」
+                          </li>
+                        ))}
+                      </ul>
+                    </Field>
+                  )}
+                  {s.description && <Field label='説明'>{s.description}</Field>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </>
   )
 }
 
 export default function CharacterDetailPage() {
-  const { id } = useParams<{ id: string }>()
+  const params = useParams<{ id: string }>()
+  if (!params) return null
+  const { id } = params
   return (
     <div className='space-y-6'>
       <PageHeader crumbs={[{ label: '登場人物一覧', href: routes.characters.list }, { label: '詳細' }]} />
