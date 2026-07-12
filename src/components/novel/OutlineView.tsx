@@ -1,9 +1,10 @@
 'use client'
 
-import { BookMarked, Check, ChevronRight, Loader2, Pencil, X } from 'lucide-react'
+import { BookMarked, Check, ChevronRight, Loader2, Pencil, Users, X } from 'lucide-react'
 import Link from 'next/link'
 import { type ReactNode, useEffect, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -206,6 +207,16 @@ export function OutlineView({
                   <p className='mt-0.5 text-xs italic leading-relaxed text-muted-foreground/60'>
                     章立てがまだ生成されていません
                   </p>
+                )}
+                {hasOutlineEntry && ch.characters.length > 0 && (
+                  <div className='mt-1.5 flex flex-wrap items-center gap-1'>
+                    <Users className='size-3.5 shrink-0 text-muted-foreground' aria-label='登場人物' />
+                    {ch.characters.map((name) => (
+                      <Badge key={name} variant='secondary' className='font-normal'>
+                        {name}
+                      </Badge>
+                    ))}
+                  </div>
                 )}
                 {done && chapterData && (
                   <div className='mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
