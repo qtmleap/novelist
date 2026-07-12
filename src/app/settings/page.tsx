@@ -1,10 +1,11 @@
 'use client'
 
 import { useAtom } from 'jotai'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { PageHeader } from '@/components/PageHeader'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Skeleton } from '@/components/ui/skeleton'
 import { GEMINI_MODELS, type GeminiModel, GeminiModelSchema, MODEL_META } from '@/schemas/novel.dto'
 import { editorModelAtom, writerModelAtom } from '@/store/atoms'
 
@@ -35,7 +36,21 @@ function ModelMeta({ model }: { model: GeminiModel }) {
   )
 }
 
-export default function SettingsPage() {
+function ModelSelectSkeleton() {
+  return (
+    <div className='space-y-4'>
+      {[0, 1].map((i) => (
+        <div key={i} className='space-y-1.5'>
+          <Skeleton className='h-4 w-40' />
+          <Skeleton className='h-9 w-72' />
+          <Skeleton className='h-3 w-48' />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ModelSettings() {
   const [editorModel, setEditorModel] = useAtom(editorModelAtom)
   const [writerModel, setWriterModel] = useAtom(writerModelAtom)
   const [saved, setSaved] = useState(false)
@@ -58,6 +73,56 @@ export default function SettingsPage() {
   }
 
   return (
+    <>
+      <div className='space-y-4'>
+        <div className='space-y-1.5'>
+          <Label htmlFor='editor-model'>Editor モデル（章立ての生成）</Label>
+          <Select value={editorModel} onValueChange={handleEditorChange}>
+            <SelectTrigger id='editor-model' className='w-72'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {GEMINI_MODELS.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {m}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <ModelMeta model={editorModel} />
+        </div>
+
+        <div className='space-y-1.5'>
+          <Label htmlFor='writer-model'>Writer モデル（本文の生成）</Label>
+          <Select value={writerModel} onValueChange={handleWriterChange}>
+            <SelectTrigger id='writer-model' className='w-72'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {GEMINI_MODELS.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {m}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <ModelMeta model={writerModel} />
+        </div>
+      </div>
+
+      {saved && <p className='text-sm text-muted-foreground'>保存しました</p>}
+    </>
+  )
+}
+
+export default function SettingsPage() {
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
+  return (
     <div className='space-y-6'>
       <PageHeader crumbs={[{ label: '設定' }]} />
 
@@ -74,43 +139,7 @@ export default function SettingsPage() {
           <p className='mt-0.5 text-sm text-muted-foreground'>用途ごとに使用するモデルを選択します。</p>
         </div>
 
-        <div className='space-y-4'>
-          <div className='space-y-1.5'>
-            <Label htmlFor='editor-model'>Editor モデル（章立ての生成）</Label>
-            <Select value={editorModel} onValueChange={handleEditorChange}>
-              <SelectTrigger id='editor-model' className='w-72'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {GEMINI_MODELS.map((m) => (
-                  <SelectItem key={m} value={m}>
-                    {m}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <ModelMeta model={editorModel} />
-          </div>
-
-          <div className='space-y-1.5'>
-            <Label htmlFor='writer-model'>Writer モデル（本文の生成）</Label>
-            <Select value={writerModel} onValueChange={handleWriterChange}>
-              <SelectTrigger id='writer-model' className='w-72'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {GEMINI_MODELS.map((m) => (
-                  <SelectItem key={m} value={m}>
-                    {m}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <ModelMeta model={writerModel} />
-          </div>
-        </div>
-
-        {saved && <p className='text-sm text-muted-foreground'>保存しました</p>}
+        {mounted ? <ModelSettings /> : <ModelSelectSkeleton />}
       </div>
     </div>
   )

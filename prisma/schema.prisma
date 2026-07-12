@@ -12,10 +12,11 @@ model Novel {
   id              String                   @id @default(uuid())
   title           String
   genre           String
-  characters      String
   setting         String
   num_chapters     Int
   target_chars     Int                      @default(4000)
+  // 章立て(あらすじ)の各章 summary の概算文字数。本文の target_chars とは別。
+  outline_summary_chars Int                 @default(300)
   pov              String                   @default("一人称")
   tone             String                   @default("一般文芸")
   age_rating       String                   @default("全年齢")
@@ -25,12 +26,42 @@ model Novel {
   editor_model     String                   @default("gemini-3.1-flash-lite")
   writer_model     String                   @default("gemini-3.1-flash-lite")
   outline          String?
+  // ユーザーが作成するカテゴリ (フォルダ式)。未割り当て (= 未分類) は null。
+  category_id      String?
+  category         Category?                @relation(fields: [category_id], references: [id], onDelete: SetNull)
+  // 一覧でのユーザー手動並び順。未設定 (既存行) は 0 で、表示は created_at をタイブレークに使う。
+  position         Int                      @default(0)
   created_at      DateTime                 @default(now())
   updated_at      DateTime                 @updatedAt
   chapters         Chapter[]
   character_links  NovelCharacter[]
   relations        NovelCharacterRelation[]
   generation_costs ChapterGenerationCost[]
+  generation_job   NovelGenerationJob?
+
+  @@index([category_id])
+}
+
+// ユーザーが自由に作成するカテゴリ。小説を 1 つだけ所属させる (フォルダ式)。
+model Category {
+  id         String   @id @default(uuid())
+  name       String   @unique
+  // メニューでのユーザー手動並び順。未設定 (既存行) は 0 で、表示は name をタイブレークに使う。
+  position   Int      @default(0)
+  created_at DateTime @default(now())
+  novels     Novel[]
+}
+
+model NovelGenerationJob {
+  id         String   @id @default(uuid())
+  novel_id   String   @unique
+  novel      Novel    @relation(fields: [novel_id], references: [id], onDelete: Cascade)
+  status     String
+  pending    String
+  current    Int?
+  model      String
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 }
 
 model Character {
@@ -49,12 +80,36 @@ model Character {
   novel_links         NovelCharacter[]
   relations_as_source NovelCharacterRelation[] @relation("RelationSource")
   relations_as_target NovelCharacterRelation[] @relation("RelationTarget")
+  variants            CharacterVariant[]
+}
+
+// キャラクターのバリエーション (別の姿・状態)。名前・性別は不変で、それ以外を上書き保持する。
+// 空文字のフィールドはベース (Character) の値を継承する想定 (マージは生成時に行う)。
+model CharacterVariant {
+  id              String    @id @default(uuid())
+  character_id    String
+  position        Int       @default(0)
+  label           String
+  // 名前・性別は不変。それ以外は空文字ならベース継承、入力があればこのバリエーションで上書き。
+  age             String    @default("")
+  occupation      String    @default("")
+  appearance      String    @default("")
+  first_person    String    @default("")
+  address_others  String    @default("")
+  speech_examples String    @default("[]")
+  description     String    @default("")
+  character       Character @relation(fields: [character_id], references: [id], onDelete: Cascade)
+
+  @@index([character_id])
 }
 
 model NovelCharacter {
   novel_id     String
   character_id String
   role         String    @default("")
+  // この小説で使う Character のバリエーション。null = ベース (Character 本体) を使う。
+  // CharacterVariant への FK は張らない (variant 削除時はベースにフォールバックさせたいため)。
+  variant_id   String?
   novel        Novel     @relation(fields: [novel_id], references: [id], onDelete: Cascade)
   character    Character @relation(fields: [character_id], references: [id], onDelete: Cascade)
 
@@ -98,6 +153,9 @@ model Chapter {
   version        Int      @default(1)
   title          String?
   content        String
+  // 生成時に Gemini へ実際に送ったプロンプト全文。version ごとに 1:1。
+  // この列追加より前に生成された章は null (フロントは「未保存」と表示する)。
+  prompt         String?
   created_at     DateTime @default(now())
 
   novel Novel @relation(fields: [novel_id], references: [id], onDelete: Cascade)
