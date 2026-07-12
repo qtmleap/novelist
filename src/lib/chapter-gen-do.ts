@@ -61,6 +61,7 @@ export type StartChapterGenPayload = {
     genre: string
     setting: string
     num_chapters: number
+    outline_summary_chars: number
     notes: string
   }
   outline: Outline

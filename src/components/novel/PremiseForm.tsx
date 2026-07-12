@@ -23,6 +23,7 @@ import {
   DEFAULT_AGE_RATING,
   DEFAULT_EDITOR_MODEL,
   DEFAULT_ENDING,
+  DEFAULT_OUTLINE_SUMMARY_CHARS,
   DEFAULT_POV,
   DEFAULT_TARGET_CHARS,
   DEFAULT_TONE,
@@ -30,6 +31,7 @@ import {
   ENDING_OPTIONS,
   GEMINI_MODELS,
   GeminiModelSchema,
+  OUTLINE_SUMMARY_LENGTH_OPTIONS,
   POV_OPTIONS,
   TONE_OPTIONS
 } from '@/schemas/novel.dto'
@@ -94,6 +96,7 @@ export const EMPTY_DEFAULTS: CreateNovelInput = {
   setting: '',
   num_chapters: 3,
   target_chars: DEFAULT_TARGET_CHARS,
+  outline_summary_chars: DEFAULT_OUTLINE_SUMMARY_CHARS,
   pov: DEFAULT_POV,
   tone: DEFAULT_TONE,
   age_rating: DEFAULT_AGE_RATING,
@@ -392,6 +395,35 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                   <p className='text-xs text-muted-foreground'>
                     （目安。2.0 系モデルは長い指定だと途中で切れることがあります）
                   </p>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='outline_summary_chars'
+              render={({ field }) => (
+                <FormItem className='space-y-2'>
+                  <FormLabel>
+                    章立て概要の文字数（1章あたり）
+                    <ScopeTag scope='outline' />
+                  </FormLabel>
+                  <Select value={String(field.value)} onValueChange={(v) => field.onChange(Number(v))}>
+                    <FormControl>
+                      <SelectTrigger className='w-40'>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {OUTLINE_SUMMARY_LENGTH_OPTIONS.map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n.toLocaleString()} 文字
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className='text-xs text-muted-foreground'>（各章のあらすじの長さの目安。概算です）</p>
                   <FormMessage />
                 </FormItem>
               )}

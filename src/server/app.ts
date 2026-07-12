@@ -66,6 +66,7 @@ function serializeNovel(n: {
   setting: string
   num_chapters: number
   target_chars: number
+  outline_summary_chars: number
   pov: string
   tone: string
   age_rating: string
@@ -87,6 +88,7 @@ function serializeNovel(n: {
     setting: n.setting,
     num_chapters: n.num_chapters,
     target_chars: n.target_chars,
+    outline_summary_chars: n.outline_summary_chars,
     pov: n.pov,
     tone: n.tone,
     age_rating: n.age_rating,
@@ -356,6 +358,7 @@ export const app = new Hono()
         genre: novel.genre,
         setting: novel.setting,
         num_chapters: novel.num_chapters,
+        outline_summary_chars: novel.outline_summary_chars,
         notes: novel.notes
       }
 
@@ -438,6 +441,7 @@ export const app = new Hono()
         genre: novel.genre,
         setting: novel.setting,
         num_chapters: novel.num_chapters,
+        outline_summary_chars: novel.outline_summary_chars,
         notes: novel.notes
       }
       const prompt = buildOutlinePrompt(params, style, cast, relations)
@@ -521,6 +525,7 @@ export const app = new Hono()
               genre: novel.genre,
               setting: novel.setting,
               num_chapters: novel.num_chapters,
+              outline_summary_chars: novel.outline_summary_chars,
               notes: novel.notes
             },
             style,

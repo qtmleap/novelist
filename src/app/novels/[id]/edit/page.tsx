@@ -32,6 +32,7 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
     setting: novel.setting,
     num_chapters: novel.num_chapters,
     target_chars: novel.target_chars,
+    outline_summary_chars: novel.outline_summary_chars,
     pov: novel.pov,
     tone: novel.tone,
     age_rating: novel.age_rating,
