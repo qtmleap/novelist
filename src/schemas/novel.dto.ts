@@ -5,6 +5,11 @@ import { z } from 'zod'
 export const CHAPTER_LENGTH_OPTIONS = [2000, 3000, 4000, 6000, 8000] as const
 export const DEFAULT_TARGET_CHARS = 4000
 
+// 章立て(あらすじ)の各章 summary の概算文字数。本文の target_chars とは別物で、
+// 章立て生成プロンプトの「概要は約 N 字」に反映する (概算なので厳密な上限ではない)。
+export const OUTLINE_SUMMARY_LENGTH_OPTIONS = [200, 300, 400, 600] as const
+export const DEFAULT_OUTLINE_SUMMARY_CHARS = 300
+
 // 文体: 視点(POV) と 文体トーン。生成プロンプトに反映する。
 export const POV_OPTIONS = ['一人称', '三人称一元視点', '三人称多元視点', '三人称神視点'] as const
 export const TONE_OPTIONS = ['ライトノベル調', '一般文芸', '文学的', 'やさしい文体'] as const
@@ -123,6 +128,7 @@ export const CreateNovelSchema = z.object({
   setting: z.string().max(4000),
   num_chapters: z.number().int().min(1).max(30),
   target_chars: z.number().int().min(500).max(20000).default(DEFAULT_TARGET_CHARS),
+  outline_summary_chars: z.number().int().min(100).max(2000).default(DEFAULT_OUTLINE_SUMMARY_CHARS),
   pov: z.string().max(30).default(DEFAULT_POV),
   tone: z.string().max(30).default(DEFAULT_TONE),
   age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
@@ -185,7 +191,9 @@ export type ArrangeNovelsInput = z.infer<typeof ArrangeNovelsSchema>
 export const OutlineChapterSchema = z.object({
   chapter_number: z.number().int().min(1),
   title: z.string(),
-  summary: z.string()
+  summary: z.string(),
+  // その章に登場するキャラクター名 (正規のキャスト名と一致)。未生成の旧 outline は空配列。
+  characters: z.array(z.string()).default([])
 })
 export type OutlineChapter = z.infer<typeof OutlineChapterSchema>
 
@@ -227,6 +235,7 @@ export const NovelSchema = z.object({
   setting: z.string(),
   num_chapters: z.number().int(),
   target_chars: z.number().int(),
+  outline_summary_chars: z.number().int(),
   pov: z.string(),
   tone: z.string(),
   age_rating: z.string(),

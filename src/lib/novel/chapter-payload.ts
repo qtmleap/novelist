@@ -167,6 +167,7 @@ export async function buildChapterPayload(
       genre: novel.genre,
       setting: novel.setting,
       num_chapters: novel.num_chapters,
+      outline_summary_chars: novel.outline_summary_chars,
       notes: novel.notes
     },
     outline,

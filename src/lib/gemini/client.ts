@@ -48,6 +48,8 @@ type GeminiNovelParams = {
   genre: string
   setting: string
   num_chapters: number
+  // 章立ての各章 summary の概算文字数 (章立て生成プロンプトに反映)。
+  outline_summary_chars: number
   // ユーザーが PremiseForm の備考欄に書いた追加指示 (任意)。
   notes?: string
 }
@@ -267,6 +269,16 @@ export function buildOutlinePrompt(
   const notesSection = buildNotesSection(novel.notes)
   const extraSections = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
 
+  const castNames = cast && cast.length > 0 ? cast.map((c) => c.name) : []
+  const charactersInstruction =
+    castNames.length > 0
+      ? `各章には、その章に実際に登場するキャラクターを characters 配列で指定してください。名前は次の表記と完全に一致させること: ${castNames.join('、')}。関係性に記載があるだけで、その章に登場しないキャラクターは含めないでください。`
+      : ''
+  const exampleEntry =
+    castNames.length > 0
+      ? '{ "chapter_number": 1, "title": "章のタイトル", "summary": "章の概要", "characters": ["登場キャラ名"] }'
+      : '{ "chapter_number": 1, "title": "章のタイトル", "summary": "章の概要" }'
+
   return `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
 
 ジャンル: ${novel.genre}
@@ -275,16 +287,25 @@ export function buildOutlinePrompt(
 ${styleInstruction}
 ${extraSections ? `\n${extraSections}\n` : ''}
 必ず ${novel.num_chapters} 章分の章立てを JSON 形式で出力してください。
-各章には chapter_number（1 から始まる整数）、title（章のタイトル）、summary（章の概要。200字程度）を含めてください。
+各章には chapter_number（1 から始まる整数）、title（章のタイトル）、summary（章の概要。${novel.outline_summary_chars}字程度）を含めてください。
 登場キャラクター詳細を与えた場合は、各キャラの性格・背景・関係を踏まえた章立てにしてください。
-
+${charactersInstruction ? `${charactersInstruction}\n` : ''}
 出力形式:
 {
   "chapters": [
-    { "chapter_number": 1, "title": "章のタイトル", "summary": "章の概要" },
+    ${exampleEntry},
     ...
   ]
 }`
+}
+
+// モデルが返した各章の characters を、実在するキャスト名だけに絞り込む。
+// 名前ドリフトや幻覚 (関係性にしか居ないキャラ・架空名) を除去し、重複も排除する。
+// キャスト未指定なら characters は意味を持たないので空にする。
+function normalizeChapterCharacters(characters: string[], cast: CastMember[] | undefined): string[] {
+  if (!cast || cast.length === 0) return []
+  const known = new Set(cast.map((c) => c.name))
+  return [...new Set(characters.filter((name) => known.has(name)))]
 }
 
 export async function generateOutline(
@@ -343,12 +364,19 @@ export async function generateOutline(
     throw new Error(`Gemini outline response is not valid JSON: ${text}`)
   }
 
-  const validated = OutlineSchema.safeParse(parsed)
+  // モデルがトップレベルに { chapters: [...] } ではなく配列を直接返すことがあるので吸収する。
+  const candidate = Array.isArray(parsed) ? { chapters: parsed } : parsed
+  const validated = OutlineSchema.safeParse(candidate)
   if (!validated.success) {
     throw new Error(`Gemini outline response failed validation: ${JSON.stringify(validated.error.issues)}`)
   }
 
-  return validated.data
+  return {
+    chapters: validated.data.chapters.map((c) => ({
+      ...c,
+      characters: normalizeChapterCharacters(c.characters, cast)
+    }))
+  }
 }
 
 // 既存 outline の中の特定章だけを書き直す。他の章 (title/summary) はそのまま維持。
@@ -367,7 +395,8 @@ export async function regenerateOutlineChapter(
   const target = existing.chapters.find((c) => c.chapter_number === chapterNumber) ?? {
     chapter_number: chapterNumber,
     title: '',
-    summary: ''
+    summary: '',
+    characters: []
   }
 
   const model = resolveModel(env, modelOverride)
@@ -378,6 +407,16 @@ export async function regenerateOutlineChapter(
   const relationsSection = buildRelationsSection(relations)
   const notesSection = buildNotesSection(novel.notes)
   const extra = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
+
+  const castNames = cast && cast.length > 0 ? cast.map((c) => c.name) : []
+  const charactersInstruction =
+    castNames.length > 0
+      ? `\n- characters には、この章に実際に登場するキャラクターを次の表記と完全一致で指定する: ${castNames.join('、')}。関係性に記載があるだけで登場しないキャラクターは含めない。`
+      : ''
+  const exampleEntry =
+    castNames.length > 0
+      ? `{ "chapter_number": ${chapterNumber}, "title": "...", "summary": "...", "characters": ["登場キャラ名"] }`
+      : `{ "chapter_number": ${chapterNumber}, "title": "...", "summary": "..." }`
 
   const otherChapters = existing.chapters
     .filter((c) => c.chapter_number !== chapterNumber)
@@ -404,10 +443,10 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
 - 章番号は ${chapterNumber} のまま。
 - 物語全体の流れを壊さないように、前後の章と矛盾しない内容にする。
 - 元のタイトルや要約に固執せず、異なる切り口・展開を提案して構わない。
-- summary は 200 字程度。
+- summary は ${novel.outline_summary_chars} 字程度。${charactersInstruction}
 
-出力は以下の JSON 形式 (chapter_number, title, summary のみ) のみ:
-{ "chapter_number": ${chapterNumber}, "title": "...", "summary": "..." }`
+出力は以下の JSON 形式のみ:
+${exampleEntry}`
 
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -453,7 +492,12 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
     throw new Error(`Gemini outline-chapter response failed validation: ${JSON.stringify(validated.error.issues)}`)
   }
   // chapter_number はモデルが取り違える可能性があるので強制的に target に揃える。
-  return { ...validated.data, chapter_number: chapterNumber }
+  // characters は実在キャスト名のみに正規化する。
+  return {
+    ...validated.data,
+    chapter_number: chapterNumber,
+    characters: normalizeChapterCharacters(validated.data.characters, cast)
+  }
 }
 
 export type StreamChapterUsage = {
@@ -504,9 +548,17 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
 
   // 本文では結末指示を渡さない (章立て側に結末が織り込まれているため)。
   const styleInstruction = buildStyleInstruction(style, false)
-  const castSection = buildCastSection(cast)
-  const relationsSection = buildRelationsSection(relations)
-  const writingRules = buildWritingRules(cast)
+
+  // 章立てに characters があれば、その章のキャストだけにキャスト詳細・関係を絞り込む。
+  // 関係は両端ともこの章に登場するペアだけ残す。characters が空 (旧 outline) なら全キャストを使う。
+  const allowed = targetEntry.characters.length > 0 ? new Set(targetEntry.characters) : undefined
+  const scopedCast = allowed && cast ? cast.filter((c) => allowed.has(c.name)) : cast
+  const scopedRelations =
+    allowed && relations ? relations.filter((r) => allowed.has(r.source_name) && allowed.has(r.target_name)) : relations
+
+  const castSection = buildCastSection(scopedCast)
+  const relationsSection = buildRelationsSection(scopedRelations)
+  const writingRules = buildWritingRules(scopedCast)
   // notes は章立て生成時にのみ使う (outline.summary に既に振り分けが乗っているため、
   // 本文生成では全体リストを再注入しない)。
 
@@ -534,6 +586,7 @@ ${sections.join('\n\n')}
 上記の概要に沿って、第${chapterNumber}章の本文を執筆してください。
 本文は日本語で約${targetChars}文字を目安に執筆してください。
 登場キャラクター詳細を与えた場合は、各キャラの「口調の例」と「他者の呼び方」「関係」を必ずセリフに反映してください。
+ただし、キャラクター間の関係に記載があっても、章立て（全体の章立て・本章の概要）に登場しないキャラクターは本章に登場させないでください。
 文章は読者を引き込む描写を心がけ、登場人物の心情や情景を丁寧に描いてください。
 本文のみを出力し、章番号やタイトルは含めないでください。`
 
