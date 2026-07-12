@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers'
 import { PrismaD1 } from '@prisma/adapter-d1'
+import { z } from 'zod'
 import { PrismaClient } from '@/generated/prisma/client'
 import type { Env } from '@/lib/db'
 import {
@@ -9,8 +10,10 @@ import {
   type StreamChapterUsage,
   streamChapter
 } from '@/lib/gemini/client'
+import { buildChapterPayload } from '@/lib/novel/chapter-payload'
 import { saveChapter } from '@/lib/novel/repository'
 import type { GeminiModel, Outline } from '@/schemas/novel.dto'
+import { GeminiModelSchema } from '@/schemas/novel.dto'
 
 // Gemini の finishReason を人向けの日本語メッセージに変換する。
 // 'STOP' 以外がここに届く前提なので 'STOP' は扱わない。
@@ -27,6 +30,24 @@ function truncationMessage(finishReason: string): string {
   return `生成が途中で打ち切られました (理由: ${finishReason})。途中までの本文は保存されています。`
 }
 
+// 出力が 0 文字だったときの原因別メッセージ。blockReason (プロンプト拒否) を最優先で示し、
+// それが無ければ finishReason、どちらも無ければ汎用文を返す。
+function emptyOutputMessage(blockReason: string | undefined, finishReason: string | undefined): string {
+  if (blockReason === 'PROHIBITED_CONTENT') {
+    return 'Gemini がプロンプトを拒否しました (PROHIBITED_CONTENT)。登場人物の年齢設定 (18 歳未満) と性的描写の組み合わせなど、Google が一律で禁じている内容に該当している可能性があります。年齢を 18 歳以上にするか、年齢指定を R15/全年齢 に変更して再生成してください。'
+  }
+  if (blockReason === 'SAFETY') {
+    return 'Gemini のセーフティ判定でプロンプトが拒否されました (SAFETY)。設定や備考の表現をやや穏当にして再生成してください。'
+  }
+  if (blockReason !== undefined) {
+    return `Gemini がプロンプトを拒否しました (${blockReason})。設定内容を見直して再生成してください。`
+  }
+  if (finishReason !== undefined && finishReason !== 'STOP') {
+    return `生成テキストが空でした (finishReason: ${finishReason})。モデルを変更するか、設定を調整して再生成してください。`
+  }
+  return '生成テキストが空でした。Gemini がプロンプトをブロックしたか、思考モデルの出力がフィルタされた可能性があります。モデルを変更して再生成してください。'
+}
+
 // DO 起動時に worker から渡されるペイロード。プロンプト合成に必要な小説 + outline 情報を全部含む
 // (DO 側で D1 を読みに行かない: 起動時の novel スナップショットを使うほうが冪等で扱いやすい)。
 export type StartChapterGenPayload = {
@@ -38,9 +59,9 @@ export type StartChapterGenPayload = {
   novel: {
     title: string
     genre: string
-    characters: string
     setting: string
     num_chapters: number
+    outline_summary_chars: number
     notes: string
   }
   outline: Outline
@@ -56,7 +77,22 @@ export type StartChapterGenPayload = {
   relations?: CastRelation[]
 }
 
-type Phase = 'idle' | 'streaming' | 'done' | 'error'
+// DO に永続化する状態の schema。storage が空 (初回) のキーは .default() で初期値を当てる。
+// ?? フォールバックを使わず、デフォルトをここに一元化する。
+// errMsg / chapterTitle は .nonempty() を付けない: errMsg は e.message が空のことがあり、
+// chapterTitle は outline 章タイトル (空文字制約なし) 由来で空になり得る。ここで空文字を弾くと
+// 復元時に parse が throw して DO がクラッシュループするため、空文字も許容する。
+const PersistedStateSchema = z.object({
+  phase: z.enum(['idle', 'streaming', 'done', 'error']).default('idle'),
+  buffer: z.string().default(''),
+  errMsg: z.string().nullable().default(null),
+  chapterId: z.string().nullable().default(null),
+  chapterTitle: z.string().nullable().default(null),
+  payload: z.custom<StartChapterGenPayload>().nullable().default(null),
+  lastProgressAt: z.number().default(0)
+})
+
+type Phase = z.infer<typeof PersistedStateSchema>['phase']
 
 type Subscriber = {
   writer: WritableStreamDefaultWriter<Uint8Array>
@@ -87,21 +123,33 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   // run() を完走できないので、payload も storage に格納する。
   private payload: StartChapterGenPayload | null = null
 
+  // run() が実行中か (in-memory のみ。DO インスタンス内での二重起動・buffer リセットのレース防止用)。
+  // evict で消えても false に戻るだけなので永続化しない。
+  private running = false
+
   constructor(state: DurableObjectState, env: Env) {
     super(state, env)
     void state.blockConcurrencyWhile(async () => {
-      this.phase = (await state.storage.get<Phase>('phase')) ?? 'idle'
-      this.buffer = (await state.storage.get<string>('buffer')) ?? ''
-      this.errMsg = (await state.storage.get<string | null>('errMsg')) ?? null
-      this.chapterId = (await state.storage.get<string | null>('chapterId')) ?? null
-      this.chapterTitle = (await state.storage.get<string | null>('chapterTitle')) ?? null
-      this.payload = (await state.storage.get<StartChapterGenPayload>('payload')) ?? null
-      this.lastProgressAt = (await state.storage.get<number>('lastProgressAt')) ?? 0
+      const stored = await state.storage.list()
+      const result = PersistedStateSchema.safeParse(Object.fromEntries(stored))
+      // 自分で persistAll() が書いた storage なので schema 不一致は破損を意味する。
+      // 黙って初期値に戻すと進行中の生成状態を握り潰すので、隠さず throw して表面化させる。
+      if (!result.success) throw new Error(`corrupted DO state: ${result.error.message}`)
+      const state_ = result.data
+      this.phase = state_.phase
+      this.buffer = state_.buffer
+      this.errMsg = state_.errMsg
+      this.chapterId = state_.chapterId
+      this.chapterTitle = state_.chapterTitle
+      this.payload = state_.payload
+      this.lastProgressAt = state_.lastProgressAt
     })
   }
 
   // 生成開始 (idempotent: streaming 中なら no-op、done なら新しい生成で上書き)
   async start(payload: StartChapterGenPayload): Promise<{ status: 'started' | 'already_streaming' }> {
+    // run() が生きている間は触らない (buffer リセットや二重 Gemini 呼び出しのレースを防ぐ)。
+    if (this.running) return { status: 'already_streaming' }
     if (this.phase === 'streaming') {
       // DO が evict されると run() の Promise が静かに失われ、phase だけ 'streaming' のまま残ることがある。
       // 一定時間進捗が無いものは stale 扱いで再起動させる。生きてる run() がたまたま残っていた場合は
@@ -133,7 +181,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   async alarm() {
     if (this.phase !== 'streaming') return
     const sinceProgress = Date.now() - this.lastProgressAt
-    if (sinceProgress > STALE_STREAMING_MS && this.payload !== null) {
+    if (sinceProgress > STALE_STREAMING_MS && this.payload !== null && !this.running) {
       // run() の Promise が消えているはずなので新しく起動。buffer 等は start() と同じ初期化を行う。
       this.buffer = ''
       this.errMsg = null
@@ -153,40 +201,73 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     const sub: Subscriber = { writer }
     this.subscribers.add(sub)
 
-    const encoder = new TextEncoder()
-    const send = async (data: unknown) => {
-      try {
-        await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
-      } catch {
+    // 自己修復の二重起動防止だけは Response を返す前に同期実行する。lastProgressAt を
+    // ここで先に更新しておくことで、ほぼ同時に複数 subscriber が来ても run() が二重起動しない。
+    // (実際の run() 再開と storage への永続化は priming 側に委ねる)
+    const needsSelfHeal =
+      this.phase === 'streaming' &&
+      Date.now() - this.lastProgressAt > STALE_STREAMING_MS &&
+      this.payload !== null &&
+      !this.running
+    if (needsSelfHeal) {
+      this.buffer = ''
+      this.errMsg = null
+      this.chapterId = null
+      this.chapterTitle = null
+      this.lastProgressAt = Date.now()
+    }
+
+    // 初期送出 (replay / 最終イベント / self-heal の再起動) は Response を返した後に
+    // 走らせる。ここで await すると、readable がまだ消費されていない TransformStream に
+    // 書き込むことになり、バックプレッシャで writer.write() が解決せず Response 自体が
+    // 返らない (= ヘッダーすら出ずクライアントが永久にスピンする) ため。
+    const prime = async () => {
+      const encoder = new TextEncoder()
+      const send = async (data: unknown) => {
+        try {
+          await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+        } catch {
+          this.subscribers.delete(sub)
+        }
+      }
+      const close = async () => {
+        try {
+          await writer.close()
+        } catch {
+          /* already closed */
+        }
         this.subscribers.delete(sub)
       }
-    }
 
-    // 現バッファをまとめて 1 イベントで replay
-    if (this.buffer.length > 0) await send({ delta: this.buffer })
+      // 現バッファをまとめて 1 イベントで replay
+      if (this.buffer.length > 0) await send({ delta: this.buffer })
 
-    // 既に終わっている場合は最終イベントを送って閉じる
-    if (this.phase === 'done') {
-      await send({ done: true, chapterId: this.chapterId, title: this.chapterTitle })
-      try {
-        await writer.close()
-      } catch {
-        /* already closed */
+      // 既に終わっている場合は最終イベントを送って閉じる
+      if (this.phase === 'done') {
+        // phase=done のとき chapterTitle は run() が必ず設定して persistAll() で保存する。
+        // null になるのは不変条件の破壊なので隠さず null のまま送り、
+        // クライアント側の schema validation で onDone を呼ばずに表面化させる。
+        await send({ done: true, chapterId: this.chapterId, title: this.chapterTitle })
+        await close()
+      } else if (this.phase === 'error') {
+        await send({ error: this.errMsg ?? 'unknown_error' })
+        await close()
+      } else if (needsSelfHeal) {
+        // 自己修復: phase=streaming だが進捗が STALE なものは、DO eviction で run() の
+        // Promise が失われ alarm chain も途切れた死亡状態とみなす。run() を再起動して
+        // alarm を貼り直す。
+        await this.persistAll()
+        await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_INTERVAL_MS)
+        this.ctx.waitUntil(this.run())
       }
-      this.subscribers.delete(sub)
-    } else if (this.phase === 'error') {
-      await send({ error: this.errMsg ?? 'unknown_error' })
-      try {
-        await writer.close()
-      } catch {
-        /* already closed */
-      }
-      this.subscribers.delete(sub)
     }
+    this.ctx.waitUntil(prime())
 
     return new Response(readable, {
       headers: {
-        'Content-Type': 'text/event-stream',
+        // charset=utf-8 を明示しないと、プロキシや devtools が Latin-1 と誤解して
+        // 日本語の delta / error メッセージが文字化けする (例: 生成 → ç”Ÿæˆ)。
+        'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache',
         'X-Accel-Buffering': 'no'
       }
@@ -210,7 +291,18 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     }
   }
 
+  // 二重起動ガード。start()/alarm()/openStream() が並行して呼んでも run 本体は 1 つだけ走る。
   private async run() {
+    if (this.running) return
+    this.running = true
+    try {
+      await this.runInner()
+    } finally {
+      this.running = false
+    }
+  }
+
+  private async runInner() {
     const encoder = new TextEncoder()
     const payload = this.payload
     if (!payload) {
@@ -227,7 +319,13 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         style: payload.style,
         cast: payload.cast,
         relations: payload.relations,
-        model: payload.model
+        model: payload.model,
+        // thinking チャンクを含む全 Gemini チャンク受信時に lastProgressAt を更新する。
+        // thinking フェーズ中はテキスト出力がないため result.stream に何も流れず、
+        // lastProgressAt が更新されないまま alarm の stale 閾値を超えて誤再起動するのを防ぐ。
+        onChunk: () => {
+          this.lastProgressAt = Date.now()
+        }
       })
 
       const decoder = new TextDecoder()
@@ -247,6 +345,16 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         await this.fanout(event)
       }
 
+      // stream: true で保持されたマルチバイト末尾バイトをフラッシュする。
+      // 最後のチャンクが不完全な UTF-8 シーケンスで終わっていた場合、decode() を
+      // stream オプションなしで呼ぶことで残りのバイトを文字列に確定させる。
+      const tail = decoder.decode()
+      if (tail) {
+        this.buffer += tail
+        const event = encoder.encode(`data: ${JSON.stringify({ delta: tail })}\n\n`)
+        await this.fanout(event)
+      }
+
       // 完了時 buffer flush
       await this.ctx.storage.put('buffer', this.buffer)
 
@@ -261,11 +369,32 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       const finishReason = usage === undefined ? 'STOP' : usage.finishReason
       const truncated = finishReason !== 'STOP'
 
+      // バッファが空の場合はエラー扱い。Gemini がプロンプトを拒否したか、思考モデルが
+      // 全出力を thinking チャンクとして送り extractText でフィルタされた可能性がある。
+      // 0 文字で保存してしまうと UI に何も表示されないため、ユーザーが気づけるよう error にする。
+      if (this.buffer.length === 0) {
+        let blockReason: string | undefined
+        try {
+          blockReason = await result.blockReason
+        } catch {
+          blockReason = undefined
+        }
+        await this.transitionError(emptyOutputMessage(blockReason, usage?.finishReason))
+        return
+      }
+
       // D1 へ章本文を保存 (途中打ち切りでも残しておいて、UI 側で再生成判断できるようにする)
       const prisma = this.makePrisma()
       let saved: { id: string }
       try {
-        saved = await saveChapter(prisma, payload.novelId, payload.chapterNumber, this.buffer, payload.chapterTitle)
+        saved = await saveChapter(
+          prisma,
+          payload.novelId,
+          payload.chapterNumber,
+          this.buffer,
+          payload.chapterTitle,
+          result.prompt
+        )
       } catch (e) {
         await prisma.$disconnect()
         const msg = e instanceof Error ? e.message : String(e)
@@ -301,10 +430,22 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         this.phase = 'error'
         this.errMsg = truncationMessage(finishReason)
         await this.persistAll()
+        try {
+          await this.failGenerationJob()
+        } catch {
+          // best-effort
+        }
         const errEvent = encoder.encode(`data: ${JSON.stringify({ error: this.errMsg })}\n\n`)
         await this.fanout(errEvent)
         await this.closeAll()
         return
+      }
+
+      // Advance queue before notifying subscribers so client refetch sees updated job
+      try {
+        await this.advanceGenerationJob()
+      } catch {
+        // best-effort: don't fail chapter completion due to job advancement error
       }
 
       this.phase = 'done'
@@ -325,10 +466,31 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     this.phase = 'error'
     this.errMsg = msg
     await this.persistAll()
+    // running の生成ジョブを stopped に落とす。これをしないと job が永遠に running のまま残り、
+    // フロントは毎回ロード時にこの章を「生成中」とみなして購読 → 即エラー表示を繰り返す。
+    try {
+      await this.failGenerationJob()
+    } catch {
+      // best-effort: ジョブ更新の失敗で error 通知自体を止めない
+    }
     const encoder = new TextEncoder()
     const event = encoder.encode(`data: ${JSON.stringify({ error: msg })}\n\n`)
     await this.fanout(event)
     await this.closeAll()
+  }
+
+  // この novel の running ジョブを stopped にする (エラー/途中打ち切り時)。
+  private async failGenerationJob(): Promise<void> {
+    if (this.payload === null) return
+    const prisma = this.makePrisma()
+    try {
+      await prisma.novelGenerationJob.updateMany({
+        where: { novel_id: this.payload.novelId, status: 'running' },
+        data: { status: 'stopped' }
+      })
+    } finally {
+      await prisma.$disconnect()
+    }
   }
 
   private async fanout(event: Uint8Array) {
@@ -364,6 +526,56 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.ctx.storage.put('payload', this.payload),
       this.ctx.storage.put('lastProgressAt', this.lastProgressAt)
     ])
+  }
+
+  private async advanceGenerationJob(): Promise<void> {
+    if (!this.payload) return
+    const prisma = this.makePrisma()
+    try {
+      const job = await prisma.novelGenerationJob.findUnique({
+        where: { novel_id: this.payload.novelId }
+      })
+      if (!job || job.status !== 'running') return
+
+      const pending: number[] = JSON.parse(job.pending)
+      if (pending.length === 0 || pending[0] !== this.payload.chapterNumber) return
+
+      const remaining = pending.slice(1)
+
+      if (remaining.length === 0) {
+        await prisma.novelGenerationJob.update({
+          where: { novel_id: this.payload.novelId },
+          data: { status: 'completed', pending: '[]', current: null }
+        })
+        return
+      }
+
+      const nextChapter = remaining[0]
+      await prisma.novelGenerationJob.update({
+        where: { novel_id: this.payload.novelId },
+        data: { pending: JSON.stringify(remaining), current: nextChapter }
+      })
+
+      const nextPayload = await buildChapterPayload(
+        prisma,
+        this.payload.novelId,
+        nextChapter,
+        this.payload.model !== undefined ? this.payload.model : GeminiModelSchema.enum['gemini-2.5-flash']
+      )
+      if (!nextPayload) {
+        await prisma.novelGenerationJob.update({
+          where: { novel_id: this.payload.novelId },
+          data: { status: 'stopped' }
+        })
+        return
+      }
+
+      const doId = this.env.CHAPTER_GEN.idFromName(`${this.payload.novelId}:${nextChapter}`)
+      const stub = this.env.CHAPTER_GEN.get(doId)
+      await stub.start(nextPayload)
+    } finally {
+      await prisma.$disconnect()
+    }
   }
 
   private makePrisma(): PrismaClient {

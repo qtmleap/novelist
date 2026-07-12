@@ -1,9 +1,10 @@
 'use client'
 
-import { BookMarked, Check, ChevronRight, Loader2, Pencil, X } from 'lucide-react'
+import { BookMarked, Check, ChevronRight, Loader2, Pencil, Users, X } from 'lucide-react'
 import Link from 'next/link'
 import { type ReactNode, useEffect, useState } from 'react'
 import type { ChapterData } from '@/components/novel/ChapterReader'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -16,8 +17,8 @@ type Props = {
   isGenerating: boolean
   regenerateSlot?: ReactNode
   isBusy?: boolean
-  chapters?: ChapterData[]
-  costs?: ChapterCost[]
+  chapters: ChapterData[]
+  costs: ChapterCost[]
   streamingIndex?: number | null
   // 生成済みの章を押したときの遷移先 (例: /novels/[id]/chapters/[number])。
   novelId?: string
@@ -55,30 +56,34 @@ export function OutlineView({
   // outline (prop) が外から変わったら draft も追従させる (再生成後など)。
   // 編集中の差分は捨てる: 衝突するくらいなら最新を採用する方針。
   useEffect(() => {
-    setDraft(outline?.chapters ?? [])
+    setDraft(outline !== null ? outline.chapters : [])
   }, [outline])
 
   const chapterByNumber = new Map<number, ChapterData>()
-  for (const c of chapters ?? []) chapterByNumber.set(c.number, c)
+  for (const c of chapters) chapterByNumber.set(c.number, c)
   const costByNumber = new Map<number, ChapterCost>()
-  for (const c of costs ?? []) costByNumber.set(c.chapter_number, c)
+  for (const c of costs) costByNumber.set(c.chapter_number, c)
   const outlineByNumber = new Map<number, Outline['chapters'][number]>()
-  for (const ch of outline?.chapters ?? []) outlineByNumber.set(ch.chapter_number, ch)
+  for (const ch of outline !== null ? outline.chapters : []) outlineByNumber.set(ch.chapter_number, ch)
 
   // 表示対象は outline の章番号 + novel.num_chapters まで。
   // どちらも 0 のときは何も出さない。
-  const maxNumber = Math.max(expectedTotal, ...Array.from(outlineByNumber.keys()), streamingIndex ?? 0)
+  const maxNumber = Math.max(
+    expectedTotal,
+    ...Array.from(outlineByNumber.keys()),
+    streamingIndex !== null ? streamingIndex : 0
+  )
   if (maxNumber === 0 && !isGenerating) return null
   const slots = Array.from({ length: maxNumber }, (_, i) => i + 1)
 
   const editableSaveable = onSaveOutline !== undefined && canEdit && !isGenerating
 
   const handleStartEdit = () => {
-    setDraft(outline?.chapters ?? [])
+    setDraft(outline !== null ? outline.chapters : [])
     setEditing(true)
   }
   const handleCancelEdit = () => {
-    setDraft(outline?.chapters ?? [])
+    setDraft(outline !== null ? outline.chapters : [])
     setEditing(false)
   }
   const handleSave = async () => {
@@ -202,6 +207,16 @@ export function OutlineView({
                   <p className='mt-0.5 text-xs italic leading-relaxed text-muted-foreground/60'>
                     章立てがまだ生成されていません
                   </p>
+                )}
+                {hasOutlineEntry && ch.characters.length > 0 && (
+                  <div className='mt-1.5 flex flex-wrap items-center gap-1'>
+                    <Users className='size-3.5 shrink-0 text-muted-foreground' aria-label='登場人物' />
+                    {ch.characters.map((name) => (
+                      <Badge key={name} variant='secondary' className='font-normal'>
+                        {name}
+                      </Badge>
+                    ))}
+                  </div>
                 )}
                 {done && chapterData && (
                   <div className='mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
