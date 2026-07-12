@@ -255,5 +255,8 @@ next-env.d.ts
 # Claude Code scheduled task lock
 .claude/scheduled_tasks.lock
 
+# Claude Code per-machine settings
+.claude/settings.local.json
+
 # local D1 backups
 backups/
