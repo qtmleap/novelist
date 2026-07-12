@@ -4,6 +4,14 @@ extends:
 rules:
   header-max-length:
     - 0
+  body-max-line-length:
+    - 2
+    - always
+    - 128
+  footer-max-line-length:
+    - 2
+    - always
+    - 128
   type-enum:
     - 2
     - always
