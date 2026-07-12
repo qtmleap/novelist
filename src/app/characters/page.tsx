@@ -1,9 +1,10 @@
 'use client'
 
 import { useSuspenseQuery } from '@tanstack/react-query'
-import { ChevronRight, UserPlus, Users } from 'lucide-react'
+import { ChevronRight, Layers, UserPlus, Users } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { QueryBoundary } from '@/components/QueryBoundary'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { canEdit, useAuth } from '@/hooks/useAuth'
@@ -69,7 +70,15 @@ function CharacterRow({ character }: { character: Character }) {
           <p className='mt-0.5 text-xs text-muted-foreground line-clamp-1'>{character.description}</p>
         )}
       </div>
-      <ChevronRight className='ml-auto size-5 shrink-0 text-muted-foreground' />
+      <div className='ml-auto flex shrink-0 items-center gap-2'>
+        {character.variants.length > 0 && (
+          <Badge variant='outline' className='text-xs text-muted-foreground'>
+            <Layers className='size-3.5' />
+            {character.variants.length}
+          </Badge>
+        )}
+        <ChevronRight className='size-5 text-muted-foreground' />
+      </div>
     </a>
   )
 }
