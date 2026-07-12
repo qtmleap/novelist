@@ -5,6 +5,8 @@
     "**/node_modules": true,
     "**/.tanstack": true,
     "**/.agents": true,
+    "**/.vinext": true,
+    "**/.next": true,
     "**/dist": true
   },
   "files.watcherExclude": {
