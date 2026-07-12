@@ -164,7 +164,9 @@ function CharacterDetailContent({ id }: { id: string }) {
 }
 
 export default function CharacterDetailPage() {
-  const { id } = useParams<{ id: string }>()
+  const params = useParams<{ id: string }>()
+  if (!params) return null
+  const { id } = params
   return (
     <div className='space-y-6'>
       <PageHeader crumbs={[{ label: '登場人物一覧', href: routes.characters.list }, { label: '詳細' }]} />

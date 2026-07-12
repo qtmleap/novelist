@@ -66,7 +66,8 @@ function ChapterMeta({ chars, cost }: { chars: number; cost?: ChapterCost }) {
 }
 
 export default function ChapterDetailPage() {
-  const pathname = usePathname()
+  const rawPathname = usePathname()
+  const pathname = rawPathname === null ? '' : rawPathname
   const router = useRouter()
   const { novelId, chapterNumber } = useMemo(() => parseRoute(pathname), [pathname])
   const [novel, setNovel] = useState<NovelWithChapters | null>(null)

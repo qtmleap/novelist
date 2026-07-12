@@ -508,7 +508,9 @@ function NovelDetailContent({ id }: { id: string }) {
 }
 
 export default function NovelDetailPage() {
-  const { id } = useParams<{ id: string }>()
+  const params = useParams<{ id: string }>()
+  if (!params) return null
+  const { id } = params
   return (
     <QueryBoundary fallback={<NovelSkeleton />}>
       <NovelDetailContent id={id} />
