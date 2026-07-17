@@ -1,93 +1,136 @@
-name: Continuous Integration
+name: Integration
 on:
   push:
+    branches-ignore:
+      - main
+      - master
+  pull_request:
+
 jobs:
   commitlint:
-    name: CommitLint
-    if: github.event.action != 'closed' || github.event.pull_request.merged != true
+    name: Commit Lint
     runs-on: ubuntu-latest
+    if: github.event.action != 'closed' || github.event.pull_request.merged != true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - name: Cache Bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
       - name: Install commitlint
         run: |
           bun install conventional-changelog-conventionalcommits
-          bun install commitlint@latest
           bun install @commitlint/config-conventional@latest
-      - name: Validate current commit (last commit) with commitlint
+          bun install commitlint@latest
+      - name: Validate PR commits
+        if: github.event_name == 'pull_request'
+        run: |
+          bunx commitlint \
+            --from ${{ github.event.pull_request.head.sha }}~${{ github.event.pull_request.commits }} \
+            --to ${{ github.event.pull_request.head.sha }} \
+            --verbose
+      - name: Validate last commit
         if: github.event_name == 'push'
         run: bunx commitlint --last --verbose
-      - name: Validate PR commits with commitlint
-        if: github.event_name == 'pull_request'
-        run: bunx commitlint --from ${{ github.event.pull_request.head.sha }}~${{ github.event.pull_request.commits }} --to ${{ github.event.pull_request.head.sha }} --verbose
+
   check:
     name: Code Check
     runs-on: ubuntu-latest
-    if: github.event.action != 'closed' || github.event.pull_request.merged != true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - name: Check
-        run: |
-          bunx @biomejs/biome check
-  typecheck:
-    name: Type Check
-    runs-on: ubuntu-latest
-    if: github.event.action != 'closed' || github.event.pull_request.merged != true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Cache Bun install
+        uses: actions/cache@v4
         with:
-          bun-version: latest
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
-      - name: Generate Prisma client
-        run: bunx prisma generate
-        env:
-          DATABASE_URL: file:./dev.db
+      # Uncomment when the project uses Prisma (or similar codegen).
+      # - name: Generate Prisma client
+      #   run: bun run prisma generate
+      - name: Biome check
+        run: bunx --bun biome check
+
+  typecheck:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Cache Bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      # Uncomment when the project uses Prisma (or similar codegen).
+      # - name: Generate Prisma client
+      #   run: bun run prisma generate
       - name: Type check
-        run: bunx tsc --noEmit
+        run: bun run typecheck
+
   build:
     name: Build
     runs-on: ubuntu-latest
-    if: github.event.action != 'closed' || github.event.pull_request.merged != true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - name: Cache Bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
-      - name: Generate Prisma client
-        run: bunx prisma generate
-        env:
-          DATABASE_URL: file:./dev.db
-      - name: Build
-        run: bun run build
+      # Uncomment when the project uses Prisma (or similar codegen).
+      # - name: Generate Prisma client
+      #   run: bun run prisma generate
+      - name: Vinext build
+        run: bunx vinext build
+
   test:
-    name: Run Tests
+    name: Test
     runs-on: ubuntu-latest
-    if: github.event.action != 'closed' || github.event.pull_request.merged != true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - name: Cache Bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock', '**/package.json') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
+      # Uncomment when the project uses Prisma (or similar codegen).
+      # - name: Generate Prisma client
+      #   run: bun run prisma generate
       - name: Run tests
-        run: bunx bun test
+        run: bun test
