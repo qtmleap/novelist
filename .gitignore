@@ -260,3 +260,4 @@ next-env.d.ts
 
 # local D1 backups
 backups/
+worker-configuration.d.ts
