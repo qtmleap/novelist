@@ -53,9 +53,6 @@
         "@biomejs/biome": "^2.5.3",
         "@cloudflare/workers-types": "^5.20260712.1",
         "@types/bun": "^1.3.14",
-        "@types/react": "^19.2.17",
-        "@types/react-dom": "^19.2.3",
-        "@vinext/cloudflare": "^1.0.0-beta.2",
         "@vitejs/plugin-rsc": "^0.5.27",
         "prisma": "^7.8.0",
         "react-server-dom-webpack": "^19.2.7",
@@ -670,8 +667,6 @@
     "@unpic/react": ["@unpic/react@1.0.2", "", { "dependencies": { "@unpic/core": "^1.0.3" }, "peerDependencies": { "next": "^13.0.0 || ^14.0.0 || ^15.0.0 || ^16.0.0", "react": "^17.0.0 || ^18.0.0 || ^19.0.0", "react-dom": "^17.0.0 || ^18.0.0 || ^19.0.0" }, "optionalPeers": ["next"] }, "sha512-5RmRfELwTF8w+4zjtQGqjpvX+RU2VLvis3xDCS1O2uWk0PZN2cvatL+3/KAR3mshAuRrkFGTX1XwyAezSXaoCA=="],
 
     "@vercel/og": ["@vercel/og@0.8.6", "", { "dependencies": { "@resvg/resvg-wasm": "2.4.0", "satori": "0.16.0" } }, "sha512-hBcWIOppZV14bi+eAmCZj8Elj8hVSUZJTpf1lgGBhVD85pervzQ1poM/qYfFUlPraYSZYP+ASg6To5BwYmUSGQ=="],
-
-    "@vinext/cloudflare": ["@vinext/cloudflare@1.0.0-beta.2", "", { "peerDependencies": { "vinext": "^1.0.0-beta.2" }, "bin": { "@vinext/cloudflare": "dist/cli.js", "vinext-cloudflare": "dist/cli.js" } }, "sha512-1yYYR4GQCkFnAZeJcYdX5O+i8iEUN4h66jCJTujlBp4XiveQnnigJ1ZZOlvEGW73b+HaX7RD3OgBls3S3wv4ZQ=="],
 
     "@vitejs/plugin-react": ["@vitejs/plugin-react@6.0.3", "", { "dependencies": { "@rolldown/pluginutils": "^1.0.1" }, "peerDependencies": { "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0", "babel-plugin-react-compiler": "^1.0.0", "vite": "^8.0.0" }, "optionalPeers": ["@rolldown/plugin-babel", "babel-plugin-react-compiler"] }, "sha512-vmFvco5/QuC2f9Oj+wTk0+9XeDFkHxSamwZKYc7MxYwKICfvUvlMhqKI0VuICPltGqh1neqBKDvO4kes1ya8vg=="],
 
