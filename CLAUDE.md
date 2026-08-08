@@ -7,9 +7,12 @@ Vinext (Vite ベース App Router) + React 19 + Cloudflare Workers の Web ア�
 ## コマンド
 
 - `bun install` - 依存関係のインストール
-- `bun run dev` - 開発サーバー起動 (port 11599)
+- `bun run dev` - 開発サーバー起動 (port 11675)
 - `bun run build` - プロダクションビルド
-- `bun run deploy` - Cloudflare Workers へデプロイ
+- `bun run lint` / `bun run format` - Biome チェック / 自動修正
+- `bun run typecheck` - `tsc --noEmit` で型チェック
+- `bun run test` - `bun test`
+- `bun run deploy:staging` / `bun run deploy:production` - Cloudflare Workers へデプロイ
 
 ## コーディング規約
 
@@ -41,5 +44,5 @@ Vinext (Vite ベース App Router) + React 19 + Cloudflare Workers の Web ア�
 - shadcn/ui は New York スタイル、Lucide アイコン使用
 - **shadcn/ui コンポーネントは直接編集しない** — スタイル変更は利用側で className を渡して対応
 - shadcn/ui コンポーネントの追加: `bunx --bun shadcn@latest add <component-name>`
-- tsconfig で `src/components/ui/**/*.tsx` は型チェック対象外
+- `src/components/ui/**/*.tsx` および `src/generated/**` は Biome/tsc の対象外
 - Cloudflare Workers の `compatibility_date` は `2026-01-01`
