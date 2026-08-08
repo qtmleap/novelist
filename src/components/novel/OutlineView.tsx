@@ -2,21 +2,18 @@
 
 import { BookMarked, Check, ChevronRight, Loader2, Pencil, Users, X } from 'lucide-react'
 import Link from 'next/link'
-import { type ReactNode, useEffect, useState } from 'react'
-import type { ChapterData } from '@/components/novel/ChapterReader'
+import { useEffect, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
-import type { ChapterCost, Outline } from '@/schemas/novel.dto'
+import type { ChapterCost, ChapterData, Outline } from '@/schemas/novel.dto'
 
 type Props = {
   outline: Outline | null
   isGenerating: boolean
-  regenerateSlot?: ReactNode
-  isBusy?: boolean
   chapters: ChapterData[]
   costs: ChapterCost[]
   streamingIndex?: number | null
@@ -39,7 +36,6 @@ function fmtTokens(n: number): string {
 export function OutlineView({
   outline,
   isGenerating,
-  regenerateSlot,
   chapters,
   costs,
   streamingIndex = null,
@@ -139,7 +135,6 @@ export function OutlineView({
                 編集
               </Button>
             )}
-            {regenerateSlot}
           </div>
         )}
       </div>

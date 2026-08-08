@@ -4,19 +4,11 @@ import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-q
 import { Check, FolderTree, GripVertical, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { EmptyState } from '@/components/EmptyState'
 import { PageHeader } from '@/components/PageHeader'
 import { QueryBoundary } from '@/components/QueryBoundary'
 import { SortableItem, SortableList } from '@/components/Sortable'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle
-} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -40,15 +32,11 @@ function CategorySkeletonList() {
 
 function EmptyCategories() {
   return (
-    <div className='flex min-h-[240px] flex-col items-center justify-center gap-3 rounded-md border border-dashed px-6 py-12 text-center'>
-      <FolderTree className='size-10 text-muted-foreground' />
-      <div className='space-y-1'>
-        <p className='font-semibold'>カテゴリがまだありません</p>
-        <p className='max-w-[32ch] text-sm text-muted-foreground'>
-          カテゴリを作成すると、小説をフォルダのように分けて管理できます。
-        </p>
-      </div>
-    </div>
+    <EmptyState
+      icon={FolderTree}
+      title='カテゴリがまだありません'
+      description='カテゴリを作成すると、小説をフォルダのように分けて管理できます。'
+    />
   )
 }
 
@@ -277,33 +265,23 @@ function CategoryListContent() {
         </SortableList>
       )}
 
-      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>カテゴリ「{deleteTarget?.name}」を削除しますか？</AlertDialogTitle>
-            <AlertDialogDescription>
-              {deleteTarget !== null && deleteTarget.novel_count > 0
-                ? `このカテゴリの小説 ${deleteTarget.novel_count} 件は「未分類」に戻ります。小説自体は削除されません。`
-                : 'このカテゴリを削除します。小説自体は削除されません。'}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteMutation.isPending}>キャンセル</AlertDialogCancel>
-            <AlertDialogAction
-              variant='destructive'
-              disabled={deleteMutation.isPending}
-              onClick={(e) => {
-                e.preventDefault()
-                if (deleteTarget !== null) deleteMutation.mutate(deleteTarget.id)
-              }}
-              className='[&_svg]:size-5!'
-            >
-              {deleteMutation.isPending ? <Loader2 className='animate-spin' /> : <Trash2 />}
-              削除する
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title={`カテゴリ「${deleteTarget !== null ? deleteTarget.name : ''}」を削除しますか？`}
+        description={
+          deleteTarget !== null && deleteTarget.novel_count > 0
+            ? `このカテゴリの小説 ${deleteTarget.novel_count} 件は「未分類」に戻ります。小説自体は削除されません。`
+            : 'このカテゴリを削除します。小説自体は削除されません。'
+        }
+        confirmLabel='削除する'
+        confirmIcon={<Trash2 />}
+        destructive
+        isPending={deleteMutation.isPending}
+        onConfirm={() => {
+          if (deleteTarget !== null) deleteMutation.mutate(deleteTarget.id)
+        }}
+      />
     </>
   )
 }

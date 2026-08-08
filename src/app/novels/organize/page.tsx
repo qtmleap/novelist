@@ -30,6 +30,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { QueryBoundary } from '@/components/QueryBoundary'
 import { Badge } from '@/components/ui/badge'
 import { api, readApiError } from '@/lib/api/client'
+import { ageRatingClass } from '@/lib/novel/format'
 import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
 import type { Novel } from '@/schemas/novel.dto'
@@ -38,12 +39,6 @@ import type { Novel } from '@/schemas/novel.dto'
 const NO_CATEGORY = '__uncategorized__'
 
 type Container = { key: string; categoryId: string | null; label: string }
-
-function ageRatingClass(rating: string): string {
-  if (rating === 'R18') return 'border-red-500 text-red-600'
-  if (rating === 'R15') return 'border-amber-500 text-amber-600'
-  return 'text-muted-foreground'
-}
 
 function NovelCardBody({ novel }: { novel: Novel }) {
   return (
