@@ -108,6 +108,15 @@ export type GeminiModel = z.infer<typeof GeminiModelSchema>
 
 export const DEFAULT_EDITOR_MODEL: GeminiModel = 'gemini-3.1-flash-lite'
 export const DEFAULT_WRITER_MODEL: GeminiModel = 'gemini-3.1-flash-lite'
+// Novel DTO でモデル指定が空だったときのフォールバック。
+// wrangler.toml の GEMINI_MODEL・resolveModel・chapter payload の既定はすべてこの定数を参照する。
+export const DEFAULT_GENERATION_MODEL: GeminiModel = 'gemini-2.5-flash'
+
+// POST /novels/:id/generation/start の body。バッチ生成に投入する章番号リストとモデル。
+export const StartBatchGenerationSchema = z.object({
+  chapters: z.array(z.number().int().min(1)).min(1),
+  model: GeminiModelSchema
+})
 
 // 設定画面の ☆ 表示用。各 1〜5 (多いほど良い)。price は「安さ」(多いほど安価)。
 export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; price: number }> = {
@@ -188,6 +197,15 @@ export type ArrangeNovelsInput = z.infer<typeof ArrangeNovelsSchema>
 
 // ---------------------- 章立て (outline) ----------------------
 
+// クライアント側で章の生成状態を表す UI 型。DB の Chapter とは別に、
+// ストリーミング中の途中状態 (done=false) も扱えるようにしている。
+export type ChapterData = {
+  number: number
+  title: string | null
+  content: string
+  done: boolean
+}
+
 export const OutlineChapterSchema = z.object({
   chapter_number: z.number().int().min(1),
   title: z.string(),
@@ -201,6 +219,9 @@ export const OutlineSchema = z.object({
   chapters: z.array(OutlineChapterSchema)
 })
 export type Outline = z.infer<typeof OutlineSchema>
+
+// PUT /novels/:id/outline の body。手動編集で章立てを丸ごと上書き保存する。
+export const UpdateOutlineBodySchema = z.object({ outline: OutlineSchema })
 
 // ---------------------- 永続化された Novel / Chapter ----------------------
 // 日付は Response.json 経由で ISO 文字列になるため string で受ける。

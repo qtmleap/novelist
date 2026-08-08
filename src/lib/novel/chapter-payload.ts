@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@/generated/prisma/client'
 import type { StartChapterGenPayload } from '@/lib/chapter-gen-do'
-import type { CastMember, CastRelation } from '@/lib/gemini/client'
+import type { CastMember, CastRelation, GeminiNovelParams, StyleParams } from '@/lib/gemini/client'
 import { getNovelWithChapters } from '@/lib/novel/repository'
 import type { GeminiModel } from '@/schemas/novel.dto'
 import { OutlineSchema } from '@/schemas/novel.dto'
@@ -124,6 +124,57 @@ export function buildRelationsForGemini(
     description: r.description,
     address_override: r.address_override
   }))
+}
+
+// Novel エンティティから Gemini のプロンプト組み立て入力 (params/style/cast/relations) を作る。
+// outline 生成・部分再生成・プロンプトプレビューの 3 箇所で同じ組み立てを行っていたのを集約する。
+type PromptInputSource = {
+  title: string
+  genre: string
+  setting: string
+  num_chapters: number
+  outline_summary_chars: number
+  notes: string
+  pov: string
+  tone: string
+  age_rating: string
+  ending: string
+  pov_character_id: string
+  character_links: CharacterLink[]
+  relations: Array<{
+    source_name: string
+    target_name: string
+    relation: string
+    description: string
+    address_override: string
+  }>
+}
+
+export function buildPromptInputs(novel: PromptInputSource): {
+  params: GeminiNovelParams
+  style: StyleParams
+  cast: CastMember[]
+  relations: CastRelation[]
+} {
+  return {
+    params: {
+      title: novel.title,
+      genre: novel.genre,
+      setting: novel.setting,
+      num_chapters: novel.num_chapters,
+      outline_summary_chars: novel.outline_summary_chars,
+      notes: novel.notes
+    },
+    style: {
+      pov: novel.pov,
+      tone: novel.tone,
+      age_rating: novel.age_rating,
+      ending: novel.ending,
+      viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
+    },
+    cast: buildCastForGemini(novel.character_links),
+    relations: buildRelationsForGemini(novel.relations)
+  }
 }
 
 export async function buildChapterPayload(
