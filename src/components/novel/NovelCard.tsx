@@ -2,28 +2,14 @@
 
 import { BookOpen, Calendar, ChevronRight, Layers, Type } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
+import { formatDate } from '@/lib/date'
+import { ageRatingClass } from '@/lib/novel/format'
 import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
 import type { Novel } from '@/schemas/novel.dto'
 
 type Props = {
   novel: Novel
-}
-
-function formatDate(iso: string): string {
-  // ISO 8601 文字列を直接 parse して "YYYY年M月D日" を組み立てる (Date を経由しないので
-  // タイムゾーン揺れも無く、no-new-date の運用方針 (dayjs か文字列処理) に沿う)。
-  const [datePart] = iso.split('T')
-  const [y, m, d] = datePart.split('-')
-  return `${Number(y)}年${Number(m)}月${Number(d)}日`
-}
-
-// 年齢指定バッジの色。R18 を最も強く、R15 を中間、全年齢は控えめにして
-// 制限付きの作品が一覧でひと目で分かるようにする。
-function ageRatingClass(rating: string): string {
-  if (rating === 'R18') return 'border-red-500 text-red-600'
-  if (rating === 'R15') return 'border-amber-500 text-amber-600'
-  return 'text-muted-foreground'
 }
 
 export function NovelCard({ novel }: Props) {

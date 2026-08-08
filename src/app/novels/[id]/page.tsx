@@ -5,7 +5,6 @@ import { Copy, Loader2, Pencil, RefreshCw, Sparkles, Users } from 'lucide-react'
 import { useParams, useRouter } from 'next/navigation'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import type { ChapterData } from '@/components/novel/ChapterReader'
 import { ChapterSelectionDialog } from '@/components/novel/ChapterSelectionDialog'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { GenerationStatus } from '@/components/novel/GenerationStatus'
@@ -20,6 +19,7 @@ import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
+import type { ChapterData } from '@/schemas/novel.dto'
 import { type Chapter, type ChapterCost, type GeminiModel, GeminiModelSchema, type Outline } from '@/schemas/novel.dto'
 
 function asGeminiModel(model: string): GeminiModel {
@@ -429,7 +429,6 @@ function NovelDetailContent({ id }: { id: string }) {
       <OutlineView
         outline={outline}
         isGenerating={genStatus === 'generatingOutline'}
-        isBusy={isGenerating}
         chapters={chapters}
         costs={novel.generation_costs}
         streamingIndex={streamingIndex}
