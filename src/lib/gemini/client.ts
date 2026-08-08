@@ -1,7 +1,13 @@
 import { z } from 'zod'
 import type { Env } from '@/lib/db'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
-import { type GeminiModel, type Outline, type OutlineChapter, OutlineSchema } from '@/schemas/novel.dto'
+import {
+  DEFAULT_GENERATION_MODEL,
+  type GeminiModel,
+  type Outline,
+  type OutlineChapter,
+  OutlineSchema
+} from '@/schemas/novel.dto'
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 
@@ -43,7 +49,7 @@ const GeminiResponseSchema = z.object({
 })
 type GeminiResponse = z.infer<typeof GeminiResponseSchema>
 
-type GeminiNovelParams = {
+export type GeminiNovelParams = {
   title: string
   genre: string
   setting: string
@@ -91,7 +97,7 @@ export type CastRelation = {
   address_override: string
 }
 
-type StyleParams = {
+export type StyleParams = {
   pov: string
   tone: string
   ending?: string
@@ -149,7 +155,69 @@ const SAFETY_SETTINGS_OFF = [
 ] as const
 
 function resolveModel(env: Env, model?: GeminiModel): string {
-  return model ?? env.GEMINI_MODEL ?? 'gemini-2.5-flash'
+  if (model !== undefined) return model
+  if (env.GEMINI_MODEL !== undefined && env.GEMINI_MODEL.length > 0) return env.GEMINI_MODEL
+  return DEFAULT_GENERATION_MODEL
+}
+
+// Promise + resolvers を 1 つのオブジェクトで返す小さなヘルパ。
+// `let resolveXxx!` + `new Promise((r) => { resolveXxx = r })` パターンを避けるために使う。
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason: unknown) => void
+} {
+  const handlers: { resolve?: (value: T) => void; reject?: (reason: unknown) => void } = {}
+  const promise = new Promise<T>((res, rej) => {
+    handlers.resolve = res
+    handlers.reject = rej
+  })
+  return {
+    promise,
+    resolve: (value: T) => handlers.resolve?.(value),
+    reject: (reason: unknown) => handlers.reject?.(reason)
+  }
+}
+
+// レスポンスに text が無かったときの原因説明を組み立てる。
+// finishReason / promptFeedback.blockReason / blocked safety category を合成する。
+function emptyResponseDetail(data: GeminiResponse): string {
+  const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+  const promptBlock = data.promptFeedback?.blockReason
+  const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+  return [
+    `finishReason=${finishReason}`,
+    promptBlock ? `promptBlockReason=${promptBlock}` : '',
+    blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+  ]
+    .filter((s) => s.length > 0)
+    .join(' / ')
+}
+
+// Gemini の JSON レスポンス生成エンドポイントを呼び出し、text (JSON 文字列) を返す。
+// 失敗パス (HTTP エラー・空レスポンス) は label 付きで例外化して呼び出し側の catch を簡潔にする。
+async function callGeminiJson(env: Env, model: string, prompt: string, label: string): Promise<string> {
+  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    safetySettings: SAFETY_SETTINGS_OFF,
+    generationConfig: { responseMimeType: 'application/json' }
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Gemini ${label} failed: ${res.status} ${err}`)
+  }
+  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+  if (!text) {
+    throw new Error(`Gemini returned empty ${label} response (${emptyResponseDetail(data)})`)
+  }
+  return text
 }
 
 // プロンプト用のキャラクター詳細セクションを組み立てる。speech_examples・address_others・
@@ -317,45 +385,8 @@ export async function generateOutline(
   relations?: CastRelation[]
 ): Promise<Outline> {
   const model = resolveModel(env, modelOverride)
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
-
   const prompt = buildOutlinePrompt(novel, style, cast, relations)
-
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    safetySettings: SAFETY_SETTINGS_OFF,
-    generationConfig: {
-      responseMimeType: 'application/json'
-    }
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gemini generateOutline failed: ${res.status} ${err}`)
-  }
-
-  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
-
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) {
-    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
-    const promptBlock = data.promptFeedback?.blockReason
-    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
-    const detail = [
-      `finishReason=${finishReason}`,
-      promptBlock ? `promptBlockReason=${promptBlock}` : '',
-      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
-    ]
-      .filter((s) => s.length > 0)
-      .join(' / ')
-    throw new Error(`Gemini returned empty outline response (${detail})`)
-  }
+  const text = await callGeminiJson(env, model, prompt, 'outline')
 
   let parsed: unknown
   try {
@@ -400,8 +431,6 @@ export async function regenerateOutlineChapter(
   }
 
   const model = resolveModel(env, modelOverride)
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
-
   const styleInstruction = buildStyleInstruction(style)
   const castSection = buildCastSection(cast)
   const relationsSection = buildRelationsSection(relations)
@@ -448,38 +477,7 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
 出力は以下の JSON 形式のみ:
 ${exampleEntry}`
 
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    safetySettings: SAFETY_SETTINGS_OFF,
-    generationConfig: { responseMimeType: 'application/json' }
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gemini regenerateOutlineChapter failed: ${res.status} ${err}`)
-  }
-
-  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) {
-    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
-    const promptBlock = data.promptFeedback?.blockReason
-    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
-    const detail = [
-      `finishReason=${finishReason}`,
-      promptBlock ? `promptBlockReason=${promptBlock}` : '',
-      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
-    ]
-      .filter((s) => s.length > 0)
-      .join(' / ')
-    throw new Error(`Gemini returned empty regenerateOutlineChapter response (${detail})`)
-  }
+  const text = await callGeminiJson(env, model, prompt, 'regenerateOutlineChapter')
 
   let parsed: unknown
   try {
@@ -602,17 +600,14 @@ ${sections.join('\n\n')}
   const writer = writable.getWriter()
   const encoder = new TextEncoder()
 
-  let resolveUsage!: (value: StreamChapterUsage) => void
-  let rejectUsage!: (reason: unknown) => void
-  const usage = new Promise<StreamChapterUsage>((res, rej) => {
-    resolveUsage = res
-    rejectUsage = rej
-  })
+  const usageDefer = deferred<StreamChapterUsage>()
+  const usage = usageDefer.promise
+  const resolveUsage = usageDefer.resolve
+  const rejectUsage = usageDefer.reject
 
-  let resolveBlockReason!: (value: string | undefined) => void
-  const blockReason = new Promise<string | undefined>((res) => {
-    resolveBlockReason = res
-  })
+  const blockReasonDefer = deferred<string | undefined>()
+  const blockReason = blockReasonDefer.promise
+  const resolveBlockReason = blockReasonDefer.resolve
 
   // 上流が無応答でハングすると DO が永久に「生成中」のままになるので、接続〜チャンク間の
   // 無応答に上限を設ける。チャンク受信ごとにタイマーを張り直し、超過したら fetch を abort する。

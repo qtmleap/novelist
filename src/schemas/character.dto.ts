@@ -64,29 +64,39 @@ export const ADDRESS_STYLES = [
   '苗字＋後輩'
 ] as const
 
+// Character 本体・Variant で共通する外見・口調系のプロパティ。
+// Input 側 (default 付き) と表示側 (default 無し) の両方に使いまわす。
+const characterProfileFields = {
+  age: z.string().max(50),
+  occupation: z.string().max(50),
+  appearance: z.string().max(2000),
+  first_person: z.string().max(20),
+  address_others: z.string().max(500),
+  speech_examples: z.array(z.string().max(300)).max(20),
+  description: z.string().max(4000)
+} as const
+
+const characterProfileInputFields = {
+  age: characterProfileFields.age.default(''),
+  occupation: characterProfileFields.occupation.default(''),
+  appearance: characterProfileFields.appearance.default(''),
+  first_person: characterProfileFields.first_person.default(''),
+  address_others: characterProfileFields.address_others.default(''),
+  speech_examples: characterProfileFields.speech_examples.default([]),
+  description: characterProfileFields.description.default('')
+} as const
+
 // バリエーションの入力。名前・性別以外は空欄ならベース (Character 本体) の値を継承する。
 export const CharacterVariantInputSchema = z.object({
   label: z.string().nonempty('バリエーション名を入力してください').max(50),
-  age: z.string().max(50).default(''),
-  occupation: z.string().max(50).default(''),
-  appearance: z.string().max(2000).default(''),
-  first_person: z.string().max(20).default(''),
-  address_others: z.string().max(500).default(''),
-  speech_examples: z.array(z.string().max(300)).max(20).default([]),
-  description: z.string().max(4000).default('')
+  ...characterProfileInputFields
 })
 export type CharacterVariantInput = z.infer<typeof CharacterVariantInputSchema>
 
 export const CreateCharacterSchema = z.object({
   name: z.string().nonempty('名前を入力してください').max(100),
   gender: z.string().max(20).default(''),
-  age: z.string().max(50).default(''),
-  occupation: z.string().max(50).default(''),
-  appearance: z.string().max(2000).default(''),
-  first_person: z.string().max(20).default(''),
-  address_others: z.string().max(500).default(''),
-  speech_examples: z.array(z.string().max(300)).max(20).default([]),
-  description: z.string().max(4000).default('')
+  ...characterProfileInputFields
 })
 export type CreateCharacterInput = z.infer<typeof CreateCharacterSchema>
 
@@ -94,13 +104,7 @@ export type CreateCharacterInput = z.infer<typeof CreateCharacterSchema>
 export const CharacterVariantSchema = z.object({
   id: z.string().nonempty(),
   label: z.string().nonempty().max(50),
-  age: z.string().max(50),
-  occupation: z.string().max(50),
-  appearance: z.string().max(2000),
-  first_person: z.string().max(20),
-  address_others: z.string().max(500),
-  speech_examples: z.array(z.string().max(300)),
-  description: z.string().max(4000)
+  ...characterProfileFields
 })
 export type CharacterVariant = z.infer<typeof CharacterVariantSchema>
 
@@ -108,13 +112,7 @@ export const CharacterSchema = z.object({
   id: z.string().nonempty(),
   name: z.string().nonempty().max(100),
   gender: z.string().max(20),
-  age: z.string().max(50),
-  occupation: z.string().max(50),
-  appearance: z.string().max(2000),
-  first_person: z.string().max(20),
-  address_others: z.string().max(500),
-  speech_examples: z.array(z.string().max(300)),
-  description: z.string().max(4000),
+  ...characterProfileFields,
   variants: z.array(CharacterVariantSchema).default([]),
   created_at: z.string().nonempty(),
   updated_at: z.string().nonempty()

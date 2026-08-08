@@ -12,14 +12,15 @@ import {
   ChapterVersionSchema,
   CreateCategorySchema,
   CreateNovelSchema,
-  GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   NovelSchema,
   NovelWithChaptersSchema,
   OutlineSchema,
   ReorderSchema,
-  SaveCastSchema
+  SaveCastSchema,
+  StartBatchGenerationSchema,
+  UpdateOutlineBodySchema
 } from '@/schemas/novel.dto'
 
 // API レスポンスのラッパースキーマ。サーバー側は Hono のままで、
@@ -163,7 +164,7 @@ export const api = makeApi([
     path: '/api/novels/:id/outline',
     alias: 'updateOutline',
     description: '章立てを手動で上書き保存',
-    parameters: [{ name: 'body', type: 'Body', schema: z.object({ outline: OutlineSchema }) }],
+    parameters: [{ name: 'body', type: 'Body', schema: UpdateOutlineBodySchema }],
     response: OutlineWrapperSchema,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
@@ -215,16 +216,7 @@ export const api = makeApi([
     path: '/api/novels/:id/generation/start',
     alias: 'startBatchGeneration',
     description: '章リストをキューに登録してバックグラウンド生成を開始',
-    parameters: [
-      {
-        name: 'body',
-        type: 'Body',
-        schema: z.object({
-          chapters: z.array(z.number().int().min(1)).min(1),
-          model: GeminiModelSchema
-        })
-      }
-    ],
+    parameters: [{ name: 'body', type: 'Body', schema: StartBatchGenerationSchema }],
     response: z.object({ status: z.literal('started') }),
     status: 202,
     errors: [{ status: 'default', schema: ErrorBodySchema }]

@@ -11,14 +11,9 @@ import {
   updateCharacter,
   updateVariant
 } from '@/lib/character/repository'
-import { getEnv, getPrisma } from '@/lib/db'
+import { getEnv, isPrismaNotFound, withPrisma } from '@/lib/db'
 import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
-import {
-  buildCastForGemini,
-  buildChapterPayload,
-  buildRelationsForGemini,
-  viewpointCharFor
-} from '@/lib/novel/chapter-payload'
+import { buildChapterPayload, buildPromptInputs } from '@/lib/novel/chapter-payload'
 import {
   arrangeNovels,
   createCategory,
@@ -43,12 +38,14 @@ import {
   ArrangeNovelsSchema,
   CreateCategorySchema,
   CreateNovelSchema,
-  GeminiModelSchema,
+  DEFAULT_GENERATION_MODEL,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   OutlineSchema,
   ReorderSchema,
-  SaveCastSchema
+  SaveCastSchema,
+  StartBatchGenerationSchema,
+  UpdateOutlineBodySchema
 } from '@/schemas/novel.dto'
 import { readAuthEmail, requireAuth } from '@/server/auth'
 
@@ -152,16 +149,32 @@ function serializeCharacter(c: {
   }
 }
 
-// NOTE: all routes are chained on a single builder so that `typeof app` includes
-// every endpoint's input/output schema. The Hono client (hc<AppType>) relies on
-// this — re-assigning `app.get(...)` instead of chaining loses type inference.
+// カテゴリ一覧の JSON 化。`_count.novels` → `novel_count` に整形して返す 3 箇所の重複を集約。
+function serializeCategory(cat: { id: string; name: string; _count: { novels: number } }) {
+  return { id: cat.id, name: cat.name, novel_count: cat._count.novels }
+}
+
+// generation_job.pending は JSON 文字列で number[] を持つ。壊れていれば空配列扱いで表面化させる。
+function parsePendingChapters(raw: string): number[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter((x): x is number => typeof x === 'number')
+}
+
+// NOTE: すべてのルートを 1 本のビルダーにチェーンしているのは、`typeof app` に
+// 各エンドポイントの入出力スキーマを乗せるため。将来 hc<AppType> 相当のクライアントを
+// 導入する場合に備えており、`app.get(...)` を代入し直すと型推論を失う。
 export const app = new Hono()
   .basePath('/api')
 
   // ── Novels ────────────────────────────────────────────────────────────
-  .get('/novels', async (c) => {
-    const prisma = getPrisma()
-    try {
+  .get('/novels', (c) =>
+    withPrisma(async (prisma) => {
       const novels = await listNovels(prisma)
       const charCounts = await getWrittenCharCounts(prisma)
       return c.json(
@@ -170,94 +183,77 @@ export const app = new Hono()
           return { ...serializeNovel(n), written_chars: written === undefined ? 0 : written }
         })
       )
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
   // 整理ページの配置保存 (カテゴリ移動 + 並び替え)。:id ルートより前に置く (static 優先だが念のため)。
-  .put('/novels/arrangement', requireAuth, zValidator('json', ArrangeNovelsSchema), async (c) => {
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+  .put('/novels/arrangement', requireAuth, zValidator('json', ArrangeNovelsSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const input = c.req.valid('json')
       await arrangeNovels(prisma, input.groups)
       return c.json({ ok: true })
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
   // ── Categories (ユーザー作成のフォルダ式カテゴリ) ──────────────────────
-  .get('/categories', async (c) => {
-    const prisma = getPrisma()
-    try {
+  .get('/categories', (c) =>
+    withPrisma(async (prisma) => {
       const categories = await listCategories(prisma)
-      return c.json(categories.map((cat) => ({ id: cat.id, name: cat.name, novel_count: cat._count.novels })))
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .post('/categories', requireAuth, zValidator('json', CreateCategorySchema), async (c) => {
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+      return c.json(categories.map(serializeCategory))
+    })
+  )
+  .post('/categories', requireAuth, zValidator('json', CreateCategorySchema), (c) =>
+    withPrisma(async (prisma) => {
+      const input = c.req.valid('json')
       const category = await createCategory(prisma, input.name)
       return c.json({ id: category.id, name: category.name, novel_count: 0 }, 201)
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .put('/categories/reorder', requireAuth, zValidator('json', ReorderSchema), async (c) => {
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+    })
+  )
+  .put('/categories/reorder', requireAuth, zValidator('json', ReorderSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const input = c.req.valid('json')
       const categories = await reorderCategories(prisma, input.ids)
-      return c.json(categories.map((cat) => ({ id: cat.id, name: cat.name, novel_count: cat._count.novels })))
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .put('/categories/:id', requireAuth, zValidator('json', CreateCategorySchema), async (c) => {
-    const id = c.req.param('id')
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+      return c.json(categories.map(serializeCategory))
+    })
+  )
+  .put('/categories/:id', requireAuth, zValidator('json', CreateCategorySchema), (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      const input = c.req.valid('json')
       const result = await renameCategory(prisma, id, input.name)
       if (result.status === 'name_taken') return c.json({ error: 'name_taken' }, 409)
       if (result.status === 'not_found') return c.json({ error: 'not_found' }, 404)
       return c.json(result.category)
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .delete('/categories/:id', requireAuth, async (c) => {
-    const id = c.req.param('id')
-    const prisma = getPrisma()
-    try {
+    })
+  )
+  .delete('/categories/:id', requireAuth, (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
       await deleteCategory(prisma, id)
       return c.json({ id })
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
-  .post('/novels', requireAuth, zValidator('json', CreateNovelSchema), async (c) => {
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+  .post('/novels', requireAuth, zValidator('json', CreateNovelSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const input = c.req.valid('json')
       const novel = await createNovel(prisma, input)
       // 作成直後は章本文なし。
       return c.json({ ...serializeNovel(novel), written_chars: 0 }, 201)
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
-  .get('/novels/:id', async (c) => {
-    const id = c.req.param('id')
-    const prisma = getPrisma()
-    try {
+  .get('/novels/:id', (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
+      const genJob = novel.generation_job
+        ? {
+            status: novel.generation_job.status,
+            current: novel.generation_job.current,
+            pending: parsePendingChapters(novel.generation_job.pending)
+          }
+        : null
       return c.json({
         ...serializeNovel(novel),
         written_chars: novel.chapters.reduce((sum, ch) => sum + ch.content.length, 0),
@@ -273,94 +269,61 @@ export const app = new Hono()
         relations: novel.relations,
         generation_costs: novel.generation_costs,
         total_cost_usd: novel.total_cost_usd,
-        gen_job: novel.generation_job
-          ? (() => {
-              const parsed: unknown = JSON.parse(novel.generation_job.pending)
-              const pending = Array.isArray(parsed) ? parsed.filter((x): x is number => typeof x === 'number') : []
-              return { status: novel.generation_job.status, current: novel.generation_job.current, pending }
-            })()
-          : null
+        gen_job: genJob
       })
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .put('/novels/:id', requireAuth, zValidator('json', CreateNovelSchema), async (c) => {
-    const id = c.req.param('id')
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
-      const existing = await prisma.novel.findUnique({ where: { id }, select: { num_chapters: true } })
-      if (!existing) return c.json({ error: 'not_found' }, 404)
-      // 章数を減らすと既存章本文が宙ぶらりんになるので拒否。増やすのは OK。
-      if (input.num_chapters < existing.num_chapters) {
-        return c.json({ error: 'num_chapters_cannot_decrease', current: existing.num_chapters }, 409)
+    })
+  )
+  .put('/novels/:id', requireAuth, zValidator('json', CreateNovelSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      const input = c.req.valid('json')
+      try {
+        const existing = await prisma.novel.findUnique({ where: { id }, select: { num_chapters: true } })
+        if (!existing) return c.json({ error: 'not_found' }, 404)
+        // 章数を減らすと既存章本文が宙ぶらりんになるので拒否。増やすのは OK。
+        if (input.num_chapters < existing.num_chapters) {
+          return c.json({ error: 'num_chapters_cannot_decrease', current: existing.num_chapters }, 409)
+        }
+        const novel = await updateNovel(prisma, id, input)
+        // 更新は章本文を変えないので、表示用の written_chars は一覧/詳細の再取得で確定させる。
+        return c.json({ ...serializeNovel(novel), written_chars: 0 })
+      } catch (e) {
+        if (isPrismaNotFound(e)) return c.json({ error: 'not_found' }, 404)
+        throw e
       }
-      const novel = await updateNovel(prisma, id, input)
-      // 更新は章本文を変えないので、表示用の written_chars は一覧/詳細の再取得で確定させる。
-      return c.json({ ...serializeNovel(novel), written_chars: 0 })
-    } catch (e) {
-      const err = e as { code?: string }
-      if (err.code === 'P2025') return c.json({ error: 'not_found' }, 404)
-      throw e
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .delete('/novels/:id', requireAuth, async (c) => {
-    const id = c.req.param('id')
-    const prisma = getPrisma()
-    try {
-      await deleteNovel(prisma, id)
-      return c.body(null, 204)
-    } catch (e) {
-      const err = e as { code?: string }
-      if (err.code === 'P2025') return c.json({ error: 'not_found' }, 404)
-      throw e
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
+  .delete('/novels/:id', requireAuth, (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      try {
+        await deleteNovel(prisma, id)
+        return c.body(null, 204)
+      } catch (e) {
+        if (isPrismaNotFound(e)) return c.json({ error: 'not_found' }, 404)
+        throw e
+      }
+    })
+  )
   // 小説のキャスト・関係・語り手を専用ページからまとめて保存。
-  .put('/novels/:id/cast', requireAuth, zValidator('json', SaveCastSchema), async (c) => {
-    const id = c.req.param('id')
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+  .put('/novels/:id/cast', requireAuth, zValidator('json', SaveCastSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      const input = c.req.valid('json')
       await saveNovelCast(prisma, id, input)
       return c.json({ ok: true })
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
-  .post('/novels/:id/outline', requireAuth, zValidator('json', GenerateOutlineOptionsSchema), async (c) => {
-    const id = c.req.param('id')
-    const options = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+  .post('/novels/:id/outline', requireAuth, zValidator('json', GenerateOutlineOptionsSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      const options = c.req.valid('json')
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
 
       const env = getEnv()
-      const style = {
-        pov: novel.pov,
-        tone: novel.tone,
-        age_rating: novel.age_rating,
-        ending: novel.ending,
-        viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-      }
-      const cast = buildCastForGemini(novel.character_links)
-      const relations = buildRelationsForGemini(novel.relations)
-
-      const params = {
-        title: novel.title,
-        genre: novel.genre,
-        setting: novel.setting,
-        num_chapters: novel.num_chapters,
-        outline_summary_chars: novel.outline_summary_chars,
-        notes: novel.notes
-      }
+      const { params, style, cast, relations } = buildPromptInputs(novel)
 
       // 既存 outline がある + chapters[] 指定 (かつ全章ではない) → 部分再生成。
       // それ以外 (= 初回 / 指定なし / 全章指定) → 全章まとめて生成 (Worker のタイムアウト回避)。
@@ -398,65 +361,39 @@ export const app = new Hono()
         const msg = e instanceof Error ? e.message : String(e)
         return c.json({ error: 'generation_failed', detail: msg }, 502)
       }
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
   // 章立ての手動編集。AI 生成ではなくユーザーが直接 title/summary を書き換える経路。
   // 既存章本文には触らない (本文と outline がズレた場合は別途章本文を再生成する想定)。
-  .put('/novels/:id/outline', requireAuth, zValidator('json', z.object({ outline: OutlineSchema })), async (c) => {
-    const id = c.req.param('id')
-    const { outline } = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+  .put('/novels/:id/outline', requireAuth, zValidator('json', UpdateOutlineBodySchema), (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      const { outline } = c.req.valid('json')
       const existing = await prisma.novel.findUnique({ where: { id }, select: { id: true } })
       if (!existing) return c.json({ error: 'not_found' }, 404)
       await saveOutline(prisma, id, JSON.stringify(outline))
       return c.json({ outline })
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
   // 章立て生成プロンプトのプレビュー (Gemini に投げる前の文字列を返す。デバッグ用)
-  .get('/novels/:id/outline/preview', async (c) => {
-    const id = c.req.param('id')
-    const prisma = getPrisma()
-    try {
+  .get('/novels/:id/outline/preview', (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
-
-      const style = {
-        pov: novel.pov,
-        tone: novel.tone,
-        age_rating: novel.age_rating,
-        ending: novel.ending,
-        viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-      }
-      const cast = buildCastForGemini(novel.character_links)
-      const relations = buildRelationsForGemini(novel.relations)
-      const params = {
-        title: novel.title,
-        genre: novel.genre,
-        setting: novel.setting,
-        num_chapters: novel.num_chapters,
-        outline_summary_chars: novel.outline_summary_chars,
-        notes: novel.notes
-      }
+      const { params, style, cast, relations } = buildPromptInputs(novel)
       const prompt = buildOutlinePrompt(params, style, cast, relations)
       return c.json({ prompt })
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
   // 章本文生成時に実際に Gemini へ送ったプロンプト (最新 version) を返す。
   // この機能より前に生成された章は prompt=null。
-  .get('/novels/:id/chapters/:number/prompt', zValidator('param', ChapterParamSchema), async (c) => {
-    const { id, number: chapterNumber } = c.req.valid('param')
-    const prisma = getPrisma()
-    try {
+  .get('/novels/:id/chapters/:number/prompt', zValidator('param', ChapterParamSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const { id, number: chapterNumber } = c.req.valid('param')
       const chapter = await prisma.chapter.findFirst({
         where: { novel_id: id, chapter_number: chapterNumber },
         orderBy: { version: 'desc' },
@@ -464,15 +401,12 @@ export const app = new Hono()
       })
       if (!chapter) return c.json({ error: 'not_found' }, 404)
       return c.json({ prompt: chapter.prompt })
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
   // 章の生成履歴 (全 version)。再生成しても過去は append-only で残るので、ここで全部返す。
-  .get('/novels/:id/chapters/:number/versions', zValidator('param', ChapterParamSchema), async (c) => {
-    const { id, number: chapterNumber } = c.req.valid('param')
-    const prisma = getPrisma()
-    try {
+  .get('/novels/:id/chapters/:number/versions', zValidator('param', ChapterParamSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const { id, number: chapterNumber } = c.req.valid('param')
       const versions = await listChapterVersions(prisma, id, chapterNumber)
       return c.json(
         versions.map((v) => ({
@@ -484,21 +418,18 @@ export const app = new Hono()
           created_at: v.created_at.toISOString()
         }))
       )
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
   .post(
     '/novels/:id/outline/:number',
     requireAuth,
     zValidator('param', ChapterParamSchema),
     zValidator('json', GenerateOptionsSchema),
-    async (c) => {
-      const { id, number: chapterNumber } = c.req.valid('param')
-      const options = c.req.valid('json')
-      const prisma = getPrisma()
-      try {
+    (c) =>
+      withPrisma(async (prisma) => {
+        const { id, number: chapterNumber } = c.req.valid('param')
+        const options = c.req.valid('json')
         const novel = await getNovelWithChapters(prisma, id)
         if (!novel) return c.json({ error: 'not_found' }, 404)
         if (!novel.outline) return c.json({ error: 'outline_not_generated' }, 400)
@@ -507,27 +438,12 @@ export const app = new Hono()
         if (!parsedOutline.success) return c.json({ error: 'invalid_outline' }, 500)
 
         const env = getEnv()
-        const style = {
-          pov: novel.pov,
-          tone: novel.tone,
-          age_rating: novel.age_rating,
-          ending: novel.ending,
-          viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-        }
-        const cast = buildCastForGemini(novel.character_links)
-        const relations = buildRelationsForGemini(novel.relations)
+        const { params, style, cast, relations } = buildPromptInputs(novel)
 
         try {
           const next = await regenerateOutlineChapter(
             env,
-            {
-              title: novel.title,
-              genre: novel.genre,
-              setting: novel.setting,
-              num_chapters: novel.num_chapters,
-              outline_summary_chars: novel.outline_summary_chars,
-              notes: novel.notes
-            },
+            params,
             style,
             parsedOutline.data,
             chapterNumber,
@@ -547,10 +463,7 @@ export const app = new Hono()
           const msg = e instanceof Error ? e.message : String(e)
           return c.json({ error: 'generation_failed', detail: msg }, 502)
         }
-      } finally {
-        await prisma.$disconnect()
-      }
-    }
+      })
   )
 
   // 生成キックオフ。Durable Object に payload を渡して即座に 202 を返す。
@@ -564,18 +477,8 @@ export const app = new Hono()
     async (c) => {
       const { id, number: chapterNumber } = c.req.valid('param')
       const options = c.req.valid('json')
-      const prisma = getPrisma()
-      let payload: import('@/lib/chapter-gen-do').StartChapterGenPayload | null
-      try {
-        payload = await buildChapterPayload(
-          prisma,
-          id,
-          chapterNumber,
-          options.model !== undefined ? options.model : GeminiModelSchema.enum['gemini-2.5-flash']
-        )
-      } finally {
-        await prisma.$disconnect()
-      }
+      const model = options.model !== undefined ? options.model : DEFAULT_GENERATION_MODEL
+      const payload = await withPrisma((prisma) => buildChapterPayload(prisma, id, chapterNumber, model))
       if (!payload) return c.json({ error: 'not_found' }, 404)
 
       const env = getEnv()
@@ -596,50 +499,38 @@ export const app = new Hono()
     return stub.openStream()
   })
 
-  .post(
-    '/novels/:id/generation/start',
-    requireAuth,
-    zValidator('json', z.object({ chapters: z.array(z.number().int().min(1)).min(1), model: GeminiModelSchema })),
-    async (c) => {
+  .post('/novels/:id/generation/start', requireAuth, zValidator('json', StartBatchGenerationSchema), (c) =>
+    withPrisma(async (prisma) => {
       const id = c.req.param('id')
       const { chapters, model } = c.req.valid('json')
-      const prisma = getPrisma()
-      try {
-        await upsertGenerationJob(prisma, id, {
-          status: 'running',
-          pending: JSON.stringify(chapters),
-          current: chapters[0],
-          model
-        })
-        const payload = await buildChapterPayload(prisma, id, chapters[0], model)
-        if (!payload) return c.json({ error: 'not_found' }, 404)
-        const env = getEnv()
-        const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapters[0]}`)
-        const stub = env.CHAPTER_GEN.get(doId)
-        await stub.start(payload)
-        return c.json({ status: 'started' }, 202)
-      } finally {
-        await prisma.$disconnect()
-      }
-    }
+      await upsertGenerationJob(prisma, id, {
+        status: 'running',
+        pending: JSON.stringify(chapters),
+        current: chapters[0],
+        model
+      })
+      const payload = await buildChapterPayload(prisma, id, chapters[0], model)
+      if (!payload) return c.json({ error: 'not_found' }, 404)
+      const env = getEnv()
+      const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapters[0]}`)
+      const stub = env.CHAPTER_GEN.get(doId)
+      await stub.start(payload)
+      return c.json({ status: 'started' }, 202)
+    })
   )
 
-  .post('/novels/:id/generation/stop', requireAuth, async (c) => {
-    const id = c.req.param('id')
-    const prisma = getPrisma()
-    try {
+  .post('/novels/:id/generation/stop', requireAuth, (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
       await stopGenerationJob(prisma, id)
       return c.json({ ok: true })
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
   // 章本文の削除。整合性を保つため「最新の生成済み章」しか消せない (後続を消さないと前章を消す意味がないので)。
-  .delete('/novels/:id/chapters/:number', requireAuth, zValidator('param', ChapterParamSchema), async (c) => {
-    const { id, number: chapterNumber } = c.req.valid('param')
-    const prisma = getPrisma()
-    try {
+  .delete('/novels/:id/chapters/:number', requireAuth, zValidator('param', ChapterParamSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const { id, number: chapterNumber } = c.req.valid('param')
       const latest = await prisma.chapter.findFirst({
         where: { novel_id: id },
         orderBy: { chapter_number: 'desc' },
@@ -651,114 +542,85 @@ export const app = new Hono()
       }
       await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
       return c.body(null, 204)
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
   // ── Characters ───────────────────────────────────────────────────────
-  .get('/characters', async (c) => {
-    const prisma = getPrisma()
-    try {
+  .get('/characters', (c) =>
+    withPrisma(async (prisma) => {
       const characters = await listCharacters(prisma)
       return c.json(characters.map(serializeCharacter))
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .post('/characters', requireAuth, zValidator('json', CreateCharacterSchema), async (c) => {
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+    })
+  )
+  .post('/characters', requireAuth, zValidator('json', CreateCharacterSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const input = c.req.valid('json')
       const character = await createCharacter(prisma, input)
       return c.json(serializeCharacter(character), 201)
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
-  .get('/characters/:id', async (c) => {
-    const id = c.req.param('id')
-    const prisma = getPrisma()
-    try {
+  .get('/characters/:id', (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
       const character = await getCharacter(prisma, id)
       if (!character) return c.json({ error: 'not_found' }, 404)
       return c.json(serializeCharacter(character))
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .put('/characters/:id', requireAuth, zValidator('json', CreateCharacterSchema), async (c) => {
-    const id = c.req.param('id')
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
-      const character = await updateCharacter(prisma, id, input)
-      return c.json(serializeCharacter(character))
-    } catch (e) {
-      const err = e as { code?: string }
-      if (err.code === 'P2025') return c.json({ error: 'not_found' }, 404)
-      throw e
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .delete('/characters/:id', requireAuth, async (c) => {
-    const id = c.req.param('id')
-    const prisma = getPrisma()
-    try {
-      await deleteCharacter(prisma, id)
-      return c.body(null, 204)
-    } catch (e) {
-      const err = e as { code?: string }
-      if (err.code === 'P2025') return c.json({ error: 'not_found' }, 404)
-      throw e
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
+  .put('/characters/:id', requireAuth, zValidator('json', CreateCharacterSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      const input = c.req.valid('json')
+      try {
+        const character = await updateCharacter(prisma, id, input)
+        return c.json(serializeCharacter(character))
+      } catch (e) {
+        if (isPrismaNotFound(e)) return c.json({ error: 'not_found' }, 404)
+        throw e
+      }
+    })
+  )
+  .delete('/characters/:id', requireAuth, (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      try {
+        await deleteCharacter(prisma, id)
+        return c.body(null, 204)
+      } catch (e) {
+        if (isPrismaNotFound(e)) return c.json({ error: 'not_found' }, 404)
+        throw e
+      }
+    })
+  )
 
   // ── Character variants (別の姿・状態。専用ページから管理) ──────────────
-  .post('/characters/:id/variants', requireAuth, zValidator('json', CharacterVariantInputSchema), async (c) => {
-    const id = c.req.param('id')
-    const input = c.req.valid('json')
-    const prisma = getPrisma()
-    try {
+  .post('/characters/:id/variants', requireAuth, zValidator('json', CharacterVariantInputSchema), (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      const input = c.req.valid('json')
       const variant = await createVariant(prisma, id, input)
       return c.json(variant, 201)
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
-  .put(
-    '/characters/:id/variants/:variantId',
-    requireAuth,
-    zValidator('json', CharacterVariantInputSchema),
-    async (c) => {
+    })
+  )
+  .put('/characters/:id/variants/:variantId', requireAuth, zValidator('json', CharacterVariantInputSchema), (c) =>
+    withPrisma(async (prisma) => {
       const id = c.req.param('id')
       const variantId = c.req.param('variantId')
       const input = c.req.valid('json')
-      const prisma = getPrisma()
-      try {
-        const variant = await updateVariant(prisma, id, variantId, input)
-        if (variant === null) return c.json({ error: 'not_found' }, 404)
-        return c.json(variant)
-      } finally {
-        await prisma.$disconnect()
-      }
-    }
+      const variant = await updateVariant(prisma, id, variantId, input)
+      if (variant === null) return c.json({ error: 'not_found' }, 404)
+      return c.json(variant)
+    })
   )
-  .delete('/characters/:id/variants/:variantId', requireAuth, async (c) => {
-    const id = c.req.param('id')
-    const variantId = c.req.param('variantId')
-    const prisma = getPrisma()
-    try {
+  .delete('/characters/:id/variants/:variantId', requireAuth, (c) =>
+    withPrisma(async (prisma) => {
+      const id = c.req.param('id')
+      const variantId = c.req.param('variantId')
       await deleteVariant(prisma, id, variantId)
       return c.body(null, 204)
-    } finally {
-      await prisma.$disconnect()
-    }
-  })
+    })
+  )
 
   // ── Auth ──────────────────────────────────────────────────────────────
   // 認証状態を返すエンドポイント。匿名 (CF Access JWT なし) なら 200 + email=null、
@@ -768,5 +630,3 @@ export const app = new Hono()
     const email = await readAuthEmail(c)
     return c.json({ email })
   })
-
-export type AppType = typeof app

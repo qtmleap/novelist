@@ -15,11 +15,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   num_chapters_cannot_decrease: '章数は減らせません',
   outline_not_generated: '章立てがまだ生成されていません',
   invalid_outline: '章立てのデータが壊れています',
-  invalid_chapter_number: '章番号が不正です',
-  chapter_not_in_outline: 'この章は章立てに含まれていません',
   not_latest_chapter: '最新の生成済み章でのみ操作できます',
   no_chapters: 'まだ章本文が生成されていません',
-  db_error: 'データベースエラーが発生しました',
   // 認証ミドルウェア由来。401 ステータスとセットで返る。
   unauthenticated: 'ログインが必要です',
   invalid_token: 'ログイン情報が無効です。ログインし直してください'

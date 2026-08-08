@@ -12,8 +12,7 @@ import {
 } from '@/lib/gemini/client'
 import { buildChapterPayload } from '@/lib/novel/chapter-payload'
 import { saveChapter } from '@/lib/novel/repository'
-import type { GeminiModel, Outline } from '@/schemas/novel.dto'
-import { GeminiModelSchema } from '@/schemas/novel.dto'
+import { DEFAULT_GENERATION_MODEL, type GeminiModel, type Outline } from '@/schemas/novel.dto'
 
 // Gemini の finishReason を人向けの日本語メッセージに変換する。
 // 'STOP' 以外がここに届く前提なので 'STOP' は扱わない。
@@ -147,6 +146,16 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   }
 
   // 生成開始 (idempotent: streaming 中なら no-op、done なら新しい生成で上書き)
+  // run() 起動前の状態リセット。start()/alarm()/openStream() の 3 経路で同じフィールドを初期化していたのを集約。
+  // phase は呼び出し側で 'streaming' を明示的に立てる (self-heal 経路では既に streaming 継続中のため)。
+  private resetForRun() {
+    this.buffer = ''
+    this.errMsg = null
+    this.chapterId = null
+    this.chapterTitle = null
+    this.lastProgressAt = Date.now()
+  }
+
   async start(payload: StartChapterGenPayload): Promise<{ status: 'started' | 'already_streaming' }> {
     // run() が生きている間は触らない (buffer リセットや二重 Gemini 呼び出しのレースを防ぐ)。
     if (this.running) return { status: 'already_streaming' }
@@ -160,12 +169,8 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       }
     }
     this.phase = 'streaming'
-    this.buffer = ''
-    this.errMsg = null
-    this.chapterId = null
-    this.chapterTitle = null
+    this.resetForRun()
     this.payload = payload
-    this.lastProgressAt = Date.now()
     await this.persistAll()
     // alarm を将来時刻に立てると DO が hibernate されない。run() が evict で消えても、
     // alarm() ハンドラ内で stale 判定 → 再起動できる。
@@ -183,11 +188,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     const sinceProgress = Date.now() - this.lastProgressAt
     if (sinceProgress > STALE_STREAMING_MS && this.payload !== null && !this.running) {
       // run() の Promise が消えているはずなので新しく起動。buffer 等は start() と同じ初期化を行う。
-      this.buffer = ''
-      this.errMsg = null
-      this.chapterId = null
-      this.chapterTitle = null
-      this.lastProgressAt = Date.now()
+      this.resetForRun()
       await this.persistAll()
       this.ctx.waitUntil(this.run())
     }
@@ -210,11 +211,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.payload !== null &&
       !this.running
     if (needsSelfHeal) {
-      this.buffer = ''
-      this.errMsg = null
-      this.chapterId = null
-      this.chapterTitle = null
-      this.lastProgressAt = Date.now()
+      this.resetForRun()
     }
 
     // 初期送出 (replay / 最終イベント / self-heal の再起動) は Response を返した後に
@@ -272,23 +269,6 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         'X-Accel-Buffering': 'no'
       }
     })
-  }
-
-  // 現在状態の照会 (debug 用)
-  async status(): Promise<{
-    phase: Phase
-    bufferLen: number
-    chapterId: string | null
-    title: string | null
-    error: string | null
-  }> {
-    return {
-      phase: this.phase,
-      bufferLen: this.buffer.length,
-      chapterId: this.chapterId,
-      title: this.chapterTitle,
-      error: this.errMsg
-    }
   }
 
   // 二重起動ガード。start()/alarm()/openStream() が並行して呼んでも run 本体は 1 つだけ走る。
@@ -560,7 +540,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         prisma,
         this.payload.novelId,
         nextChapter,
-        this.payload.model !== undefined ? this.payload.model : GeminiModelSchema.enum['gemini-2.5-flash']
+        this.payload.model !== undefined ? this.payload.model : DEFAULT_GENERATION_MODEL
       )
       if (!nextPayload) {
         await prisma.novelGenerationJob.update({
