@@ -1,11 +1,7 @@
-## Type
-pr_agent:type
-
 ## Description
-pr_agent:summary
 
-## Walkthrough
-pr_agent:walkthrough
+<!-- Describe the problem and resulting behavior. -->
 
-## Summary
-<!-- Summary of main changes here -->
+## Validation
+
+<!-- List the checks performed and any relevant limitations. -->
