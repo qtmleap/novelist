@@ -2,6 +2,15 @@ name: Continuous Integration
 on:
   push:
 jobs:
+  ci-change-scope:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-change-scope.yaml
+    with:
+      doc-paths: '["AGENTS.md","CHANGELOG.md","CLAUDE.md","LICENSE","README.md","docs/DESIGN.md","docs/development/ci-change-scope.md","docs/plans/2026-05-27-ai-novel-writer.md"]'
+      doc-prefixes: '[]'
+      runner: '["self-hosted","ubuntu-latest"]'
+
   commitlint:
     name: CommitLint
     if: github.event.action != 'closed' || github.event.pull_request.merged != true
@@ -39,55 +48,97 @@ jobs:
         run: |
           bunx @biomejs/biome check
   typecheck:
+    needs: ["ci-change-scope"]
     name: Type Check
-    runs-on: ubuntu-latest
-    if: github.event.action != 'closed' || github.event.pull_request.merged != true
+    runs-on: ${{ fromJSON((needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true') && '["self-hosted","ubuntu-latest"]' || '"ubuntu-latest"') }}
+    if: ${{ !cancelled() && (true) && (github.event.action != 'closed' || github.event.pull_request.merged != true) }}
     steps:
       - name: Checkout
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         uses: actions/checkout@v6
       - name: Bun
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - name: Install dependencies
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Generate Prisma client
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         run: bunx prisma generate
         env:
           DATABASE_URL: file:./dev.db
       - name: Type check
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         run: bunx tsc --noEmit
+      - name: Docs-only exemption
+        if: ${{ needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true' }}
+        shell: bash
+        working-directory: .
+        env:
+          CI_CHANGE_REASON: ${{ needs['ci-change-scope'].outputs.reason }}
+        run: |
+          printf '%s\n' "$CI_CHANGE_REASON" >> "$GITHUB_STEP_SUMMARY"
   build:
+    needs: ["ci-change-scope"]
     name: Build
-    runs-on: ubuntu-latest
-    if: github.event.action != 'closed' || github.event.pull_request.merged != true
+    runs-on: ${{ fromJSON((needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true') && '["self-hosted","ubuntu-latest"]' || '"ubuntu-latest"') }}
+    if: ${{ !cancelled() && (true) && (github.event.action != 'closed' || github.event.pull_request.merged != true) }}
     steps:
       - name: Checkout
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         uses: actions/checkout@v6
       - name: Bun
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - name: Install dependencies
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Generate Prisma client
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         run: bunx prisma generate
         env:
           DATABASE_URL: file:./dev.db
       - name: Build
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         run: bun run build
+      - name: Docs-only exemption
+        if: ${{ needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true' }}
+        shell: bash
+        working-directory: .
+        env:
+          CI_CHANGE_REASON: ${{ needs['ci-change-scope'].outputs.reason }}
+        run: |
+          printf '%s\n' "$CI_CHANGE_REASON" >> "$GITHUB_STEP_SUMMARY"
   test:
+    needs: ["ci-change-scope"]
     name: Run Tests
-    runs-on: ubuntu-latest
-    if: github.event.action != 'closed' || github.event.pull_request.merged != true
+    runs-on: ${{ fromJSON((needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true') && '["self-hosted","ubuntu-latest"]' || '"ubuntu-latest"') }}
+    if: ${{ !cancelled() && (true) && (github.event.action != 'closed' || github.event.pull_request.merged != true) }}
     steps:
       - name: Checkout
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         uses: actions/checkout@v6
       - name: Setup Bun
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - name: Install dependencies
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Run tests
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         run: bunx bun test
+
+      - name: Docs-only exemption
+        if: ${{ needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true' }}
+        shell: bash
+        working-directory: .
+        env:
+          CI_CHANGE_REASON: ${{ needs['ci-change-scope'].outputs.reason }}
+        run: |
+          printf '%s\n' "$CI_CHANGE_REASON" >> "$GITHUB_STEP_SUMMARY"
