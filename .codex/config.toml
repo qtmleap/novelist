@@ -1,0 +1,12 @@
+# devcontainer 内で動かす前提なので、承認とサンドボックスを無効にする (YOLO)
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[projects."/home/vscode/app"]
+trust_level = "trusted"
+
+[tui]
+screen_reader_detection_done = true
+
+[tui.model_availability_nux]
+"gpt-6.1-sol" = 1
