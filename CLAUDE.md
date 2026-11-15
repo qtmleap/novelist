@@ -6,7 +6,7 @@ Vinext (Vite ベース App Router) + React 19 + Cloudflare Workers の Web ア�
 
 ## コマンド
 
-- `bun install` - 依存関係のインストール
+- `bun install` - 依存関係のインストール (`@qtmleap/*` は GitHub Packages のため `GITHUB_TOKEN=$(gh auth token) bun install`。`.npmrc` が `GITHUB_TOKEN` を参照する)
 - `bun run dev` - 開発サーバー起動 (port 11599)
 - `bun run build` - プロダクションビルド
 - `bun run deploy` - Cloudflare Workers へデプロイ

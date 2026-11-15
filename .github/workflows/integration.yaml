@@ -1,6 +1,9 @@
 name: Continuous Integration
 on:
   push:
+permissions:
+  contents: read
+  packages: read
 jobs:
   commitlint:
     name: CommitLint
@@ -14,6 +17,8 @@ jobs:
         with:
           bun-version: latest
       - name: Install commitlint
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bun install conventional-changelog-conventionalcommits
           bun install commitlint@latest
@@ -50,6 +55,8 @@ jobs:
         with:
           bun-version: latest
       - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Generate Prisma client
         run: bunx prisma generate
@@ -69,6 +76,8 @@ jobs:
         with:
           bun-version: latest
       - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Generate Prisma client
         run: bunx prisma generate
@@ -88,6 +97,8 @@ jobs:
         with:
           bun-version: latest
       - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Run tests
         run: bunx bun test
