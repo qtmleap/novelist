@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "repository": "qtmleap/devcontainers",
+  "template": "vinext",
+  "revision": "65aefb105586144e0d75622ca2db7543844d8c8f",
+  "managed": {
+    ".devcontainer/Dockerfile": "2d70ba43799ac329cec010279314182a3c7a7c1ccfba3b2463782f78377de89a",
+    ".devcontainer/postAttachCommand.sh": "3870bf76dfe0c17b6bb2ea6fb65a91bba94f151a66fd64d0c0971a2986b5a086",
+    ".devcontainer/postCreateCommand.sh": "b7c92bdc21bbee0a21a78fd94533328d6e141d1afd5259baf910ad6d7e17491a"
+  }
+}
