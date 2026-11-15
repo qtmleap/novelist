@@ -6,6 +6,7 @@ import { Loader2, PenLine, Plus, Save } from 'lucide-react'
 import { useState } from 'react'
 import type { DefaultValues } from 'react-hook-form'
 import { type Resolver, useForm } from 'react-hook-form'
+import { ModelSelectItems } from '@/components/novel/ModelSelectItems'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
@@ -29,7 +30,6 @@ import {
   DEFAULT_TONE,
   DEFAULT_WRITER_MODEL,
   ENDING_OPTIONS,
-  GEMINI_MODELS,
   GeminiModelSchema,
   OUTLINE_SUMMARY_LENGTH_OPTIONS,
   POV_OPTIONS,
@@ -572,11 +572,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {GEMINI_MODELS.map((m) => (
-                        <SelectItem key={m} value={m}>
-                          {m}
-                        </SelectItem>
-                      ))}
+                      <ModelSelectItems />
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -605,11 +601,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {GEMINI_MODELS.map((m) => (
-                        <SelectItem key={m} value={m}>
-                          {m}
-                        </SelectItem>
-                      ))}
+                      <ModelSelectItems />
                     </SelectContent>
                   </Select>
                   <FormMessage />

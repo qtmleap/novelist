@@ -93,8 +93,15 @@ export type NovelCharacterRelationInput = z.infer<typeof NovelCharacterRelationI
 // 作成後は novel.editor_model / writer_model が真実 (DB は NOT NULL default あり)。
 // model はサーバー側で Gemini の URL パスに入るため、必ず enum で検証する。
 
-// 公式 (ai.google.dev/gemini-api/docs/models) 準拠。2.0 系は 2026-06-01 停止のため除外。
+// 公式 (ai.google.dev/gemini-api/docs/models) 準拠 (2026-11-15 確認)。2.0 系は停止済みのため除外。
+// 2.5 系は非推奨で、2026-12-01 から 2.5-pro は 3.8-flash、2.5-flash は 3.5-flash-lite に自動転送される。
 export const GEMINI_MODELS = [
+  'gemini-4-carbon',
+  'gemini-4-argon',
+  'gemini-4-hydrogen',
+  'gemini-3.8-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash-lite',
   'gemini-3.5-flash',
   'gemini-3.1-pro-preview',
   'gemini-3-flash-preview',
@@ -110,7 +117,14 @@ export const DEFAULT_EDITOR_MODEL: GeminiModel = 'gemini-3.1-flash-lite'
 export const DEFAULT_WRITER_MODEL: GeminiModel = 'gemini-3.1-flash-lite'
 
 // 設定画面の ☆ 表示用。各 1〜5 (多いほど良い)。price は「安さ」(多いほど安価)。
+// 公式に評価値は無いので、位置づけと単価からの目安 (Carbon = 最高性能、Argon = 速さと低コスト寄り)。
 export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; price: number }> = {
+  'gemini-4-carbon': { quality: 5, speed: 2, price: 1 },
+  'gemini-4-argon': { quality: 4, speed: 3, price: 1 },
+  'gemini-4-hydrogen': { quality: 4, speed: 4, price: 2 },
+  'gemini-3.8-flash': { quality: 4, speed: 4, price: 3 },
+  'gemini-3.6-flash': { quality: 4, speed: 4, price: 3 },
+  'gemini-3.5-flash-lite': { quality: 3, speed: 5, price: 4 },
   'gemini-3.5-flash': { quality: 4, speed: 4, price: 2 },
   'gemini-3.1-pro-preview': { quality: 5, speed: 2, price: 1 },
   'gemini-3-flash-preview': { quality: 4, speed: 4, price: 3 },
@@ -118,6 +132,34 @@ export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; p
   'gemini-2.5-pro': { quality: 5, speed: 2, price: 2 },
   'gemini-2.5-flash': { quality: 3, speed: 4, price: 4 },
   'gemini-2.5-flash-lite': { quality: 2, speed: 5, price: 5 }
+}
+
+// 1M トークンあたりの USD 単価。画面の表示とコスト記録 (computeCostUsd) の両方がこの表を使う。
+// 2026-11-15 時点の標準 (非バッチ・非キャッシュ) 単価。値上げ予定がある行は、改定日に更新すること。
+//   gemini-4-carbon / gemini-4-argon: 2026-12-01 から input 4.0 / output 20.0
+//   gemini-3.8-flash / gemini-3.6-flash: 2027-01-01 から input 1.5 / output 7.5
+// longPromptSurcharge: プロンプトが 20 万トークンを超えると単価が上がるモデル (表の値は 20 万以下)。
+export type ModelPricing = { input: number; output: number; longPromptSurcharge?: true }
+export const MODEL_PRICING_USD_PER_M_TOKENS: Record<GeminiModel, ModelPricing> = {
+  'gemini-4-carbon': { input: 2.0, output: 10.0 },
+  'gemini-4-argon': { input: 2.0, output: 10.0 },
+  'gemini-4-hydrogen': { input: 1.5, output: 7.5 },
+  'gemini-3.8-flash': { input: 0.75, output: 3.75 },
+  'gemini-3.6-flash': { input: 0.75, output: 3.75 },
+  'gemini-3.5-flash-lite': { input: 0.3, output: 2.5 },
+  'gemini-3.5-flash': { input: 1.5, output: 9.0 },
+  'gemini-3.1-pro-preview': { input: 2.0, output: 12.0, longPromptSurcharge: true },
+  'gemini-3-flash-preview': { input: 0.5, output: 3.0 },
+  'gemini-3.1-flash-lite': { input: 0.25, output: 1.5 },
+  'gemini-2.5-pro': { input: 1.25, output: 10.0, longPromptSurcharge: true },
+  'gemini-2.5-flash': { input: 0.3, output: 2.5 },
+  'gemini-2.5-flash-lite': { input: 0.1, output: 0.4 }
+}
+
+// 「$0.75 / $3.75」(入力 / 出力)。画面表示用。
+export function formatModelPrice(model: GeminiModel): string {
+  const p = MODEL_PRICING_USD_PER_M_TOKENS[model]
+  return `$${p.input.toFixed(2)} / $${p.output.toFixed(2)}`
 }
 
 // ---------------------- あらすじ入力 ----------------------

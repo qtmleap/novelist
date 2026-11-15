@@ -1,7 +1,14 @@
 import { z } from 'zod'
 import type { Env } from '@/lib/db'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
-import { type GeminiModel, type Outline, type OutlineChapter, OutlineSchema } from '@/schemas/novel.dto'
+import {
+  type GeminiModel,
+  MODEL_PRICING_USD_PER_M_TOKENS,
+  type ModelPricing,
+  type Outline,
+  type OutlineChapter,
+  OutlineSchema
+} from '@/schemas/novel.dto'
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 
@@ -114,19 +121,10 @@ type StreamChapterParams = {
   onChunk?: () => void
 }
 
-type ModelPricing = { input: number; output: number }
-const MODEL_PRICING_USD_PER_M_TOKENS: Record<string, ModelPricing> = {
-  'gemini-3.5-flash': { input: 1.5, output: 9.0 },
-  'gemini-3.1-pro-preview': { input: 2.0, output: 12.0 },
-  'gemini-3-flash-preview': { input: 0.5, output: 3.0 },
-  'gemini-3.1-flash-lite': { input: 0.25, output: 1.5 },
-  'gemini-2.5-pro': { input: 1.25, output: 10.0 },
-  'gemini-2.5-flash': { input: 0.3, output: 2.5 },
-  'gemini-2.5-flash-lite': { input: 0.1, output: 0.4 }
-}
-
+// 単価表は画面表示と共有するため novel.dto.ts にある。DB の model は文字列なので、未知の名前は 0 を返す。
 export function computeCostUsd(model: string, promptTokens: number, outputTokens: number): number {
-  const pricing = MODEL_PRICING_USD_PER_M_TOKENS[model]
+  const pricingByModel: Record<string, ModelPricing | undefined> = MODEL_PRICING_USD_PER_M_TOKENS
+  const pricing = pricingByModel[model]
   if (!pricing) {
     console.warn(`computeCostUsd: unknown model "${model}", returning 0`)
     return 0
