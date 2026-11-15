@@ -32,8 +32,10 @@ jobs:
           DATABASE_URL: file:./dev.db
       - name: Build
         run: bun run build
-      - name: Inject env-specific config into wrangler.json
-        run: bun scripts/inject-env-into-wrangler-json.ts $ENVIRONMENT
+        env:
+          # @cloudflare/vite-plugin bakes the env.<name> worker name, D1 and routes
+          # into dist/server/wrangler.json at build time.
+          CLOUDFLARE_ENV: ${{ env.ENVIRONMENT }}
       - name: Wrangler deploy
         uses: cloudflare/wrangler-action@v4
         with:
