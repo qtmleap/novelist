@@ -1,13 +1,16 @@
 import { z } from 'zod'
 import type { Env } from '@/lib/db'
+import { openaiCompleteJsonText, openaiStreamTarget } from '@/lib/openai/client'
+import type { ParsedChunk, StreamTarget } from '@/lib/openai/protocol'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
 import {
-  type GeminiModel,
   MODEL_PRICING_USD_PER_M_TOKENS,
   type ModelPricing,
+  type ModelRef,
   type Outline,
   type OutlineChapter,
-  OutlineSchema
+  OutlineSchema,
+  parseModelRef
 } from '@/schemas/novel.dto'
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
@@ -115,13 +118,14 @@ type StreamChapterParams = {
   style: StyleParams
   cast?: CastMember[]
   relations?: CastRelation[]
-  model?: GeminiModel
-  // Gemini から任意のチャンク (thinking 含む) を受け取るたびに呼ばれるコールバック。
+  model?: ModelRef
+  // 上流から任意のチャンク (thinking 含む) を受け取るたびに呼ばれるコールバック。
   // DO 側が lastProgressAt を更新して stale 誤検知を防ぐために使う。
   onChunk?: () => void
 }
 
-// 単価表は画面表示と共有するため novel.dto.ts にある。DB の model は文字列なので、未知の名前は 0 を返す。
+// Gemini 直のコスト。単価表は画面表示と共有するため novel.dto.ts にある。
+// OpenAI 互換のモデルは単価が /models から来るので、こちらではなく openai/models.ts の computeCostUsd を使う。
 export function computeCostUsd(model: string, promptTokens: number, outputTokens: number): number {
   const pricingByModel: Record<string, ModelPricing | undefined> = MODEL_PRICING_USD_PER_M_TOKENS
   const pricing = pricingByModel[model]
@@ -146,8 +150,52 @@ const SAFETY_SETTINGS_OFF = [
   { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'OFF' }
 ] as const
 
-function resolveModel(env: Env, model?: GeminiModel): string {
+// 実際に使うモデルの参照 (保存値の形)。指定が無ければ Gemini の既定にする。
+function resolveModel(env: Env, model?: ModelRef): ModelRef {
   return model ?? env.GEMINI_MODEL ?? 'gemini-2.5-flash'
+}
+
+// Gemini の非ストリーム呼び出し (章立て用)。本文テキストを返し、空なら理由つきで throw する。
+async function geminiGenerateJsonText(env: Env, id: string, prompt: string, op: string): Promise<string> {
+  const url = `${GEMINI_BASE}/${id}:generateContent?key=${env.GEMINI_API_KEY}`
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    safetySettings: SAFETY_SETTINGS_OFF,
+    generationConfig: { responseMimeType: 'application/json' }
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Gemini ${op} failed: ${res.status} ${err}`)
+  }
+
+  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+  if (!text) {
+    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+    const promptBlock = data.promptFeedback?.blockReason
+    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+    const detail = [
+      `finishReason=${finishReason}`,
+      promptBlock ? `promptBlockReason=${promptBlock}` : '',
+      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+    ]
+      .filter((x) => x.length > 0)
+      .join(' / ')
+    throw new Error(`Gemini returned empty ${op} response (${detail})`)
+  }
+  return text
+}
+
+// 章立て用の非ストリーム呼び出し。モデルの接頭辞で Gemini / OpenAI 互換を切り替える。
+async function generateJsonText(env: Env, ref: ModelRef, prompt: string, op: string): Promise<string> {
+  const target = parseModelRef(ref)
+  if (target.provider === 'openai') return openaiCompleteJsonText(env, target.id, prompt, op)
+  return geminiGenerateJsonText(env, target.id, prompt, op)
 }
 
 // プロンプト用のキャラクター詳細セクションを組み立てる。speech_examples・address_others・
@@ -310,63 +358,26 @@ export async function generateOutline(
   env: Env,
   novel: GeminiNovelParams,
   style: StyleParams,
-  modelOverride?: GeminiModel,
+  modelOverride?: ModelRef,
   cast?: CastMember[],
   relations?: CastRelation[]
 ): Promise<Outline> {
   const model = resolveModel(env, modelOverride)
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
-
   const prompt = buildOutlinePrompt(novel, style, cast, relations)
-
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    safetySettings: SAFETY_SETTINGS_OFF,
-    generationConfig: {
-      responseMimeType: 'application/json'
-    }
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gemini generateOutline failed: ${res.status} ${err}`)
-  }
-
-  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
-
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) {
-    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
-    const promptBlock = data.promptFeedback?.blockReason
-    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
-    const detail = [
-      `finishReason=${finishReason}`,
-      promptBlock ? `promptBlockReason=${promptBlock}` : '',
-      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
-    ]
-      .filter((s) => s.length > 0)
-      .join(' / ')
-    throw new Error(`Gemini returned empty outline response (${detail})`)
-  }
+  const text = await generateJsonText(env, model, prompt, 'generateOutline')
 
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
-    throw new Error(`Gemini outline response is not valid JSON: ${text}`)
+    throw new Error(`Outline response is not valid JSON: ${text}`)
   }
 
   // モデルがトップレベルに { chapters: [...] } ではなく配列を直接返すことがあるので吸収する。
   const candidate = Array.isArray(parsed) ? { chapters: parsed } : parsed
   const validated = OutlineSchema.safeParse(candidate)
   if (!validated.success) {
-    throw new Error(`Gemini outline response failed validation: ${JSON.stringify(validated.error.issues)}`)
+    throw new Error(`Outline response failed validation: ${JSON.stringify(validated.error.issues)}`)
   }
 
   return {
@@ -385,7 +396,7 @@ export async function regenerateOutlineChapter(
   style: StyleParams,
   existing: Outline,
   chapterNumber: number,
-  modelOverride?: GeminiModel,
+  modelOverride?: ModelRef,
   cast?: CastMember[],
   relations?: CastRelation[]
 ): Promise<OutlineChapter> {
@@ -398,7 +409,6 @@ export async function regenerateOutlineChapter(
   }
 
   const model = resolveModel(env, modelOverride)
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${env.GEMINI_API_KEY}`
 
   const styleInstruction = buildStyleInstruction(style)
   const castSection = buildCastSection(cast)
@@ -446,48 +456,17 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
 出力は以下の JSON 形式のみ:
 ${exampleEntry}`
 
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    safetySettings: SAFETY_SETTINGS_OFF,
-    generationConfig: { responseMimeType: 'application/json' }
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  })
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gemini regenerateOutlineChapter failed: ${res.status} ${err}`)
-  }
-
-  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) {
-    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
-    const promptBlock = data.promptFeedback?.blockReason
-    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
-    const detail = [
-      `finishReason=${finishReason}`,
-      promptBlock ? `promptBlockReason=${promptBlock}` : '',
-      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
-    ]
-      .filter((s) => s.length > 0)
-      .join(' / ')
-    throw new Error(`Gemini returned empty regenerateOutlineChapter response (${detail})`)
-  }
+  const text = await generateJsonText(env, model, prompt, 'regenerateOutlineChapter')
 
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
-    throw new Error(`Gemini regenerateOutlineChapter response is not valid JSON: ${text}`)
+    throw new Error(`regenerateOutlineChapter response is not valid JSON: ${text}`)
   }
   const validated = OutlineSchema.shape.chapters.element.safeParse(parsed)
   if (!validated.success) {
-    throw new Error(`Gemini outline-chapter response failed validation: ${JSON.stringify(validated.error.issues)}`)
+    throw new Error(`Outline-chapter response failed validation: ${JSON.stringify(validated.error.issues)}`)
   }
   // chapter_number はモデルが取り違える可能性があるので強制的に target に揃える。
   // characters は実在キャスト名のみに正規化する。
@@ -521,9 +500,28 @@ export type StreamChapterResult = {
   prompt: string
 }
 
+// Gemini のストリーム呼び出しの宛先と読み方。受信ループは OpenAI 互換と共通。
+function geminiStreamTarget(env: Env, id: string, ref: ModelRef, prompt: string): StreamTarget {
+  return {
+    url: `${GEMINI_BASE}/${id}:streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`,
+    headers: { 'Content-Type': 'application/json' },
+    body: {
+      contents: [{ parts: [{ text: prompt }] }],
+      safetySettings: SAFETY_SETTINGS_OFF,
+      generationConfig: { temperature: 0.9 }
+    },
+    label: 'Gemini',
+    parse: (chunk): ParsedChunk => ({
+      text: extractText(chunk),
+      usage: extractUsage(chunk, ref),
+      finishReason: extractFinishReason(chunk),
+      blockReason: extractBlockReason(chunk)
+    })
+  }
+}
+
 export function streamChapter(env: Env, params: StreamChapterParams): StreamChapterResult {
   const model = resolveModel(env, params.model)
-  const url = `${GEMINI_BASE}/${model}:streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`
 
   const { novel, outline, chapterNumber, previousChapters, targetChars, style, cast, relations } = params
 
@@ -588,13 +586,11 @@ ${sections.join('\n\n')}
 文章は読者を引き込む描写を心がけ、登場人物の心情や情景を丁寧に描いてください。
 本文のみを出力し、章番号やタイトルは含めないでください。`
 
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    safetySettings: SAFETY_SETTINGS_OFF,
-    generationConfig: {
-      temperature: 0.9
-    }
-  }
+  const modelTarget = parseModelRef(model)
+  const target =
+    modelTarget.provider === 'openai'
+      ? openaiStreamTarget(env, model, modelTarget.id, prompt)
+      : geminiStreamTarget(env, modelTarget.id, model, prompt)
 
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
   const writer = writable.getWriter()
@@ -627,7 +623,7 @@ ${sections.join('\n\n')}
     const armStall = () => {
       if (stallTimer !== undefined) clearTimeout(stallTimer)
       stallTimer = setTimeout(() => {
-        stalled = new Error(`Gemini 応答が ${Math.round(STALL_TIMEOUT_MS / 1000)} 秒途絶えたため中断しました`)
+        stalled = new Error(`${target.label} 応答が ${Math.round(STALL_TIMEOUT_MS / 1000)} 秒途絶えたため中断しました`)
         controller.abort(stalled)
       }, STALL_TIMEOUT_MS)
     }
@@ -643,10 +639,10 @@ ${sections.join('\n\n')}
     for (let attempt = 1; ; attempt++) {
       armStall()
       try {
-        res = await fetch(url, {
+        res = await fetch(target.url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          headers: target.headers,
+          body: JSON.stringify(target.body),
           signal: controller.signal
         })
       } catch (e) {
@@ -674,7 +670,7 @@ ${sections.join('\n\n')}
       }
       const errText = await res.text().catch(() => String(status))
       clearStall()
-      const err = new Error(`Gemini streamChapter failed: ${status} ${errText}`)
+      const err = new Error(`${target.label} streamChapter failed: ${status} ${errText}`)
       rejectUsage(err)
       await writer.abort(err)
       return
@@ -682,7 +678,7 @@ ${sections.join('\n\n')}
 
     const responseBody = res.body
     if (responseBody === null) {
-      const err = new Error('Gemini streamChapter failed: empty response body')
+      const err = new Error(`${target.label} streamChapter failed: empty response body`)
       rejectUsage(err)
       await writer.abort(err)
       return
@@ -715,16 +711,17 @@ ${sections.join('\n\n')}
           }
           // thinking 含む全チャンク受信時に通知 (DO 側の lastProgressAt 更新用)
           params.onChunk?.()
-          const text = extractText(chunk)
-          if (text) {
-            await writer.write(encoder.encode(text))
+          const parsedChunk = target.parse(chunk)
+          if (parsedChunk.error !== undefined) {
+            // 上流がストリームの途中でエラーを返した。部分本文を「完了」にしないよう、受信エラーとして扱う。
+            throw new Error(`${target.label} stream error: ${parsedChunk.error}`)
           }
-          const meta = extractUsage(chunk, model)
-          if (meta) lastUsage = meta
-          const fr = extractFinishReason(chunk)
-          if (fr) lastFinishReason = fr
-          const br = extractBlockReason(chunk)
-          if (br) lastBlockReason = br
+          if (parsedChunk.text) {
+            await writer.write(encoder.encode(parsedChunk.text))
+          }
+          if (parsedChunk.usage) lastUsage = parsedChunk.usage
+          if (parsedChunk.finishReason) lastFinishReason = parsedChunk.finishReason
+          if (parsedChunk.blockReason) lastBlockReason = parsedChunk.blockReason
         }
       }
       // 正常終了: stream を閉じ、finishReason / usage を確定する。
@@ -735,7 +732,7 @@ ${sections.join('\n\n')}
         const finishReason = lastFinishReason === undefined ? 'STOP' : lastFinishReason
         resolveUsage({ ...lastUsage, finishReason })
       } else {
-        rejectUsage(new Error('Gemini stream ended without usageMetadata'))
+        rejectUsage(new Error(`${target.label} stream ended without usage`))
       }
     } catch (e) {
       // 受信途中での中断 (ストール abort / ネットワーク切断)。graceful close せず error として
@@ -761,7 +758,7 @@ ${sections.join('\n\n')}
   return { stream: readable, usage, blockReason, prompt }
 }
 
-function extractUsage(chunk: unknown, model: string): Omit<StreamChapterUsage, 'finishReason'> | undefined {
+function extractUsage(chunk: unknown, model: ModelRef): Omit<StreamChapterUsage, 'finishReason'> | undefined {
   const parsed = GeminiResponseSchema.safeParse(chunk)
   if (!parsed.success) return undefined
   const meta = parsed.data.usageMetadata

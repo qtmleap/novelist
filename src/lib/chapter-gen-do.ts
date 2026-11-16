@@ -6,16 +6,20 @@ import type { Env } from '@/lib/db'
 import {
   type CastMember,
   type CastRelation,
-  computeCostUsd,
+  computeCostUsd as computeGeminiCostUsd,
   type StreamChapterUsage,
   streamChapter
 } from '@/lib/gemini/client'
 import { buildChapterPayload } from '@/lib/novel/chapter-payload'
 import { saveChapter } from '@/lib/novel/repository'
-import type { GeminiModel, Outline } from '@/schemas/novel.dto'
-import { GeminiModelSchema } from '@/schemas/novel.dto'
+import { computeCostUsd as computePriceCostUsd, findPrice } from '@/lib/openai/models'
+import type { ModelRef, Outline } from '@/schemas/novel.dto'
+import { parseModelRef } from '@/schemas/novel.dto'
 
-// Gemini の finishReason を人向けの日本語メッセージに変換する。
+// 続きの章を作るときに、ペイロードにモデルが無かった場合の最終フォールバック。
+const DEFAULT_FALLBACK_MODEL: ModelRef = 'gemini-2.5-flash'
+
+// 上流 (Gemini / OpenAI 互換) の finishReason を人向けの日本語メッセージに変換する。
 // 'STOP' 以外がここに届く前提なので 'STOP' は扱わない。
 function truncationMessage(finishReason: string): string {
   if (finishReason === 'MAX_TOKENS') {
@@ -55,7 +59,7 @@ export type StartChapterGenPayload = {
   chapterNumber: number
   chapterTitle: string
   targetChars: number
-  model?: GeminiModel
+  model?: ModelRef
   novel: {
     title: string
     genre: string
@@ -405,7 +409,15 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       // コスト記録 (best-effort)
       if (usage) {
         try {
-          const costUsd = computeCostUsd(usage.model, usage.promptTokens, usage.outputTokens)
+          const costUsd =
+            parseModelRef(usage.model).provider === 'gemini'
+              ? computeGeminiCostUsd(parseModelRef(usage.model).id, usage.promptTokens, usage.outputTokens)
+              : computePriceCostUsd(
+                  await findPrice(this.env, usage.model),
+                  usage.model,
+                  usage.promptTokens,
+                  usage.outputTokens
+                )
           await prisma.chapterGenerationCost.create({
             data: {
               novel_id: payload.novelId,
@@ -560,7 +572,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         prisma,
         this.payload.novelId,
         nextChapter,
-        this.payload.model !== undefined ? this.payload.model : GeminiModelSchema.enum['gemini-2.5-flash']
+        this.payload.model !== undefined ? this.payload.model : DEFAULT_FALLBACK_MODEL
       )
       if (!nextPayload) {
         await prisma.novelGenerationJob.update({

@@ -7,7 +7,9 @@ import { PageHeader } from '@/components/PageHeader'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
-import { type GeminiModel, GeminiModelSchema, MODEL_META, MODEL_PRICING_USD_PER_M_TOKENS } from '@/schemas/novel.dto'
+import { useModelCatalog } from '@/hooks/useModelCatalog'
+import { formatPrice, GeminiModelSchema, MODEL_META, ModelRefSchema, parseModelRef } from '@/schemas/novel.dto'
+import type { AvailableModel, ModelCatalog } from '@/schemas/provider.dto'
 import { editorModelAtom, writerModelAtom } from '@/store/atoms'
 
 function Stars({ n }: { n: number }) {
@@ -19,25 +21,70 @@ function Stars({ n }: { n: number }) {
   )
 }
 
-function ModelMeta({ model }: { model: GeminiModel }) {
-  const meta = MODEL_META[model]
-  const pricing = MODEL_PRICING_USD_PER_M_TOKENS[model]
+function ModelMeta({ model, catalog }: { model: string; catalog: ModelCatalog }) {
+  const entry: AvailableModel | undefined = catalog.models.find((m) => m.ref === model)
+  const parsed = parseModelRef(model)
+  const geminiId = GeminiModelSchema.safeParse(parsed.id)
+  const meta = parsed.provider === 'gemini' && geminiId.success ? MODEL_META[geminiId.data] : undefined
   return (
     <div className='mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
-      <span>
-        性能 <Stars n={meta.quality} />
-      </span>
-      <span>
-        速度 <Stars n={meta.speed} />
-      </span>
-      <span>
-        価格 <Stars n={meta.price} />
-      </span>
-      <span className='tabular-nums'>
-        入力 ${pricing.input.toFixed(2)} / 出力 ${pricing.output.toFixed(2)} (1M トークン)
-        {pricing.longPromptSurcharge ? ' ※20万トークン超は割増' : ''}
-      </span>
+      {meta !== undefined && (
+        <>
+          <span>
+            性能 <Stars n={meta.quality} />
+          </span>
+          <span>
+            速度 <Stars n={meta.speed} />
+          </span>
+          <span>
+            価格 <Stars n={meta.price} />
+          </span>
+        </>
+      )}
+      {entry === undefined ? (
+        <span>このモデルは一覧にありません (サーバーの設定が変わった可能性があります)</span>
+      ) : (
+        <span className='tabular-nums'>
+          {entry.price === null ? (
+            '単価不明 (コストは 0 として記録されます)'
+          ) : (
+            <>
+              入力 / 出力 {formatPrice(entry.price)} (1M トークン)
+              {entry.price.longPromptSurcharge ? ' ※20万トークン超は割増' : ''}
+            </>
+          )}
+          {entry.contextWindow === null ? '' : ` / コンテキスト ${entry.contextWindow.toLocaleString()}`}
+        </span>
+      )}
     </div>
+  )
+}
+
+// サーバーが OpenAI 互換 API を使えるか。URL とキーは表示せず、設定済みかどうかだけを出す。
+function ProviderStatus({ catalog, loadFailed }: { catalog: ModelCatalog; loadFailed: boolean }) {
+  if (loadFailed) {
+    return (
+      <p className='text-sm text-destructive'>
+        モデル一覧を取得できませんでした。Gemini の固定一覧だけを表示しています。
+      </p>
+    )
+  }
+  const openaiCount = catalog.models.filter((m) => m.provider === 'openai').length
+  return (
+    <ul className='space-y-1 text-sm text-muted-foreground'>
+      <li>Gemini: 利用できます (サーバーの GEMINI_API_KEY)</li>
+      <li>
+        OpenAI 互換 API:{' '}
+        {catalog.openaiConfigured ? (
+          <>
+            設定済み ({catalog.openaiFormat === 'responses' ? 'responses' : 'chat completions'}、{openaiCount} モデル)
+          </>
+        ) : (
+          '未設定 (サーバーの OPENAI_BASE_URL と OPENAI_API_KEY を設定すると、モデルが選べるようになります)'
+        )}
+      </li>
+      {catalog.openaiError !== null && <li className='text-destructive'>{catalog.openaiError}</li>}
+    </ul>
   )
 }
 
@@ -59,6 +106,7 @@ function ModelSettings() {
   const [editorModel, setEditorModel] = useAtom(editorModelAtom)
   const [writerModel, setWriterModel] = useAtom(writerModelAtom)
   const [saved, setSaved] = useState(false)
+  const { catalog, error } = useModelCatalog()
 
   const showSaved = () => {
     setSaved(true)
@@ -66,13 +114,13 @@ function ModelSettings() {
   }
 
   const handleEditorChange = (value: string) => {
-    const result = GeminiModelSchema.safeParse(value)
+    const result = ModelRefSchema.safeParse(value)
     if (result.success) setEditorModel(result.data)
     showSaved()
   }
 
   const handleWriterChange = (value: string) => {
-    const result = GeminiModelSchema.safeParse(value)
+    const result = ModelRefSchema.safeParse(value)
     if (result.success) setWriterModel(result.data)
     showSaved()
   }
@@ -87,10 +135,10 @@ function ModelSettings() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <ModelSelectItems />
+              <ModelSelectItems current={editorModel} />
             </SelectContent>
           </Select>
-          <ModelMeta model={editorModel} />
+          <ModelMeta model={editorModel} catalog={catalog} />
         </div>
 
         <div className='space-y-1.5'>
@@ -100,12 +148,14 @@ function ModelSettings() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <ModelSelectItems />
+              <ModelSelectItems current={writerModel} />
             </SelectContent>
           </Select>
-          <ModelMeta model={writerModel} />
+          <ModelMeta model={writerModel} catalog={catalog} />
         </div>
       </div>
+
+      <ProviderStatus catalog={catalog} loadFailed={error !== null} />
 
       {saved && <p className='text-sm text-muted-foreground'>保存しました</p>}
     </>

@@ -25,7 +25,7 @@ import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
-import { type ChapterCost, type ChapterVersion, GeminiModelSchema, type NovelWithChapters } from '@/schemas/novel.dto'
+import { asModelRef, type ChapterCost, type ChapterVersion, type NovelWithChapters } from '@/schemas/novel.dto'
 
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
@@ -145,7 +145,7 @@ export default function ChapterDetailPage() {
     setError(null)
     try {
       await api.startChapterGeneration(
-        { model: GeminiModelSchema.parse(novel.writer_model) },
+        { model: asModelRef(novel.writer_model) },
         { params: { id: novelId, number: String(chapterNumber) } }
       )
 
