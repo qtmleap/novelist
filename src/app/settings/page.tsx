@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useModelCatalog } from '@/hooks/useModelCatalog'
-import { formatPrice, GeminiModelSchema, MODEL_META, ModelRefSchema, parseModelRef } from '@/schemas/novel.dto'
+import { GeminiModelSchema, MODEL_META, ModelRefSchema, parseModelRef } from '@/schemas/novel.dto'
 import type { AvailableModel, ModelCatalog } from '@/schemas/provider.dto'
 import { editorModelAtom, writerModelAtom } from '@/store/atoms'
 
@@ -41,50 +41,8 @@ function ModelMeta({ model, catalog }: { model: string; catalog: ModelCatalog })
           </span>
         </>
       )}
-      {entry === undefined ? (
-        <span>このモデルは一覧にありません (サーバーの設定が変わった可能性があります)</span>
-      ) : (
-        <span className='tabular-nums'>
-          {entry.price === null ? (
-            '単価不明 (コストは 0 として記録されます)'
-          ) : (
-            <>
-              入力 / 出力 {formatPrice(entry.price)} (1M トークン)
-              {entry.price.longPromptSurcharge ? ' ※20万トークン超は割増' : ''}
-            </>
-          )}
-          {entry.contextWindow === null ? '' : ` / コンテキスト ${entry.contextWindow.toLocaleString()}`}
-        </span>
-      )}
+      {entry === undefined && <span>このモデルは現在選べません</span>}
     </div>
-  )
-}
-
-// サーバーが OpenAI 互換 API を使えるか。URL とキーは表示せず、設定済みかどうかだけを出す。
-function ProviderStatus({ catalog, loadFailed }: { catalog: ModelCatalog; loadFailed: boolean }) {
-  if (loadFailed) {
-    return (
-      <p className='text-sm text-destructive'>
-        モデル一覧を取得できませんでした。Gemini の固定一覧だけを表示しています。
-      </p>
-    )
-  }
-  const openaiCount = catalog.models.filter((m) => m.provider === 'openai').length
-  return (
-    <ul className='space-y-1 text-sm text-muted-foreground'>
-      <li>Gemini: 利用できます (サーバーの GEMINI_API_KEY)</li>
-      <li>
-        OpenAI 互換 API:{' '}
-        {catalog.openaiConfigured ? (
-          <>
-            設定済み ({catalog.openaiFormat === 'responses' ? 'responses' : 'chat completions'}、{openaiCount} モデル)
-          </>
-        ) : (
-          '未設定 (サーバーの OPENAI_BASE_URL と OPENAI_API_KEY を設定すると、モデルが選べるようになります)'
-        )}
-      </li>
-      {catalog.openaiError !== null && <li className='text-destructive'>{catalog.openaiError}</li>}
-    </ul>
   )
 }
 
@@ -129,7 +87,7 @@ function ModelSettings() {
     <>
       <div className='space-y-4'>
         <div className='space-y-1.5'>
-          <Label htmlFor='editor-model'>Editor モデル（章立ての生成）</Label>
+          <Label htmlFor='editor-model'>Editor モデル</Label>
           <Select value={editorModel} onValueChange={handleEditorChange}>
             <SelectTrigger id='editor-model' className='w-72'>
               <SelectValue />
@@ -139,10 +97,11 @@ function ModelSettings() {
             </SelectContent>
           </Select>
           <ModelMeta model={editorModel} catalog={catalog} />
+          <p className='text-xs text-muted-foreground'>章立てを作るときに使います。</p>
         </div>
 
         <div className='space-y-1.5'>
-          <Label htmlFor='writer-model'>Writer モデル（本文の生成）</Label>
+          <Label htmlFor='writer-model'>Writer モデル</Label>
           <Select value={writerModel} onValueChange={handleWriterChange}>
             <SelectTrigger id='writer-model' className='w-72'>
               <SelectValue />
@@ -152,10 +111,13 @@ function ModelSettings() {
             </SelectContent>
           </Select>
           <ModelMeta model={writerModel} catalog={catalog} />
+          <p className='text-xs text-muted-foreground'>各章の本文を書くときに使います。</p>
         </div>
       </div>
 
-      <ProviderStatus catalog={catalog} loadFailed={error !== null} />
+      {error !== null && (
+        <p className='text-sm text-destructive'>モデル一覧を取得できませんでした。もう一度読み込んでください。</p>
+      )}
 
       {saved && <p className='text-sm text-muted-foreground'>保存しました</p>}
     </>

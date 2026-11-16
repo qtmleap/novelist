@@ -556,7 +556,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='editor_model'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>Editor モデル (章立て)</FormLabel>
+                  <FormLabel>Editor モデル</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(v) => {
@@ -575,6 +575,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       <ModelSelectItems current={field.value} />
                     </SelectContent>
                   </Select>
+                  <p className='text-xs text-muted-foreground'>章立てを作るときに使います。</p>
                   <FormMessage />
                 </FormItem>
               )}
@@ -585,7 +586,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='writer_model'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>Writer モデル (本文)</FormLabel>
+                  <FormLabel>Writer モデル</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(v) => {
@@ -604,6 +605,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       <ModelSelectItems current={field.value} />
                     </SelectContent>
                   </Select>
+                  <p className='text-xs text-muted-foreground'>各章の本文を書くときに使います。</p>
                   <FormMessage />
                 </FormItem>
               )}

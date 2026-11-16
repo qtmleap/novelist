@@ -5,9 +5,13 @@ import { useModelCatalog } from '@/hooks/useModelCatalog'
 import { formatPrice } from '@/schemas/novel.dto'
 import type { AvailableModel } from '@/schemas/provider.dto'
 
+// 価格を行の右端に寄せる。ui/select.tsx は編集できないので、SelectItem の最後の span (ItemText) を
+// 行いっぱいに広げ、価格側の ml-auto で右端へ押す。
+const ITEM_CLASS = '*:[span]:last:flex-1'
+
 function ModelPriceText({ model }: { model: AvailableModel }) {
   return (
-    <span className='ml-2 text-xs text-muted-foreground'>
+    <span className='ml-auto pl-4 text-xs tabular-nums text-muted-foreground'>
       {model.price === null ? '単価不明' : formatPrice(model.price)}
     </span>
   )
@@ -27,7 +31,7 @@ export function ModelSelectItems({ current }: { current?: string }) {
       <SelectGroup>
         <SelectLabel>Gemini</SelectLabel>
         {gemini.map((m) => (
-          <SelectItem key={m.ref} value={m.ref}>
+          <SelectItem key={m.ref} value={m.ref} className={ITEM_CLASS}>
             {m.name}
             <ModelPriceText model={m} />
           </SelectItem>
@@ -37,7 +41,7 @@ export function ModelSelectItems({ current }: { current?: string }) {
         <SelectGroup>
           <SelectLabel>OpenAI 互換</SelectLabel>
           {openai.map((m) => (
-            <SelectItem key={m.ref} value={m.ref}>
+            <SelectItem key={m.ref} value={m.ref} className={ITEM_CLASS}>
               {m.name}
               <ModelPriceText model={m} />
             </SelectItem>
