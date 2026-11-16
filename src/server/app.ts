@@ -38,19 +38,24 @@ import {
   updateNovel,
   upsertGenerationJob
 } from '@/lib/novel/repository'
+import { buildModelCatalog } from '@/lib/openai/models'
 import { type CharacterVariant, CharacterVariantInputSchema, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
   ArrangeNovelsSchema,
   CreateCategorySchema,
   CreateNovelSchema,
-  GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
+  type ModelRef,
+  ModelRefSchema,
   OutlineSchema,
   ReorderSchema,
   SaveCastSchema
 } from '@/schemas/novel.dto'
 import { readAuthEmail, requireAuth } from '@/server/auth'
+
+// 本文生成でモデル指定が無かったときの既定。
+const DEFAULT_CHAPTER_MODEL: ModelRef = 'gemini-2.5-flash'
 
 // 章番号を含むルートの param。z.coerce で文字列 → 数値に変換・検証するので
 // ハンドラ側で Number.parseInt や NaN チェックを書かなくてよい (不正なら zValidator が 400)。
@@ -571,7 +576,7 @@ export const app = new Hono()
           prisma,
           id,
           chapterNumber,
-          options.model !== undefined ? options.model : GeminiModelSchema.enum['gemini-2.5-flash']
+          options.model !== undefined ? options.model : DEFAULT_CHAPTER_MODEL
         )
       } finally {
         await prisma.$disconnect()
@@ -599,7 +604,7 @@ export const app = new Hono()
   .post(
     '/novels/:id/generation/start',
     requireAuth,
-    zValidator('json', z.object({ chapters: z.array(z.number().int().min(1)).min(1), model: GeminiModelSchema })),
+    zValidator('json', z.object({ chapters: z.array(z.number().int().min(1)).min(1), model: ModelRefSchema })),
     async (c) => {
       const id = c.req.param('id')
       const { chapters, model } = c.req.valid('json')
@@ -758,6 +763,13 @@ export const app = new Hono()
     } finally {
       await prisma.$disconnect()
     }
+  })
+
+  // ── Models ────────────────────────────────────────────────────────────
+  // モデル選択に出す一覧。Gemini は固定表、OpenAI 互換はサーバーの /models をそのまま返す。
+  // URL と API キーは返さず、設定済みかどうかだけを返す。認証は不要 (一覧と単価だけで秘密を含まない)。
+  .get('/models', async (c) => {
+    return c.json(await buildModelCatalog(getEnv()))
   })
 
   // ── Auth ──────────────────────────────────────────────────────────────

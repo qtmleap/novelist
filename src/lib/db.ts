@@ -6,6 +6,11 @@ export type Env = {
   DB: D1Database
   GEMINI_API_KEY: string
   GEMINI_MODEL?: string
+  // OpenAI 互換 API。URL とキーはサーバー側だけが持つ (WebUI には「設定済みか」しか返さない)。
+  OPENAI_BASE_URL?: string
+  OPENAI_API_KEY?: string
+  // 'chat' (/chat/completions、既定) か 'responses' (/responses)。
+  OPENAI_API_FORMAT?: string
   CHAPTER_GEN: DurableObjectNamespace<import('./chapter-gen-do').ChapterGenerationDO>
 }
 

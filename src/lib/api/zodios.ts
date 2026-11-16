@@ -12,15 +12,16 @@ import {
   ChapterVersionSchema,
   CreateCategorySchema,
   CreateNovelSchema,
-  GeminiModelSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
+  ModelRefSchema,
   NovelSchema,
   NovelWithChaptersSchema,
   OutlineSchema,
   ReorderSchema,
   SaveCastSchema
 } from '@/schemas/novel.dto'
+import { ModelCatalogSchema } from '@/schemas/provider.dto'
 
 // API レスポンスのラッパースキーマ。サーバー側は Hono のままで、
 // ここで Zod の parse を噛ませてランタイム保証も得る。
@@ -221,7 +222,7 @@ export const api = makeApi([
         type: 'Body',
         schema: z.object({
           chapters: z.array(z.number().int().min(1)).min(1),
-          model: GeminiModelSchema
+          model: ModelRefSchema
         })
       }
     ],
@@ -317,6 +318,15 @@ export const api = makeApi([
     description: 'バリエーションを削除',
     response: z.unknown(),
     status: 204,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  // ── Models ──
+  {
+    method: 'get',
+    path: '/api/models',
+    alias: 'listModels',
+    description: 'モデル選択の一覧 (Gemini 固定表 + OpenAI 互換サーバーの /models)。URL・キーは返さない',
+    response: ModelCatalogSchema,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   // ── Auth ──

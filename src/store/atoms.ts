@@ -1,5 +1,5 @@
 import { atomWithStorage } from 'jotai/utils'
-import { DEFAULT_EDITOR_MODEL, DEFAULT_WRITER_MODEL, type GeminiModel, GeminiModelSchema } from '@/schemas/novel.dto'
+import { DEFAULT_EDITOR_MODEL, DEFAULT_WRITER_MODEL, type ModelRef, ModelRefSchema } from '@/schemas/novel.dto'
 
 // --- Theme ---
 
@@ -22,14 +22,16 @@ export const themeAtom = atomWithStorage<'dark' | 'light'>('theme', 'light', str
 
 // --- AI model settings ---
 
-const geminiStorage = {
-  getItem: (key: string, initialValue: GeminiModel): GeminiModel => {
+// 保存値は ModelRef。Gemini は従来の id のまま、OpenAI 互換は `openai:<id>`。
+// 既存ユーザーの localStorage (Gemini の id) はそのまま読める。
+const modelStorage = {
+  getItem: (key: string, initialValue: ModelRef): ModelRef => {
     if (typeof window === 'undefined') return initialValue
     const raw = localStorage.getItem(key)
-    const parsed = GeminiModelSchema.safeParse(raw)
+    const parsed = ModelRefSchema.safeParse(raw)
     return parsed.success ? parsed.data : initialValue
   },
-  setItem: (key: string, value: GeminiModel): void => {
+  setItem: (key: string, value: ModelRef): void => {
     localStorage.setItem(key, value)
   },
   removeItem: (key: string): void => {
@@ -37,16 +39,10 @@ const geminiStorage = {
   }
 }
 
-export const editorModelAtom = atomWithStorage<GeminiModel>(
-  'ai-novel:editorModel',
-  DEFAULT_EDITOR_MODEL,
-  geminiStorage,
-  { getOnInit: true }
-)
+export const editorModelAtom = atomWithStorage<ModelRef>('ai-novel:editorModel', DEFAULT_EDITOR_MODEL, modelStorage, {
+  getOnInit: true
+})
 
-export const writerModelAtom = atomWithStorage<GeminiModel>(
-  'ai-novel:writerModel',
-  DEFAULT_WRITER_MODEL,
-  geminiStorage,
-  { getOnInit: true }
-)
+export const writerModelAtom = atomWithStorage<ModelRef>('ai-novel:writerModel', DEFAULT_WRITER_MODEL, modelStorage, {
+  getOnInit: true
+})

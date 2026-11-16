@@ -2,7 +2,7 @@ import type { PrismaClient } from '@/generated/prisma/client'
 import type { StartChapterGenPayload } from '@/lib/chapter-gen-do'
 import type { CastMember, CastRelation } from '@/lib/gemini/client'
 import { getNovelWithChapters } from '@/lib/novel/repository'
-import type { GeminiModel } from '@/schemas/novel.dto'
+import type { ModelRef } from '@/schemas/novel.dto'
 import { OutlineSchema } from '@/schemas/novel.dto'
 
 // バリエーション (variant) の生フィールド。name/gender は variant では不変なので持たない。
@@ -130,7 +130,7 @@ export async function buildChapterPayload(
   prisma: PrismaClient,
   novelId: string,
   chapterNumber: number,
-  model: GeminiModel
+  model: ModelRef
 ): Promise<StartChapterGenPayload | null> {
   const novel = await getNovelWithChapters(prisma, novelId)
   if (!novel) return null

@@ -30,7 +30,7 @@ import {
   DEFAULT_TONE,
   DEFAULT_WRITER_MODEL,
   ENDING_OPTIONS,
-  GeminiModelSchema,
+  ModelRefSchema,
   OUTLINE_SUMMARY_LENGTH_OPTIONS,
   POV_OPTIONS,
   TONE_OPTIONS
@@ -560,7 +560,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                   <Select
                     value={field.value}
                     onValueChange={(v) => {
-                      const r = GeminiModelSchema.safeParse(v)
+                      const r = ModelRefSchema.safeParse(v)
                       if (r.success) {
                         field.onChange(r.data)
                       }
@@ -572,7 +572,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <ModelSelectItems />
+                      <ModelSelectItems current={field.value} />
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -589,7 +589,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                   <Select
                     value={field.value}
                     onValueChange={(v) => {
-                      const r = GeminiModelSchema.safeParse(v)
+                      const r = ModelRefSchema.safeParse(v)
                       if (r.success) {
                         field.onChange(r.data)
                       }
@@ -601,7 +601,7 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <ModelSelectItems />
+                      <ModelSelectItems current={field.value} />
                     </SelectContent>
                   </Select>
                   <FormMessage />

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { AvailableModel, Provider } from '@/schemas/provider.dto'
 
 // 1 章あたりの目標文字数 (新規作成フォームのプリセット)。Novel ごとに保持し、
 // 本文生成時にサーバーがプロンプトと maxOutputTokens に反映する。
@@ -91,7 +92,7 @@ export type NovelCharacterRelationInput = z.infer<typeof NovelCharacterRelationI
 // Editor = 章立て(outline)生成, Writer = 本文生成。
 // 端末の設定 (localStorage) は新規 novel 作成時の初期値として使うだけ。
 // 作成後は novel.editor_model / writer_model が真実 (DB は NOT NULL default あり)。
-// model はサーバー側で Gemini の URL パスに入るため、必ず enum で検証する。
+// Gemini の model はサーバー側で URL パスに入るため、必ず enum で検証する (ModelRefSchema)。
 
 // 公式 (ai.google.dev/gemini-api/docs/models) 準拠 (2026-11-15 確認)。2.0 系は停止済みのため除外。
 // 2.5 系は非推奨で、2026-12-01 から 2.5-pro は 3.8-flash、2.5-flash は 3.5-flash-lite に自動転送される。
@@ -156,10 +157,61 @@ export const MODEL_PRICING_USD_PER_M_TOKENS: Record<GeminiModel, ModelPricing> =
   'gemini-2.5-flash-lite': { input: 0.1, output: 0.4 }
 }
 
+// Gemini の固定一覧 (画面のモデル選択と /api/models の両方が使う)。OpenAI 互換のモデルはサーバーの /models から来る。
+export const GEMINI_CATALOG: AvailableModel[] = GEMINI_MODELS.map((id) => {
+  const p = MODEL_PRICING_USD_PER_M_TOKENS[id]
+  return {
+    ref: id,
+    name: id,
+    provider: 'gemini',
+    owner: 'google',
+    contextWindow: null,
+    price: { input: p.input, output: p.output, longPromptSurcharge: p.longPromptSurcharge === true }
+  }
+})
+
 // 「$0.75 / $3.75」(入力 / 出力)。画面表示用。
-export function formatModelPrice(model: GeminiModel): string {
-  const p = MODEL_PRICING_USD_PER_M_TOKENS[model]
-  return `$${p.input.toFixed(2)} / $${p.output.toFixed(2)}`
+export function formatPrice(price: { input: number; output: number }): string {
+  return `$${price.input.toFixed(2)} / $${price.output.toFixed(2)}`
+}
+
+// ---------------------- モデル参照 (ModelRef) ----------------------
+// DB (editor_model / writer_model / コスト記録) と API が持つモデルの保存値。
+//   Gemini:        従来どおりの id (例: 'gemini-3.8-flash')。既存データはそのまま有効。
+//   OpenAI 互換:   'openai:' + サーバーの /models が返す id (例: 'openai:gpt-6.1-sol')。
+// 接頭辞で分けるので、互換サーバーが同名のモデルを返しても Gemini と取り違えない。
+export const OPENAI_MODEL_PREFIX = 'openai:'
+
+function isValidModelRef(value: string): boolean {
+  if (value.startsWith(OPENAI_MODEL_PREFIX)) {
+    const id = value.slice(OPENAI_MODEL_PREFIX.length)
+    return id.length > 0 && !/\s/.test(id)
+  }
+  // Gemini の id は URL パスに入るため、必ず既知の enum と照合する。
+  return GeminiModelSchema.safeParse(value).success
+}
+
+export const ModelRefSchema = z.string().nonempty().refine(isValidModelRef, { message: '不明なモデルです' })
+export type ModelRef = z.infer<typeof ModelRefSchema>
+
+export type ParsedModelRef = { provider: Provider; id: string }
+
+export function parseModelRef(value: string): ParsedModelRef {
+  if (value.startsWith(OPENAI_MODEL_PREFIX)) {
+    return { provider: 'openai', id: value.slice(OPENAI_MODEL_PREFIX.length) }
+  }
+  return { provider: 'gemini', id: value }
+}
+
+export function openaiModelRef(id: string): ModelRef {
+  return `${OPENAI_MODEL_PREFIX}${id}`
+}
+
+// DB の string を ModelRef に絞る。無効値が混入したら表示時点で気付けるよう throw する。
+export function asModelRef(value: string): ModelRef {
+  const result = ModelRefSchema.safeParse(value)
+  if (!result.success) throw new Error(`Invalid model: ${value}`)
+  return result.data
 }
 
 // ---------------------- あらすじ入力 ----------------------
@@ -179,8 +231,8 @@ export const CreateNovelSchema = z.object({
   notes: z.string().max(2000).default(''),
   // novel 単位の AI モデル。新規作成時は端末の設定 (localStorage) からコピー、編集時は既存値。
   // DB も NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値が入っている前提。
-  editor_model: GeminiModelSchema,
-  writer_model: GeminiModelSchema,
+  editor_model: ModelRefSchema,
+  writer_model: ModelRefSchema,
   // 所属カテゴリ。未分類は null (デフォルト)。
   category_id: z.string().nullable().default(null)
 })
@@ -286,7 +338,7 @@ export const NovelSchema = z.object({
   notes: z.string(),
   // DB は NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値だが、
   // 既知の enum 以外も将来に向けて受けられるよう output schema は string で持つ。
-  // フォーム入力 (CreateNovelSchema) 側は厳密に GeminiModelSchema を要求している。
+  // フォーム入力 (CreateNovelSchema) 側は厳密に ModelRefSchema を要求している。
   editor_model: z.string(),
   writer_model: z.string(),
   // outline は DB では JSON 文字列で保存するが、API レスポンスではサーバーがパース・検証した
@@ -371,7 +423,7 @@ export type ChapterStreamEvent = z.infer<typeof ChapterStreamEventSchema>
 
 // outline / chapter 生成エンドポイント共通の body (model 上書き; 省略時はサーバー既定)
 export const GenerateOptionsSchema = z.object({
-  model: GeminiModelSchema.optional()
+  model: ModelRefSchema.optional()
 })
 export type GenerateOptions = z.infer<typeof GenerateOptionsSchema>
 

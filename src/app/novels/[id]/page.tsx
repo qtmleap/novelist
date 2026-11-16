@@ -20,13 +20,7 @@ import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
-import { type Chapter, type ChapterCost, type GeminiModel, GeminiModelSchema, type Outline } from '@/schemas/novel.dto'
-
-function asGeminiModel(model: string): GeminiModel {
-  const result = GeminiModelSchema.safeParse(model)
-  if (!result.success) throw new Error(`Invalid model: ${model}`)
-  return result.data
-}
+import { asModelRef, type Chapter, type ChapterCost, type ModelRef, type Outline } from '@/schemas/novel.dto'
 
 function chaptersFromApi(apiChapters: Chapter[]): ChapterData[] {
   return apiChapters.map((c) => ({
@@ -234,8 +228,8 @@ function NovelDetailContent({ id }: { id: string }) {
         age_rating: novel.age_rating,
         ending: novel.ending,
         notes: novel.notes,
-        editor_model: asGeminiModel(novel.editor_model),
-        writer_model: asGeminiModel(novel.writer_model),
+        editor_model: asModelRef(novel.editor_model),
+        writer_model: asModelRef(novel.writer_model),
         category_id: novel.category_id
       })
       // キャスト・関係・語り手は別エンドポイントで複製する。
@@ -261,7 +255,7 @@ function NovelDetailContent({ id }: { id: string }) {
   }
 
   const doGenerateOutline = useCallback(
-    async (editorModel: GeminiModel, chapters?: number[]): Promise<Outline | null> => {
+    async (editorModel: ModelRef, chapters?: number[]): Promise<Outline | null> => {
       dispatch({ type: 'OUTLINE_START' })
       try {
         const body = await api.generateOutline(
@@ -284,7 +278,7 @@ function NovelDetailContent({ id }: { id: string }) {
   )
 
   const handleStartGeneration = useCallback(
-    async (chapters: number[], model: GeminiModel) => {
+    async (chapters: number[], model: ModelRef) => {
       try {
         await api.startBatchGeneration({ chapters, model }, { params: { id } })
         await refetch()
@@ -307,7 +301,7 @@ function NovelDetailContent({ id }: { id: string }) {
 
   const handleRetryChapter = async (num: number) => {
     dispatch({ type: 'CANCEL' })
-    await handleStartGeneration([num], asGeminiModel(novel.writer_model))
+    await handleStartGeneration([num], asModelRef(novel.writer_model))
   }
 
   const { outline, chapters, streamingIndex, genStatus, genError } = state
@@ -473,7 +467,7 @@ function NovelDetailContent({ id }: { id: string }) {
         totalChapters={novel.num_chapters}
         outline={outline}
         onConfirm={(targets) => {
-          if (targets.length > 0) doGenerateOutline(asGeminiModel(novel.editor_model), targets)
+          if (targets.length > 0) doGenerateOutline(asModelRef(novel.editor_model), targets)
         }}
       />
 
@@ -499,7 +493,7 @@ function NovelDetailContent({ id }: { id: string }) {
           outline={outline}
           chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
           onConfirm={(targets) => {
-            if (targets.length > 0) handleStartGeneration(targets, asGeminiModel(novel.writer_model))
+            if (targets.length > 0) handleStartGeneration(targets, asModelRef(novel.writer_model))
           }}
         />
       )}
