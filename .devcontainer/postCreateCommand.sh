@@ -24,6 +24,13 @@ log_format = ""
 hide_env_diff = true
 EOF
 
+# @qtmleap packages live on GitHub Packages, which wants a read:packages token even for public
+# packages (.npmrc reads GITHUB_TOKEN). Reuse the gh login when the variable is not already set.
+if [ -z "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+  GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+  export GITHUB_TOKEN
+fi
+
 # Install deps if package.json exists.
 if [ -f package.json ]; then
   if [ -f bun.lock ]; then

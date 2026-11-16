@@ -5,6 +5,9 @@ on:
       - develop
       - master
     types: [closed]
+permissions:
+  contents: read
+  packages: read
 jobs:
   deploy:
     name: Deploy workers
@@ -25,6 +28,8 @@ jobs:
             echo "ENVIRONMENT=staging" >> $GITHUB_ENV
           fi
       - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Generate Prisma client
         run: bunx prisma generate

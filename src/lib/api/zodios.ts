@@ -1,4 +1,4 @@
-import { makeApi, Zodios, type ZodiosOptions } from '@zodios/core'
+import { makeApi, Zodios, type ZodiosOptions } from '@qtmleap/zodios'
 import { z } from 'zod'
 import {
   CharacterSchema,
