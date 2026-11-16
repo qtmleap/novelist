@@ -2,11 +2,12 @@
 
 import { useAtom } from 'jotai'
 import { useEffect, useState } from 'react'
+import { ModelSelectItems } from '@/components/novel/ModelSelectItems'
 import { PageHeader } from '@/components/PageHeader'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
-import { GEMINI_MODELS, type GeminiModel, GeminiModelSchema, MODEL_META } from '@/schemas/novel.dto'
+import { type GeminiModel, GeminiModelSchema, MODEL_META, MODEL_PRICING_USD_PER_M_TOKENS } from '@/schemas/novel.dto'
 import { editorModelAtom, writerModelAtom } from '@/store/atoms'
 
 function Stars({ n }: { n: number }) {
@@ -20,9 +21,9 @@ function Stars({ n }: { n: number }) {
 
 function ModelMeta({ model }: { model: GeminiModel }) {
   const meta = MODEL_META[model]
-  if (!meta) return null
+  const pricing = MODEL_PRICING_USD_PER_M_TOKENS[model]
   return (
-    <div className='mt-0.5 flex gap-3 text-xs text-muted-foreground'>
+    <div className='mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
       <span>
         性能 <Stars n={meta.quality} />
       </span>
@@ -31,6 +32,10 @@ function ModelMeta({ model }: { model: GeminiModel }) {
       </span>
       <span>
         価格 <Stars n={meta.price} />
+      </span>
+      <span className='tabular-nums'>
+        入力 ${pricing.input.toFixed(2)} / 出力 ${pricing.output.toFixed(2)} (1M トークン)
+        {pricing.longPromptSurcharge ? ' ※20万トークン超は割増' : ''}
       </span>
     </div>
   )
@@ -82,11 +87,7 @@ function ModelSettings() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {GEMINI_MODELS.map((m) => (
-                <SelectItem key={m} value={m}>
-                  {m}
-                </SelectItem>
-              ))}
+              <ModelSelectItems />
             </SelectContent>
           </Select>
           <ModelMeta model={editorModel} />
@@ -99,11 +100,7 @@ function ModelSettings() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {GEMINI_MODELS.map((m) => (
-                <SelectItem key={m} value={m}>
-                  {m}
-                </SelectItem>
-              ))}
+              <ModelSelectItems />
             </SelectContent>
           </Select>
           <ModelMeta model={writerModel} />
