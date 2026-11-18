@@ -6,6 +6,7 @@ import { Loader2, PenLine, Plus, Save } from 'lucide-react'
 import { useState } from 'react'
 import type { DefaultValues } from 'react-hook-form'
 import { type Resolver, useForm } from 'react-hook-form'
+import { ModelSelectItems } from '@/components/novel/ModelSelectItems'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
@@ -29,8 +30,7 @@ import {
   DEFAULT_TONE,
   DEFAULT_WRITER_MODEL,
   ENDING_OPTIONS,
-  GEMINI_MODELS,
-  GeminiModelSchema,
+  ModelRefSchema,
   OUTLINE_SUMMARY_LENGTH_OPTIONS,
   POV_OPTIONS,
   TONE_OPTIONS
@@ -102,6 +102,7 @@ export const EMPTY_DEFAULTS: CreateNovelInput = {
   age_rating: DEFAULT_AGE_RATING,
   ending: DEFAULT_ENDING,
   notes: '',
+  writing_notes: '',
   editor_model: DEFAULT_EDITOR_MODEL,
   writer_model: DEFAULT_WRITER_MODEL,
   category_id: null
@@ -337,6 +338,34 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
             )}
           />
 
+          <FormField
+            control={form.control}
+            name='writing_notes'
+            render={({ field }) => (
+              <FormItem className='space-y-2'>
+                <FormLabel>
+                  執筆上の指示
+                  <ScopeTag scope='both' />
+                </FormLabel>
+                <FormControl>
+                  <Textarea
+                    placeholder={
+                      '例:\n- 地名は実在のものを使わない\n- 「俺」ではなく「僕」で統一\n- 主人公が泣く場面は入れない'
+                    }
+                    rows={4}
+                    maxLength={2000}
+                    className='resize-none'
+                    {...field}
+                  />
+                </FormControl>
+                <p className='text-xs text-muted-foreground'>
+                  表記の決まりや避けたい展開など、全ての章で守ってほしいことを書きます。
+                </p>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
           <div className='flex flex-wrap items-start gap-4'>
             <FormField
               control={form.control}
@@ -556,11 +585,11 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='editor_model'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>Editor モデル (章立て)</FormLabel>
+                  <FormLabel>Editor モデル</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(v) => {
-                      const r = GeminiModelSchema.safeParse(v)
+                      const r = ModelRefSchema.safeParse(v)
                       if (r.success) {
                         field.onChange(r.data)
                       }
@@ -572,13 +601,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {GEMINI_MODELS.map((m) => (
-                        <SelectItem key={m} value={m}>
-                          {m}
-                        </SelectItem>
-                      ))}
+                      <ModelSelectItems current={field.value} />
                     </SelectContent>
                   </Select>
+                  <p className='text-xs text-muted-foreground'>章立てを作るときに使います。</p>
                   <FormMessage />
                 </FormItem>
               )}
@@ -589,11 +615,11 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
               name='writer_model'
               render={({ field }) => (
                 <FormItem className='space-y-2'>
-                  <FormLabel>Writer モデル (本文)</FormLabel>
+                  <FormLabel>Writer モデル</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(v) => {
-                      const r = GeminiModelSchema.safeParse(v)
+                      const r = ModelRefSchema.safeParse(v)
                       if (r.success) {
                         field.onChange(r.data)
                       }
@@ -605,13 +631,10 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      {GEMINI_MODELS.map((m) => (
-                        <SelectItem key={m} value={m}>
-                          {m}
-                        </SelectItem>
-                      ))}
+                      <ModelSelectItems current={field.value} />
                     </SelectContent>
                   </Select>
+                  <p className='text-xs text-muted-foreground'>各章の本文を書くときに使います。</p>
                   <FormMessage />
                 </FormItem>
               )}

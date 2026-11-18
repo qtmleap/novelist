@@ -13,9 +13,11 @@ type Props = {
   onToggle: (option: string) => void
   placeholder?: string
   className?: string
+  // トリガーのアクセシブルネーム。表示ラベルは選択中の値なので、何の選択かは別に伝える。
+  ariaLabel?: string
 }
 
-export function MultiSelect({ options, selected, onToggle, placeholder = '選択', className }: Props) {
+export function MultiSelect({ options, selected, onToggle, placeholder = '選択', className, ariaLabel }: Props) {
   const [open, setOpen] = useState(false)
   const label = selected.length > 0 ? selected.join('・') : placeholder
   return (
@@ -25,6 +27,7 @@ export function MultiSelect({ options, selected, onToggle, placeholder = '選択
           type='button'
           variant='outline'
           role='combobox'
+          aria-label={ariaLabel}
           aria-expanded={open}
           className={cn(
             'h-9 w-full justify-between font-normal',
@@ -44,6 +47,7 @@ export function MultiSelect({ options, selected, onToggle, placeholder = '選択
               <button
                 key={o}
                 type='button'
+                aria-pressed={active}
                 onClick={() => onToggle(o)}
                 className='flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-sm hover:bg-accent'
               >

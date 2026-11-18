@@ -1,4 +1,4 @@
-import { makeApi, Zodios, type ZodiosOptions } from '@zodios/core'
+import { makeApi, Zodios, type ZodiosOptions } from '@qtmleap/zodios'
 import { z } from 'zod'
 import {
   CharacterSchema,
@@ -12,15 +12,18 @@ import {
   ChapterVersionSchema,
   CreateCategorySchema,
   CreateNovelSchema,
-  GeminiModelSchema,
+  GenerateChapterOptionsSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
+  ModelRefSchema,
   NovelSchema,
   NovelWithChaptersSchema,
   OutlineSchema,
   ReorderSchema,
   SaveCastSchema
 } from '@/schemas/novel.dto'
+import { ModelCatalogSchema } from '@/schemas/provider.dto'
+import { OutlineWarningSchema, StoryBibleSchema } from '@/schemas/story.dto'
 
 // API レスポンスのラッパースキーマ。サーバー側は Hono のままで、
 // ここで Zod の parse を噛ませてランタイム保証も得る。
@@ -29,7 +32,10 @@ const ErrorBodySchema = z.object({
   detail: z.string().optional()
 })
 
-const OutlineWrapperSchema = z.object({ outline: OutlineSchema })
+// warnings は章立ての正規化・検証で出た警告 (名簿に無い登場人物を外した、など)。無ければ空配列。
+const OutlineWrapperSchema = z.object({ outline: OutlineSchema, warnings: z.array(OutlineWarningSchema).default([]) })
+// 作品設計 (章立てと全章の本文に同じものを渡す、作品全体の設計)。
+const BibleWrapperSchema = z.object({ bible: StoryBibleSchema })
 const PromptPreviewSchema = z.object({ prompt: z.string() })
 // 章本文プロンプトは保存済みのものを返すため、この機能より前に生成された章では null になる。
 const ChapterPromptSchema = z.object({ prompt: z.string().nullable() })
@@ -151,6 +157,24 @@ export const api = makeApi([
   },
   {
     method: 'post',
+    path: '/api/novels/:id/bible',
+    alias: 'generateBible',
+    description: '作品設計を生成 (作り直し)',
+    parameters: [{ name: 'body', type: 'Body', schema: GenerateOptionsSchema }],
+    response: BibleWrapperSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/novels/:id/bible',
+    alias: 'updateBible',
+    description: '作品設計を手動で上書き保存',
+    parameters: [{ name: 'body', type: 'Body', schema: BibleWrapperSchema }],
+    response: BibleWrapperSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'post',
     path: '/api/novels/:id/outline',
     alias: 'generateOutline',
     description: '章立てを生成 (任意で章指定)',
@@ -204,8 +228,8 @@ export const api = makeApi([
     method: 'post',
     path: '/api/novels/:id/chapters/:number/generate',
     alias: 'startChapterGeneration',
-    description: '本文生成を Durable Object にキックオフ',
-    parameters: [{ name: 'body', type: 'Body', schema: GenerateOptionsSchema }],
+    description: '本文生成を Durable Object にキックオフ (instruction があれば、指示つきの書き直し)',
+    parameters: [{ name: 'body', type: 'Body', schema: GenerateChapterOptionsSchema }],
     response: GenerateAckSchema,
     status: 202,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
@@ -221,7 +245,7 @@ export const api = makeApi([
         type: 'Body',
         schema: z.object({
           chapters: z.array(z.number().int().min(1)).min(1),
-          model: GeminiModelSchema
+          model: ModelRefSchema
         })
       }
     ],
@@ -317,6 +341,15 @@ export const api = makeApi([
     description: 'バリエーションを削除',
     response: z.unknown(),
     status: 204,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  // ── Models ──
+  {
+    method: 'get',
+    path: '/api/models',
+    alias: 'listModels',
+    description: 'モデル選択の一覧 (Gemini 固定表 + OpenAI 互換サーバーの /models)。URL・キーは返さない',
+    response: ModelCatalogSchema,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   // ── Auth ──

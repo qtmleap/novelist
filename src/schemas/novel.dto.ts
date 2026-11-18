@@ -1,4 +1,12 @@
 import { z } from 'zod'
+import type { AvailableModel, Provider } from '@/schemas/provider.dto'
+import {
+  ChapterRecordSchema,
+  ChapterReviewSchema,
+  ChapterStalenessSchema,
+  StoryBibleSchema,
+  StoryThreadSchema
+} from '@/schemas/story.dto'
 
 // 1 章あたりの目標文字数 (新規作成フォームのプリセット)。Novel ごとに保持し、
 // 本文生成時にサーバーがプロンプトと maxOutputTokens に反映する。
@@ -19,6 +27,19 @@ export const DEFAULT_TONE = '一般文芸'
 // 想定年齢 (= 年齢指定)。生成プロンプトの表現強度に反映する。
 export const AGE_RATING_OPTIONS = ['全年齢', 'R15', 'R18'] as const
 export const DEFAULT_AGE_RATING = '全年齢'
+// 書き込み側 (CreateNovelSchema) は選択肢の 3 値だけを受ける。成人指定 (R15/R18) の検証と、プロンプトの年齢指定の行は
+// この 3 値を前提にしているので、'R18G' や 'r18' のような知らない値を保存させると、どちらも外れてしまう。
+export const AgeRatingSchema = z.enum(AGE_RATING_OPTIONS)
+export type AgeRating = z.infer<typeof AgeRatingSchema>
+
+// 既に保存されている値 (API の応答の age_rating は string) を、書き込み側の型に寄せる。
+// 知らない値は、内容の制限がいちばん強い全年齢として扱う。前後の空白や大文字・小文字は寄せない:
+// 寄せると「R18 として扱う」範囲が広がり、意図しない値が成人向けの扱いになるため。
+export function normalizeAgeRating(value: string): AgeRating {
+  const parsed = AgeRatingSchema.safeParse(value)
+  // 既定値 (DEFAULT_AGE_RATING) ではなく全年齢を直接書く。既定値を変えても、知らない値が成人向けの扱いにならないように。
+  return parsed.success ? parsed.data : '全年齢'
+}
 // 語り手(視点キャラ)を指定できる POV。一人称 / 三人称一元視点 のとき pov_character_id が有効。
 export const FOCAL_POVS: readonly string[] = ['一人称', '三人称一元視点']
 
@@ -91,10 +112,17 @@ export type NovelCharacterRelationInput = z.infer<typeof NovelCharacterRelationI
 // Editor = 章立て(outline)生成, Writer = 本文生成。
 // 端末の設定 (localStorage) は新規 novel 作成時の初期値として使うだけ。
 // 作成後は novel.editor_model / writer_model が真実 (DB は NOT NULL default あり)。
-// model はサーバー側で Gemini の URL パスに入るため、必ず enum で検証する。
+// Gemini の model はサーバー側で URL パスに入るため、必ず enum で検証する (ModelRefSchema)。
 
-// 公式 (ai.google.dev/gemini-api/docs/models) 準拠。2.0 系は 2026-06-01 停止のため除外。
+// 公式 (ai.google.dev/gemini-api/docs/models) 準拠 (2026-11-15 確認)。2.0 系は停止済みのため除外。
+// 2.5 系は非推奨で、2026-12-01 から 2.5-pro は 3.8-flash、2.5-flash は 3.5-flash-lite に自動転送される。
 export const GEMINI_MODELS = [
+  'gemini-4-carbon',
+  'gemini-4-argon',
+  'gemini-4-hydrogen',
+  'gemini-3.8-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash-lite',
   'gemini-3.5-flash',
   'gemini-3.1-pro-preview',
   'gemini-3-flash-preview',
@@ -110,7 +138,14 @@ export const DEFAULT_EDITOR_MODEL: GeminiModel = 'gemini-3.1-flash-lite'
 export const DEFAULT_WRITER_MODEL: GeminiModel = 'gemini-3.1-flash-lite'
 
 // 設定画面の ☆ 表示用。各 1〜5 (多いほど良い)。price は「安さ」(多いほど安価)。
+// 公式に評価値は無いので、位置づけと単価からの目安 (Carbon = 最高性能、Argon = 速さと低コスト寄り)。
 export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; price: number }> = {
+  'gemini-4-carbon': { quality: 5, speed: 2, price: 1 },
+  'gemini-4-argon': { quality: 4, speed: 3, price: 1 },
+  'gemini-4-hydrogen': { quality: 4, speed: 4, price: 2 },
+  'gemini-3.8-flash': { quality: 4, speed: 4, price: 3 },
+  'gemini-3.6-flash': { quality: 4, speed: 4, price: 3 },
+  'gemini-3.5-flash-lite': { quality: 3, speed: 5, price: 4 },
   'gemini-3.5-flash': { quality: 4, speed: 4, price: 2 },
   'gemini-3.1-pro-preview': { quality: 5, speed: 2, price: 1 },
   'gemini-3-flash-preview': { quality: 4, speed: 4, price: 3 },
@@ -118,6 +153,85 @@ export const MODEL_META: Record<GeminiModel, { quality: number; speed: number; p
   'gemini-2.5-pro': { quality: 5, speed: 2, price: 2 },
   'gemini-2.5-flash': { quality: 3, speed: 4, price: 4 },
   'gemini-2.5-flash-lite': { quality: 2, speed: 5, price: 5 }
+}
+
+// 1M トークンあたりの USD 単価。画面の表示とコスト記録 (computeCostUsd) の両方がこの表を使う。
+// 2026-11-15 時点の標準 (非バッチ・非キャッシュ) 単価。値上げ予定がある行は、改定日に更新すること。
+//   gemini-4-carbon / gemini-4-argon: 2026-12-01 から input 4.0 / output 20.0
+//   gemini-3.8-flash / gemini-3.6-flash: 2027-01-01 から input 1.5 / output 7.5
+// longPromptSurcharge: プロンプトが 20 万トークンを超えると単価が上がるモデル (表の値は 20 万以下)。
+export type ModelPricing = { input: number; output: number; longPromptSurcharge?: true }
+export const MODEL_PRICING_USD_PER_M_TOKENS: Record<GeminiModel, ModelPricing> = {
+  'gemini-4-carbon': { input: 2.0, output: 10.0 },
+  'gemini-4-argon': { input: 2.0, output: 10.0 },
+  'gemini-4-hydrogen': { input: 1.5, output: 7.5 },
+  'gemini-3.8-flash': { input: 0.75, output: 3.75 },
+  'gemini-3.6-flash': { input: 0.75, output: 3.75 },
+  'gemini-3.5-flash-lite': { input: 0.3, output: 2.5 },
+  'gemini-3.5-flash': { input: 1.5, output: 9.0 },
+  'gemini-3.1-pro-preview': { input: 2.0, output: 12.0, longPromptSurcharge: true },
+  'gemini-3-flash-preview': { input: 0.5, output: 3.0 },
+  'gemini-3.1-flash-lite': { input: 0.25, output: 1.5 },
+  'gemini-2.5-pro': { input: 1.25, output: 10.0, longPromptSurcharge: true },
+  'gemini-2.5-flash': { input: 0.3, output: 2.5 },
+  'gemini-2.5-flash-lite': { input: 0.1, output: 0.4 }
+}
+
+// Gemini の固定一覧 (画面のモデル選択と /api/models の両方が使う)。OpenAI 互換のモデルはサーバーの /models から来る。
+export const GEMINI_CATALOG: AvailableModel[] = GEMINI_MODELS.map((id) => {
+  const p = MODEL_PRICING_USD_PER_M_TOKENS[id]
+  return {
+    ref: id,
+    name: id,
+    provider: 'gemini',
+    owner: 'google',
+    contextWindow: null,
+    price: { input: p.input, output: p.output, longPromptSurcharge: p.longPromptSurcharge === true }
+  }
+})
+
+// 「$0.75 / $3.75」(入力 / 出力)。画面表示用。
+export function formatPrice(price: { input: number; output: number }): string {
+  return `$${price.input.toFixed(2)} / $${price.output.toFixed(2)}`
+}
+
+// ---------------------- モデル参照 (ModelRef) ----------------------
+// DB (editor_model / writer_model / コスト記録) と API が持つモデルの保存値。
+//   Gemini:        従来どおりの id (例: 'gemini-3.8-flash')。既存データはそのまま有効。
+//   OpenAI 互換:   'openai:' + サーバーの /models が返す id (例: 'openai:gpt-6.1-sol')。
+// 接頭辞で分けるので、互換サーバーが同名のモデルを返しても Gemini と取り違えない。
+export const OPENAI_MODEL_PREFIX = 'openai:'
+
+function isValidModelRef(value: string): boolean {
+  if (value.startsWith(OPENAI_MODEL_PREFIX)) {
+    const id = value.slice(OPENAI_MODEL_PREFIX.length)
+    return id.length > 0 && !/\s/.test(id)
+  }
+  // Gemini の id は URL パスに入るため、必ず既知の enum と照合する。
+  return GeminiModelSchema.safeParse(value).success
+}
+
+export const ModelRefSchema = z.string().nonempty().refine(isValidModelRef, { message: '不明なモデルです' })
+export type ModelRef = z.infer<typeof ModelRefSchema>
+
+export type ParsedModelRef = { provider: Provider; id: string }
+
+export function parseModelRef(value: string): ParsedModelRef {
+  if (value.startsWith(OPENAI_MODEL_PREFIX)) {
+    return { provider: 'openai', id: value.slice(OPENAI_MODEL_PREFIX.length) }
+  }
+  return { provider: 'gemini', id: value }
+}
+
+export function openaiModelRef(id: string): ModelRef {
+  return `${OPENAI_MODEL_PREFIX}${id}`
+}
+
+// DB の string を ModelRef に絞る。無効値が混入したら表示時点で気付けるよう throw する。
+export function asModelRef(value: string): ModelRef {
+  const result = ModelRefSchema.safeParse(value)
+  if (!result.success) throw new Error(`Invalid model: ${value}`)
+  return result.data
 }
 
 // ---------------------- あらすじ入力 ----------------------
@@ -131,14 +245,16 @@ export const CreateNovelSchema = z.object({
   outline_summary_chars: z.number().int().min(100).max(2000).default(DEFAULT_OUTLINE_SUMMARY_CHARS),
   pov: z.string().max(30).default(DEFAULT_POV),
   tone: z.string().max(30).default(DEFAULT_TONE),
-  age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
+  age_rating: AgeRatingSchema.default(DEFAULT_AGE_RATING),
   ending: z.string().max(30).default(DEFAULT_ENDING),
   // プロンプトに追加で混ぜる自由記述 (口調の傾向、固有名詞表記、避けたい展開など)
   notes: z.string().max(2000).default(''),
+  // 執筆上の指示 (表記の決まり、避けたい展開など)。notes と違い、章立てと本文の両方に渡す。
+  writing_notes: z.string().max(2000).default(''),
   // novel 単位の AI モデル。新規作成時は端末の設定 (localStorage) からコピー、編集時は既存値。
   // DB も NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値が入っている前提。
-  editor_model: GeminiModelSchema,
-  writer_model: GeminiModelSchema,
+  editor_model: ModelRefSchema,
+  writer_model: ModelRefSchema,
   // 所属カテゴリ。未分類は null (デフォルト)。
   category_id: z.string().nullable().default(null)
 })
@@ -193,7 +309,19 @@ export const OutlineChapterSchema = z.object({
   title: z.string(),
   summary: z.string(),
   // その章に登場するキャラクター名 (正規のキャスト名と一致)。未生成の旧 outline は空配列。
-  characters: z.array(z.string()).default([])
+  characters: z.array(z.string()).default([]),
+  // ここから下は章の計画。この項目より前に作られた章立てには無いので、すべて既定値つき。
+  // 上限は保存してよい大きさ。モデルの出力は検証の前にコードで切り詰める。
+  // その章で起きる出来事 (起きる順に 3〜6 個)
+  events: z.array(z.string().nonempty().max(1000)).max(20).default([]),
+  // 時と場所
+  time_place: z.string().max(1000).default(''),
+  // 章末の状況 (誰がどこでどういう状態か)
+  end_state: z.string().max(2000).default(''),
+  // この章で張る伏線 (id は章立ての中で一意)
+  setups: z.array(StoryThreadSchema).max(30).default([]),
+  // この章で回収する伏線の id (それより前の章の setups にあるもの)
+  payoffs: z.array(z.string().nonempty().max(40)).max(30).default([])
 })
 export type OutlineChapter = z.infer<typeof OutlineChapterSchema>
 
@@ -212,7 +340,13 @@ export const ChapterSchema = z.object({
   chapter_number: z.number().int().min(1),
   title: z.string().nullable(),
   content: z.string(),
-  created_at: z.string()
+  created_at: z.string(),
+  // 本文から抽出した記録。抽出の失敗や、この機能より前の章は null。
+  record: ChapterRecordSchema.nullable().default(null),
+  // 上流 (章立て、前の章) が変わって「要再生成」か。
+  staleness: ChapterStalenessSchema.default({ stale: false, reasons: [] }),
+  // 検査の結果。未検査は null。
+  review: ChapterReviewSchema.nullable().default(null)
 })
 export type Chapter = z.infer<typeof ChapterSchema>
 
@@ -224,7 +358,9 @@ export const ChapterVersionSchema = z.object({
   content: z.string(),
   // プロンプト保存機能より前に生成された version は null。
   prompt: z.string().nullable(),
-  created_at: z.string()
+  created_at: z.string(),
+  record: ChapterRecordSchema.nullable().default(null),
+  review: ChapterReviewSchema.nullable().default(null)
 })
 export type ChapterVersion = z.infer<typeof ChapterVersionSchema>
 
@@ -242,9 +378,10 @@ export const NovelSchema = z.object({
   pov_character_id: z.string(),
   ending: z.string(),
   notes: z.string(),
+  writing_notes: z.string().max(2000).default(''),
   // DB は NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値だが、
   // 既知の enum 以外も将来に向けて受けられるよう output schema は string で持つ。
-  // フォーム入力 (CreateNovelSchema) 側は厳密に GeminiModelSchema を要求している。
+  // フォーム入力 (CreateNovelSchema) 側は厳密に ModelRefSchema を要求している。
   editor_model: z.string(),
   writer_model: z.string(),
   // outline は DB では JSON 文字列で保存するが、API レスポンスではサーバーがパース・検証した
@@ -304,8 +441,15 @@ export const NovelWithChaptersSchema = NovelSchema.extend({
   cast: z.array(NovelCastMemberSchema).default([]),
   relations: z.array(NovelRelationSchema).default([]),
   generation_costs: z.array(ChapterCostSchema).default([]),
+  // 本文の合計 (各章の最新の生成だけ)
   total_cost_usd: z.number().default(0),
-  gen_job: NovelGenerationJobSchema.nullable().default(null)
+  // 本文以外 (章立て、作品設計、記録の抽出、検査) の合計。作り直した分も含めた全回数ぶん
+  aux_cost_usd: z.number().default(0),
+  gen_job: NovelGenerationJobSchema.nullable().default(null),
+  // 作品設計。未作成は null。
+  bible: StoryBibleSchema.nullable().default(null),
+  // 作品設計を作った後に、その入力 (あらすじ、登場人物、関係など) が変わったか。
+  bible_outdated: z.boolean().default(false)
 })
 export type NovelWithChapters = z.infer<typeof NovelWithChaptersSchema>
 
@@ -318,20 +462,45 @@ export type NovelSummary = Novel
 //   { delta: string }                                  生成テキストの増分
 //   { done: true, chapterId: string, title: string }   完了 (この時点で D1 保存済み)
 //   { error: string }                                  生成失敗
+//   { stage: ChapterStage }                            段階の切り替わり (接続の直後にも現在の段階を 1 回送る)
 // フロントの src/lib/stream.ts がこれをパースする。
+
+// 章の生成の段階。本文が流れてくるのは writing の間だけなので、その前後に何をしているかを画面に出すために送る。
+//   context    資料の準備 (既出の章の読み込み、古い章の記録の抽出)
+//   writing    本文の執筆
+//   recording  書いた章の記録の抽出
+//   reviewing  検査 (done の後に走る。購読を続けている画面だけが受け取る)
+export const CHAPTER_STAGES = ['context', 'writing', 'recording', 'reviewing'] as const
+export const ChapterStageSchema = z.enum(CHAPTER_STAGES)
+export type ChapterStage = z.infer<typeof ChapterStageSchema>
 
 export const ChapterStreamEventSchema = z.union([
   z.object({ delta: z.string() }),
   z.object({ done: z.literal(true), chapterId: z.string(), title: z.string() }),
-  z.object({ error: z.string() })
+  z.object({ error: z.string() }),
+  z.object({ stage: ChapterStageSchema })
 ])
 export type ChapterStreamEvent = z.infer<typeof ChapterStreamEventSchema>
 
 // outline / chapter 生成エンドポイント共通の body (model 上書き; 省略時はサーバー既定)
 export const GenerateOptionsSchema = z.object({
-  model: GeminiModelSchema.optional()
+  model: ModelRefSchema.optional()
 })
 export type GenerateOptions = z.infer<typeof GenerateOptionsSchema>
+
+// 本文の生成の body。instruction が空でなければ「指示つきの書き直し」:
+// base_version_id の版 (空なら最新の版) を元に、指示された箇所だけを直した全文を新しい version として作る。
+export const GenerateChapterOptionsSchema = GenerateOptionsSchema.extend({
+  instruction: z.string().max(2000).default(''),
+  base_version_id: z.string().max(64).default('')
+})
+export type GenerateChapterOptions = z.infer<typeof GenerateChapterOptionsSchema>
+
+// Novel.bible に保存する形。source_hash は作った時点の入力のハッシュ (API には出さず、bible_outdated の判定に使う)。
+export const StoredBibleSchema = StoryBibleSchema.extend({
+  source_hash: z.string().max(64).default('')
+})
+export type StoredBible = z.infer<typeof StoredBibleSchema>
 
 // outline 生成時のみ使える追加オプション: 章の指定セットだけ (既存 outline ありの場合のみ意味を持つ)。
 export const GenerateOutlineOptionsSchema = GenerateOptionsSchema.extend({

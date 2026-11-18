@@ -5,6 +5,9 @@ on:
       - develop
       - master
     types: [closed]
+permissions:
+  contents: read
+  packages: read
 jobs:
   deploy:
     name: Deploy workers
@@ -25,15 +28,31 @@ jobs:
             echo "ENVIRONMENT=staging" >> $GITHUB_ENV
           fi
       - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Generate Prisma client
         run: bunx prisma generate
         env:
           DATABASE_URL: file:./dev.db
+      # Before the deploy, so new code never runs against a schema it does not
+      # expect. A failed migration stops the job and the Worker is not deployed.
+      # Runs before the build: the build writes .wrangler/deploy/config.json,
+      # and wrangler rejects --env for that generated config. --config pins the
+      # source wrangler.toml all the same.
+      - name: Apply D1 migrations
+        uses: cloudflare/wrangler-action@v4
+        with:
+          wranglerVersion: latest
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 migrations apply DB --remote --env ${{ env.ENVIRONMENT }} --config wrangler.toml
       - name: Build
         run: bun run build
-      - name: Inject env-specific config into wrangler.json
-        run: bun scripts/inject-env-into-wrangler-json.ts $ENVIRONMENT
+        env:
+          # @cloudflare/vite-plugin bakes the env.<name> worker name, D1 and routes
+          # into dist/server/wrangler.json at build time.
+          CLOUDFLARE_ENV: ${{ env.ENVIRONMENT }}
       - name: Wrangler deploy
         uses: cloudflare/wrangler-action@v4
         with:

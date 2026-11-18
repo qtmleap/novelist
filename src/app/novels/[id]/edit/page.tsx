@@ -23,7 +23,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
-import { type CreateNovelInput, GeminiModelSchema, type NovelWithChapters } from '@/schemas/novel.dto'
+import { asModelRef, type CreateNovelInput, type NovelWithChapters, normalizeAgeRating } from '@/schemas/novel.dto'
 
 function toFormValues(novel: NovelWithChapters): CreateNovelInput {
   return {
@@ -35,13 +35,14 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
     outline_summary_chars: novel.outline_summary_chars,
     pov: novel.pov,
     tone: novel.tone,
-    age_rating: novel.age_rating,
+    age_rating: normalizeAgeRating(novel.age_rating),
     ending: novel.ending,
     notes: novel.notes,
+    writing_notes: novel.writing_notes,
     // DB は NOT NULL default で常に有効値だが、型としては string なので parse で narrow する。
     // 無効値が混入したら表示時点で気付かせるため throw する (Surface or throw)。
-    editor_model: GeminiModelSchema.parse(novel.editor_model),
-    writer_model: GeminiModelSchema.parse(novel.writer_model),
+    editor_model: asModelRef(novel.editor_model),
+    writer_model: asModelRef(novel.writer_model),
     category_id: novel.category_id
   }
 }

@@ -25,7 +25,8 @@
 ## セットアップと開発
 
 ```bash
-bun install --frozen-lockfile
+# @qtmleap/zodios は GitHub Packages で配布されるため、公開パッケージでも read:packages のトークンが要ります。
+GITHUB_TOKEN=$(gh auth token) bun install --frozen-lockfile
 DATABASE_URL=file:./dev.db bunx prisma generate
 bun run dev
 ```

@@ -2,11 +2,14 @@
 
 import { useAtom } from 'jotai'
 import { useEffect, useState } from 'react'
+import { ModelSelectItems } from '@/components/novel/ModelSelectItems'
 import { PageHeader } from '@/components/PageHeader'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Select, SelectContent, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
-import { GEMINI_MODELS, type GeminiModel, GeminiModelSchema, MODEL_META } from '@/schemas/novel.dto'
+import { useModelCatalog } from '@/hooks/useModelCatalog'
+import { GeminiModelSchema, MODEL_META, ModelRefSchema, parseModelRef } from '@/schemas/novel.dto'
+import type { AvailableModel, ModelCatalog } from '@/schemas/provider.dto'
 import { editorModelAtom, writerModelAtom } from '@/store/atoms'
 
 function Stars({ n }: { n: number }) {
@@ -18,20 +21,27 @@ function Stars({ n }: { n: number }) {
   )
 }
 
-function ModelMeta({ model }: { model: GeminiModel }) {
-  const meta = MODEL_META[model]
-  if (!meta) return null
+function ModelMeta({ model, catalog }: { model: string; catalog: ModelCatalog }) {
+  const entry: AvailableModel | undefined = catalog.models.find((m) => m.ref === model)
+  const parsed = parseModelRef(model)
+  const geminiId = GeminiModelSchema.safeParse(parsed.id)
+  const meta = parsed.provider === 'gemini' && geminiId.success ? MODEL_META[geminiId.data] : undefined
   return (
-    <div className='mt-0.5 flex gap-3 text-xs text-muted-foreground'>
-      <span>
-        性能 <Stars n={meta.quality} />
-      </span>
-      <span>
-        速度 <Stars n={meta.speed} />
-      </span>
-      <span>
-        価格 <Stars n={meta.price} />
-      </span>
+    <div className='mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
+      {meta !== undefined && (
+        <>
+          <span>
+            性能 <Stars n={meta.quality} />
+          </span>
+          <span>
+            速度 <Stars n={meta.speed} />
+          </span>
+          <span>
+            価格 <Stars n={meta.price} />
+          </span>
+        </>
+      )}
+      {entry === undefined && <span>このモデルは現在選べません</span>}
     </div>
   )
 }
@@ -54,6 +64,7 @@ function ModelSettings() {
   const [editorModel, setEditorModel] = useAtom(editorModelAtom)
   const [writerModel, setWriterModel] = useAtom(writerModelAtom)
   const [saved, setSaved] = useState(false)
+  const { catalog, error } = useModelCatalog()
 
   const showSaved = () => {
     setSaved(true)
@@ -61,13 +72,13 @@ function ModelSettings() {
   }
 
   const handleEditorChange = (value: string) => {
-    const result = GeminiModelSchema.safeParse(value)
+    const result = ModelRefSchema.safeParse(value)
     if (result.success) setEditorModel(result.data)
     showSaved()
   }
 
   const handleWriterChange = (value: string) => {
-    const result = GeminiModelSchema.safeParse(value)
+    const result = ModelRefSchema.safeParse(value)
     if (result.success) setWriterModel(result.data)
     showSaved()
   }
@@ -76,39 +87,37 @@ function ModelSettings() {
     <>
       <div className='space-y-4'>
         <div className='space-y-1.5'>
-          <Label htmlFor='editor-model'>Editor モデル（章立ての生成）</Label>
+          <Label htmlFor='editor-model'>Editor モデル</Label>
           <Select value={editorModel} onValueChange={handleEditorChange}>
             <SelectTrigger id='editor-model' className='w-72'>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {GEMINI_MODELS.map((m) => (
-                <SelectItem key={m} value={m}>
-                  {m}
-                </SelectItem>
-              ))}
+              <ModelSelectItems current={editorModel} />
             </SelectContent>
           </Select>
-          <ModelMeta model={editorModel} />
+          <ModelMeta model={editorModel} catalog={catalog} />
+          <p className='text-xs text-muted-foreground'>章立てを作るときに使います。</p>
         </div>
 
         <div className='space-y-1.5'>
-          <Label htmlFor='writer-model'>Writer モデル（本文の生成）</Label>
+          <Label htmlFor='writer-model'>Writer モデル</Label>
           <Select value={writerModel} onValueChange={handleWriterChange}>
             <SelectTrigger id='writer-model' className='w-72'>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {GEMINI_MODELS.map((m) => (
-                <SelectItem key={m} value={m}>
-                  {m}
-                </SelectItem>
-              ))}
+              <ModelSelectItems current={writerModel} />
             </SelectContent>
           </Select>
-          <ModelMeta model={writerModel} />
+          <ModelMeta model={writerModel} catalog={catalog} />
+          <p className='text-xs text-muted-foreground'>各章の本文を書くときに使います。</p>
         </div>
       </div>
+
+      {error !== null && (
+        <p className='text-sm text-destructive'>モデル一覧を取得できませんでした。もう一度読み込んでください。</p>
+      )}
 
       {saved && <p className='text-sm text-muted-foreground'>保存しました</p>}
     </>
