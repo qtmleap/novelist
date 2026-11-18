@@ -279,13 +279,15 @@ export function validateAdultCast(ageRating: string, bibleCast: BibleCast[], cas
 }
 
 // 成人指定のとき、作品設計の人物設定以外の文面 (物語の核、結末、人物の変化、世界のルール、用語、時系列) に
-// 未成年を指す語が残っていないことを確かめる。人物設定は validateAdultCast が見る。全年齢なら常に空。
+// 未成年を指す語が残っていないことを確かめる (渡されれば呼称表の呼び方も見る)。人物設定は validateAdultCast が見る。全年齢なら常に空。
 export type AdultBibleText = {
   premise: string
   ending: string
   arcs: Array<{ name: string; start: string; end: string }>
   world: { rules: string[]; terms: Array<{ term: string; note: string }> }
   timeline: string[]
+  // 呼称表。渡されたときだけ、呼び方 (call) を見る (StoryBible をそのまま渡せる)
+  addresses?: Array<{ call: string }>
 }
 
 export function validateAdultBibleText(ageRating: string, bible: AdultBibleText): string[] {
@@ -298,7 +300,8 @@ export function validateAdultBibleText(ageRating: string, bible: AdultBibleText)
     { label: '人物の変化', lines: bible.arcs.flatMap((arc) => [arc.name, arc.start, arc.end]) },
     { label: '世界のルール', lines: bible.world.rules },
     { label: '用語', lines: bible.world.terms.flatMap((term) => [term.term, term.note]) },
-    { label: '時系列', lines: bible.timeline }
+    { label: '時系列', lines: bible.timeline },
+    { label: '呼称表', lines: bible.addresses === undefined ? [] : bible.addresses.map((entry) => entry.call) }
   ]
   return items.flatMap((item) => {
     const terms = findMinorTerms(item.lines.join('\n'))

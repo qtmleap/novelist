@@ -887,8 +887,44 @@ describe('validateAdultBibleText', () => {
   test('少女 and 少年 are allowed in the bible text (they are only checked in the appearance)', () => {
     expect(validateAdultBibleText('R18', { ...clean(), premise: '少年と少女の冒険' })).toEqual([])
   })
+  test('reports a minor term in the call of the address table, after the timeline', () => {
+    const addresses = [
+      { from: '太郎', to: '花子', call: '花子さん' },
+      { from: '次郎', to: '花子', call: '女子高生ちゃん' }
+    ]
+    expect(validateAdultBibleText('R18', { ...clean(), addresses })).toEqual([
+      '作品設計の呼称表に、未成年を指す語（「女子高生」）が残っています'
+    ])
+    const bad = { ...clean(), timeline: ['JK の頃'], addresses }
+    expect(validateAdultBibleText('R15', bad)).toEqual([
+      '作品設計の時系列に、未成年を指す語（「JK」）が残っています',
+      '作品設計の呼称表に、未成年を指す語（「女子高生」）が残っています'
+    ])
+  })
+  test('lists every minor term found in the calls together', () => {
+    const addresses = [{ call: '美少女' }, { call: '高2' }, { call: '美少女' }]
+    expect(validateAdultBibleText('R18', { ...clean(), addresses })).toEqual([
+      '作品設計の呼称表に、未成年を指す語（「美少女」「高2」）が残っています'
+    ])
+  })
+  test('calls without a minor term pass, and the address table may be empty or absent', () => {
+    const addresses = [{ call: '花子さん' }, { call: 'お姉ちゃん' }, { call: '先輩' }, { call: 'いろP' }]
+    expect(validateAdultBibleText('R18', { ...clean(), addresses })).toEqual([])
+    expect(validateAdultBibleText('R18', { ...clean(), addresses: [] })).toEqual([])
+    expect(validateAdultBibleText('R18', clean())).toEqual([])
+  })
+  test('少女 and 少年 are allowed in the calls (they are only checked in the appearance)', () => {
+    expect(validateAdultBibleText('R18', { ...clean(), addresses: [{ call: '少女' }, { call: '少年' }] })).toEqual([])
+  })
+  test('the address table is not checked for an all-ages work', () => {
+    expect(validateAdultBibleText('全年齢', { ...clean(), addresses: [{ call: '女子高生' }] })).toEqual([])
+  })
   test('works with a StoryBible-shaped object', () => {
-    const bible: Parameters<typeof validateAdultBibleText>[1] = { ...clean(), arcs: [] }
+    const bible: Parameters<typeof validateAdultBibleText>[1] = {
+      ...clean(),
+      arcs: [],
+      addresses: [{ from: '太郎', to: '花子', call: '花子さん' }]
+    }
     expect(validateAdultBibleText('R18', bible)).toEqual([])
   })
 })
