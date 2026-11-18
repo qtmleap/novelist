@@ -582,7 +582,7 @@ describe('findMinorTerms', () => {
     expect(findMinorTerms('女子高校生')).toEqual(['女子高校生'])
     expect(findMinorTerms('保育園児')).toEqual(['園児'])
   })
-  test('finds JK, and JS / JC when a digit follows or hiragana / kanji are on both sides, in any case', () => {
+  test('finds JK, JS and JC in any case', () => {
     expect(findMinorTerms('現役JK')).toEqual(['JK'])
     expect(findMinorTerms('jk')).toEqual(['JK'])
     expect(findMinorTerms('JS5')).toEqual(['JS'])
@@ -1160,22 +1160,56 @@ describe('findMinorTerms: ordinary adult settings that were flagged by mistake',
       'JSエンジニア',
       'ベテランJSエンジニア',
       'フロントエンド(JS/TS)開発',
+      'Node.js',
+      'Vue.js の開発者',
+      'TS/JS',
+      'JSとTS',
+      'JS・TSの',
+      'JS、TSを書く',
+      'JSやTS',
+      'TSとJS',
+      'TS・JS',
+      'React JS',
+      'Next JS',
+      'Ext JS',
+      'ES6/JS',
+      'JSON',
+      'JSX',
       'JS開発',
-      'JS',
-      'jc と js',
-      'JC連合',
-      'Vue.js の開発者'
+      'JS実装',
+      'JSフレームワーク',
+      'JSライブラリ',
+      'JSコード',
+      'JSファイル',
+      'JSプログラマ',
+      'JSスクリプト',
+      'JC開発'
     ]) {
       expect(findMinorTerms(text)).toEqual([])
     }
   })
-  test('JK is always found, JS and JC when a digit follows or both sides are hiragana / kanji', () => {
-    expect(findMinorTerms('JKエンジニア')).toEqual(['JK'])
-    expect(findMinorTerms('JS5')).toEqual(['JS'])
-    expect(findMinorTerms('JC3')).toEqual(['JC'])
-    expect(findMinorTerms('彼女はJSだ')).toEqual(['JS'])
-    expect(findMinorTerms('現役JCの')).toEqual(['JC'])
-    expect(findMinorTerms('JSの少女')).toEqual([])
+  test('JS and JC are found everywhere else, as long as no letter is next to them', () => {
+    const found: Array<[string, string[]]> = [
+      ['ヒロインはJS', ['JS']],
+      ['ヒロインはJS。', ['JS']],
+      ['JS設定で', ['JS']],
+      ['JSヒロイン', ['JS']],
+      ['JS・JCもの', ['JS', 'JC']],
+      ['彼女は JS だ', ['JS']],
+      ['JS', ['JS']],
+      ['JC連合', ['JC']],
+      ['JSの少女', ['JS']],
+      ['jc と js', ['JC', 'JS']],
+      ['JS5', ['JS']],
+      ['彼女はJCだ', ['JC']],
+      ['(JS)', ['JS']],
+      ['JKエンジニア', ['JK']],
+      ['JK JS', ['JK', 'JS']],
+      ['現役JS・JK', ['JS', 'JK']]
+    ]
+    for (const [text, terms] of found) {
+      expect(findMinorTerms(text)).toEqual(terms)
+    }
   })
   test('minor is found as minors, a minor and underage only', () => {
     expect(findMinorTerms('Minor Arcana の研究者')).toEqual([])
@@ -1293,6 +1327,32 @@ describe('findMinorTerms: ordinary ways to write a minor', () => {
       expect(findMinorTerms(text)).toEqual([])
       expect(findMinorTerms(text, { appearance: true })).toEqual([])
     }
+  })
+  test('the Nth year of an adult life next to a child word is not a school grade', () => {
+    const adult = [
+      '社会人3年生の女子',
+      '社会人1年生の女の子',
+      '新人3年生の女子',
+      '新米ママ1年生の女の子',
+      'ママ1年生の女の子',
+      '入社2年生の男の子',
+      '主婦1年生の女の子',
+      'OL2年生の女子',
+      '看護師1年生の女の子',
+      '教師3年生の男子',
+      '教員2年生の男の子',
+      '社会人の3年生の女の子'
+    ]
+    for (const text of adult) {
+      expect(findMinorTerms(text)).toEqual([])
+      expect(findMinorTerms(text, { appearance: true })).toEqual([])
+    }
+  })
+  test('the same words with a child grade are still caught, and 大学 stays an adult grade', () => {
+    expect(findMinorTerms('5年生の女の子')).toEqual(['5年生の女の子'])
+    expect(findMinorTerms('小学5年生の女の子')).toEqual(['小学5年'])
+    expect(findMinorTerms('教室の5年生の女の子')).toEqual(['5年生の女の子'])
+    expect(findMinorTerms('大学3年生の女の子')).toEqual([])
   })
   test('a grade with a school name before a child word is found once, as the school grade', () => {
     expect(findMinorTerms('小学5年生の女の子')).toEqual(['小学5年'])
