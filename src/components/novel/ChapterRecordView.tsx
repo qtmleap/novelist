@@ -1,6 +1,7 @@
 'use client'
 
 import type { ReactNode } from 'react'
+import { withKeys } from '@/lib/keys'
 import type { ChapterRecord } from '@/schemas/story.dto'
 
 // 章の記録の表示。後の章に「確定事項」として引き継がれる内容を、利用者が確かめるための読み取り専用の表示。
@@ -13,19 +14,6 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       {children}
     </section>
   )
-}
-
-// 同じ値が重なっても React のキーが衝突しないよう、値ごとの出現回数を足したキーを付ける。
-// 添字をキーにしない (並びが変わると状態がずれるため)。
-function withKeys<T>(items: T[], keyOf: (item: T) => string): { key: string; item: T }[] {
-  const seen = new Map<string, number>()
-  return items.map((item) => {
-    const base = keyOf(item)
-    const count = seen.get(base)
-    const nth = count === undefined ? 0 : count + 1
-    seen.set(base, nth)
-    return { key: `${base}#${nth}`, item }
-  })
 }
 
 function BulletList({ items }: { items: string[] }) {

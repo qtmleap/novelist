@@ -65,7 +65,7 @@ export function OutlineSelectionDialog({ open, onOpenChange, totalChapters, outl
           <DialogTitle>章立てを生成する章を選択</DialogTitle>
           <DialogDescription>
             チェックを入れた章の章立て (タイトル・要約)
-            を生成します。既に章立てがある章にチェックを入れると上書きされ、その章の本文も削除されます。
+            を生成します。既に章立てがある章にチェックを入れると上書きされ、その章の本文は要再生成になります。
           </DialogDescription>
         </DialogHeader>
 

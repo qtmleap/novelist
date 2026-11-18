@@ -2,11 +2,11 @@
 
 import { Check, Loader2, Plus, Trash2, X } from 'lucide-react'
 import { type ReactNode, useId, useRef, useState } from 'react'
-import { withKeys } from '@/components/novel/BibleView'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { withKeys } from '@/lib/keys'
 import {
   type AddressEntry,
   type BibleCast,

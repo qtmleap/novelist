@@ -1,9 +1,9 @@
 'use client'
 
 import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { Copy, Loader2, Pencil, RefreshCw, ScrollText, Sparkles, Users } from 'lucide-react'
+import { Copy, Loader2, Pencil, RefreshCw, ScrollText, Sparkles, TriangleAlert, Users } from 'lucide-react'
 import { useParams, useRouter } from 'next/navigation'
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { BibleEditor } from '@/components/novel/BibleEditor'
 import { BibleOutdatedNotice, BibleView } from '@/components/novel/BibleView'
@@ -49,7 +49,9 @@ function chaptersFromApi(apiChapters: Chapter[]): ChapterData[] {
     number: c.chapter_number,
     title: c.title,
     content: c.content,
-    done: true
+    done: true,
+    stale: c.staleness.stale,
+    staleReasons: c.staleness.reasons
   }))
 }
 
@@ -115,7 +117,10 @@ function genReducer(state: GenState, action: GenAction): GenState {
         number: action.chapterNumber,
         title: action.title,
         content: state.buffer,
-        done: true
+        done: true,
+        // 書いたばかりの章は古くない。後ろの章が要再生成になるのは、サーバーから取り直して反映する。
+        stale: false,
+        staleReasons: []
       }
       const existing = state.chapters.findIndex((c) => c.number === action.chapterNumber)
       const next =
@@ -225,6 +230,12 @@ function NovelDetailContent({ id }: { id: string }) {
 
   const abortRef = useRef<AbortController | null>(null)
 
+  // 章の本文・章立てが変わると、別の章の「要再生成」も変わる。サーバーから取り直して章の一覧に反映する。
+  const syncChapters = useCallback(async () => {
+    const { data: fresh } = await refetch()
+    if (fresh) dispatch({ type: 'CHAPTERS_REFRESHED', chapters: chaptersFromApi(fresh.chapters) })
+  }, [refetch])
+
   const genJob = novel.gen_job
   const genJobCurrentKey =
     genJob !== null && genJob !== undefined && genJob.status === 'running' ? genJob.current : null
@@ -244,7 +255,7 @@ function NovelDetailContent({ id }: { id: string }) {
       onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
       onDone: ({ chapterId, title }) => {
         dispatch({ type: 'CHAPTER_DONE', chapterNumber: chapterNum, chapterId, title })
-        void refetch()
+        void syncChapters()
       },
       onError: (msg) => dispatch({ type: 'CHAPTER_ERR', error: msg })
     })
@@ -258,7 +269,7 @@ function NovelDetailContent({ id }: { id: string }) {
       sub.close()
       abort.abort()
     }
-  }, [genJobCurrentKey, id, refetch])
+  }, [genJobCurrentKey, id, syncChapters])
 
   const [outlineDialogOpen, setOutlineDialogOpen] = useState(false)
   const [chapterDialogOpen, setChapterDialogOpen] = useState(false)
@@ -361,18 +372,15 @@ function NovelDetailContent({ id }: { id: string }) {
           { params: { id } }
         )
         dispatch({ type: 'OUTLINE_OK', outline: body.outline, warnings: body.warnings })
-        // chapters[] 指定の部分再生成では対象章の本文も server 側で消えるので novel を取り直す。
-        const { data: freshNovel } = await refetch()
-        if (freshNovel) {
-          dispatch({ type: 'CHAPTERS_REFRESHED', chapters: chaptersFromApi(freshNovel.chapters) })
-        }
+        // 章立てを作り直した章の本文は残り、要再生成になる。novel を取り直して章の一覧に反映する。
+        await syncChapters()
         return body.outline
       } catch (e) {
         dispatch({ type: 'OUTLINE_ERR', error: readApiError(e, '章立て生成に失敗しました') })
         return null
       }
     },
-    [id, refetch]
+    [id, syncChapters]
   )
 
   const handleStartGeneration = useCallback(
@@ -404,6 +412,13 @@ function NovelDetailContent({ id }: { id: string }) {
 
   const { outline, outlineWarnings, chapters, streamingIndex, stage, genStatus, genError } = state
   const isGenerating = genStatus === 'generatingOutline' || genStatus === 'generatingChapter'
+  // 生成する章の選択ダイアログに渡す集合。毎回作り直すと、開いている間に再描画されるたびに選択が初期化されるので、
+  // chapters が変わったときだけ作る。
+  const chaptersDone = useMemo(() => new Set(chapters.filter((c) => c.done).map((c) => c.number)), [chapters])
+  const chaptersStale = useMemo(
+    () => new Set(chapters.filter((c) => c.done && c.stale).map((c) => c.number)),
+    [chapters]
+  )
   const totalChapters = outline !== null ? outline.chapters.length : novel.num_chapters
   const currentChapter = streamingIndex !== null ? streamingIndex : chapters.filter((c) => c.done).length + 1
 
@@ -556,6 +571,8 @@ function NovelDetailContent({ id }: { id: string }) {
           try {
             const res = await api.updateOutline({ outline: next }, { params: { id } })
             dispatch({ type: 'OUTLINE_OK', outline: res.outline, warnings: res.warnings })
+            // 章立てを変えた章は要再生成になるので、章の一覧を取り直す。保存自体は成功しているので、取り直しの失敗では戻さない。
+            await syncChapters().catch(() => undefined)
           } catch (e) {
             dispatch({ type: 'OUTLINE_ERR', error: readApiError(e, '章立ての保存に失敗しました') })
             throw e
@@ -575,13 +592,25 @@ function NovelDetailContent({ id }: { id: string }) {
         </Button>
       )}
 
-      {!isGenerating && genStatus !== 'error' && outline !== null && outline.chapters.length >= novel.num_chapters && (
-        <GenerateChaptersButton
-          hasUndoneChapter={chapters.filter((c) => c.done).length < novel.num_chapters}
-          disabled={!editAllowed}
-          onOpen={() => setChapterDialogOpen(true)}
-        />
-      )}
+      {!isGenerating &&
+        genStatus !== 'error' &&
+        ((outline !== null && outline.chapters.length >= novel.num_chapters) || chaptersStale.size > 0) && (
+          <div className='flex flex-wrap items-center gap-3'>
+            {outline !== null && outline.chapters.length >= novel.num_chapters && (
+              <GenerateChaptersButton
+                hasUndoneChapter={chapters.filter((c) => c.done).length < novel.num_chapters}
+                disabled={!editAllowed}
+                onOpen={() => setChapterDialogOpen(true)}
+              />
+            )}
+            {chaptersStale.size > 0 && (
+              <p className='flex items-center gap-1.5 text-sm text-amber-800 dark:text-amber-200'>
+                <TriangleAlert className='size-4 shrink-0' aria-hidden='true' />
+                要再生成の章が <span className='tabular-nums'>{chaptersStale.size}</span> 章あります
+              </p>
+            )}
+          </div>
+        )}
 
       <OutlineSelectionDialog
         open={outlineDialogOpen}
@@ -712,7 +741,8 @@ function NovelDetailContent({ id }: { id: string }) {
           open={chapterDialogOpen}
           onOpenChange={setChapterDialogOpen}
           outline={outline}
-          chaptersDone={new Set(chapters.filter((c) => c.done).map((c) => c.number))}
+          chaptersDone={chaptersDone}
+          chaptersStale={chaptersStale}
           onConfirm={(targets) => {
             if (targets.length > 0) handleStartGeneration(targets, asModelRef(novel.writer_model))
           }}

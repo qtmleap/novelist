@@ -1,9 +1,10 @@
 'use client'
 
-import { ClipboardList, FileText, History, Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import { ClipboardList, FileText, History, Loader2, RefreshCw, Trash2, TriangleAlert } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { STALE_REASON_LABELS } from '@/components/novel/ChapterReader'
 import { ChapterRecordView } from '@/components/novel/ChapterRecordView'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { CHAPTER_STAGE_LABELS } from '@/components/novel/GenerationStatus'
@@ -34,6 +35,7 @@ import {
   type ChapterVersion,
   type NovelWithChapters
 } from '@/schemas/novel.dto'
+import type { StaleReason } from '@/schemas/story.dto'
 
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
@@ -69,6 +71,46 @@ function ChapterMeta({ chars, cost }: { chars: number; cost?: ChapterCost }) {
           <span>${cost.cost_usd.toFixed(4)} USD</span>
         </>
       )}
+    </div>
+  )
+}
+
+// 生成した後に上流 (章立て、前の章) が変わった章への注意。失敗ではなく「作り直したほうがよい」ので、
+// ErrorAlert (destructive) とは別に注意の色にし、色だけに頼らずアイコンと文言でも伝える。
+// 再生成は、下の「危険な操作」と同じ確認ダイアログ (regenOpen) を開く。
+function StaleNotice({
+  reasons,
+  disabled,
+  onRegenerate
+}: {
+  reasons: StaleReason[]
+  disabled: boolean
+  onRegenerate: () => void
+}) {
+  return (
+    <div className='flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-200'>
+      <TriangleAlert className='mt-0.5 size-5 shrink-0' aria-hidden='true' />
+      <div className='flex min-w-0 flex-1 flex-col gap-2'>
+        <p className='font-medium'>この章は要再生成です</p>
+        {reasons.length > 0 && (
+          <ul className='list-disc space-y-0.5 pl-5'>
+            {reasons.map((r) => (
+              <li key={r}>{STALE_REASON_LABELS[r]}</li>
+            ))}
+          </ul>
+        )}
+        <Button
+          type='button'
+          variant='outline'
+          size='sm'
+          disabled={disabled}
+          onClick={onRegenerate}
+          className='w-fit border-amber-500/40 bg-transparent text-amber-800 hover:bg-amber-500/20 hover:text-amber-800 dark:text-amber-200 dark:hover:text-amber-200 [&_svg]:size-4!'
+        >
+          <RefreshCw />
+          この章を再生成
+        </Button>
+      </div>
     </div>
   )
 }
@@ -141,12 +183,11 @@ export default function ChapterDetailPage() {
   const cost = novel?.generation_costs.find((c) => c.chapter_number === chapterNumber)
   const totalChapters = novel?.num_chapters ?? 0
   // 最新生成済み章 = この novel の chapters の最大 chapter_number。
-  // 削除は後続を巻き込むので最新章のみ許可。再生成は本人だけ書き換わるので、
-  // 全章生成済み (= 後続も既にある) なら任意章でも許可する。
+  // 削除は後続を巻き込むので最新章のみ許可。再生成は、後ろの章が「要再生成」になるだけで本文は残るので、
+  // 本文がある章ならどれでも許可する。
   const latestDoneNumber = novel?.chapters.reduce((acc, c) => Math.max(acc, c.chapter_number), 0) ?? 0
   const isLatest = chapter !== null && chapterNumber === latestDoneNumber
-  const allChaptersDone = !!novel && novel.chapters.length >= novel.num_chapters
-  const canRegenerate = chapter !== null && (isLatest || allChaptersDone)
+  const canRegenerate = chapter !== null
 
   const prevHref = chapterNumber > 1 && novelId ? routes.novels.chapter(novelId, chapterNumber - 1) : null
   const nextHref = chapterNumber < totalChapters && novelId ? routes.novels.chapter(novelId, chapterNumber + 1) : null
@@ -288,6 +329,14 @@ export default function ChapterDetailPage() {
             </p>
           </div>
 
+          {!isRegenerating && chapter.staleness.stale && (
+            <StaleNotice
+              reasons={chapter.staleness.reasons}
+              disabled={busy || !canRegenerate || !editAllowed}
+              onRegenerate={() => setRegenOpen(true)}
+            />
+          )}
+
           <article className='whitespace-pre-wrap text-sm leading-relaxed text-foreground/90'>
             {displayContent}
             {isRegenerating && (
@@ -361,9 +410,7 @@ export default function ChapterDetailPage() {
               <p className='mt-0.5 text-sm text-muted-foreground'>
                 {isLatest
                   ? '再生成と削除は元に戻せません。'
-                  : allChaptersDone
-                    ? '再生成は元に戻せません。後続の章との整合性は保たれない場合があります。削除は最新章のみ可能です。'
-                    : '整合性のため、再生成と削除は最新の生成済み章でのみ可能です。'}
+                  : '再生成は元に戻せません。後ろの章は要再生成になります。削除は最新章のみ可能です。'}
               </p>
             </div>
             <div className='flex flex-wrap items-center gap-2'>

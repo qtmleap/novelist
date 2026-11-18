@@ -3,24 +3,11 @@
 import { TriangleAlert } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
+import { withKeys } from '@/lib/keys'
 import type { StoryBible } from '@/schemas/story.dto'
 
 // 作品設計の表示。章立てと全章の本文に同じものが渡るので、利用者が中身を確かめるための読み取り専用の表示。
 // 中身が空の項目は見出しごと出さない。
-
-// 同じ値が重なっても React のキーが衝突しないよう、値ごとの出現回数を足したキーを付ける。
-// 添字をキーにしない (Biome の noArrayIndexKey) ので、並びが変わらない一覧に限って使う。
-// index は更新対象の行を指すために返す。
-export function withKeys<T>(items: T[], keyOf: (item: T) => string): { key: string; item: T; index: number }[] {
-  const seen = new Map<string, number>()
-  return items.map((item, index) => {
-    const base = keyOf(item)
-    const count = seen.get(base)
-    const nth = count === undefined ? 0 : count + 1
-    seen.set(base, nth)
-    return { key: `${base}#${nth}`, item, index }
-  })
-}
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (

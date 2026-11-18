@@ -1,16 +1,16 @@
 'use client'
 
-import { BookMarked, Check, ChevronRight, Loader2, Pencil, Users, X } from 'lucide-react'
+import { BookMarked, Check, ChevronRight, Loader2, Pencil, TriangleAlert, Users, X } from 'lucide-react'
 import Link from 'next/link'
 import { type ReactNode, useEffect, useState } from 'react'
 import { MultiSelect } from '@/components/MultiSelect'
-import { withKeys } from '@/components/novel/BibleView'
-import type { ChapterData } from '@/components/novel/ChapterReader'
+import { type ChapterData, STALE_REASON_LABELS } from '@/components/novel/ChapterReader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { withKeys } from '@/lib/keys'
 import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
 import { type ChapterCost, type Outline, type OutlineChapter, OutlineSchema } from '@/schemas/novel.dto'
@@ -52,6 +52,24 @@ const toLines = (text: string): string[] =>
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '')
+
+// 本文はあるが、生成した後に上流 (章立て、前の章) が変わった章の印。色だけに頼らず、アイコンと文言も付ける。
+// 理由は title (マウスを載せたとき) と aria-label (読み上げ) の両方に入れる。
+function StaleBadge({ reasons }: { reasons: ChapterData['staleReasons'] }) {
+  const detail = reasons.map((r) => STALE_REASON_LABELS[r])
+  return (
+    <Badge
+      variant='outline'
+      role='img'
+      title={detail.join('\n')}
+      aria-label={detail.length > 0 ? `要再生成: ${detail.join('、')}` : '要再生成'}
+      className='border-amber-500/40 bg-amber-500/10 font-normal text-amber-800 dark:text-amber-200'
+    >
+      <TriangleAlert aria-hidden='true' />
+      要再生成
+    </Badge>
+  )
+}
 
 // 章ごとの計画 (出来事、時と場所、章末の状況、伏線)。情報が多く一覧が長くなるので、既定は閉じる。
 // 行全体が章ページへのリンクのことがあるため、リンクの外 (行の下) に置く。
@@ -396,6 +414,7 @@ export function OutlineView({
                       aria-label='本文あり'
                     />
                   ) : null}
+                  {done && chapterData?.stale === true && <StaleBadge reasons={chapterData.staleReasons} />}
                 </p>
                 {hasOutlineEntry ? (
                   <p className='mt-0.5 text-xs leading-relaxed text-muted-foreground'>{ch.summary}</p>

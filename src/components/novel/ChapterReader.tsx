@@ -15,12 +15,23 @@ import {
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { ChapterCost } from '@/schemas/novel.dto'
+import type { StaleReason } from '@/schemas/story.dto'
 
 export type ChapterData = {
   number: number
   title: string | null
   content: string
   done: boolean
+  // 上流 (章立て、前の章) が変わって「要再生成」か。理由は staleReasons。
+  stale: boolean
+  staleReasons: StaleReason[]
+}
+
+// 「要再生成」の理由の表示名。章立ての一覧と章ページの両方で使う。
+export const STALE_REASON_LABELS: Record<StaleReason, string> = {
+  outline_changed: '生成した後に、この章の章立てが変更されました',
+  previous_regenerated: '生成した後に、前の章が作り直されました',
+  previous_stale: '前の章が要再生成です'
 }
 
 type Props = {
@@ -181,7 +192,14 @@ export function ChapterReader({
   if (streamingIndex !== null) {
     const alreadyIn = displayChapters.some((c) => c.number === streamingIndex)
     if (!alreadyIn) {
-      displayChapters.push({ number: streamingIndex, title: null, content: buffer, done: false })
+      displayChapters.push({
+        number: streamingIndex,
+        title: null,
+        content: buffer,
+        done: false,
+        stale: false,
+        staleReasons: []
+      })
     } else {
       const idx = displayChapters.findIndex((c) => c.number === streamingIndex)
       if (idx !== -1) {
