@@ -929,25 +929,33 @@ describe('buildBiblePrompt: 成人指定', () => {
     expect(body).toContain('学校の試験、行事、部活動なども、大学や職場のものに置き換えて書く。')
   })
 
-  // 後処理 (bible.ts) は、未成年を指す語が残った設計を保存しない。規則に挙げる語を、実際の検証と突き合わせる。
-  test('書かない語はすべて検証で不合格になる語、書いてよい言い方はすべて検証を通る', () => {
-    const lines = section(buildBiblePrompt(bibleInput({ style: adultStyle('R18') })).system, '成人指定').split('\n')
-    const quoted = (line: string | undefined): string[] =>
-      line === undefined ? [] : [...line.matchAll(/「(.+?)」/g)].map((found) => found[1])
-    const ngLine = lines.find((line) => line.includes('書かない語: '))
-    const okLine = lines.find((line) => line.includes('書いてよい言い方: '))
-    const ng = quoted(ngLine)
-    const ok = quoted(okLine)
-    expect(ng).toEqual([
+  // 後処理 (bible.ts) は、未成年を指す語や 18 歳未満の年齢が残った設計を保存しない。
+  // 規則に挙げる語を、実際の検証と突き合わせる (検証が変わって規則とずれたら、ここが落ちる)。
+  const quoted = (line: string | undefined): string[] =>
+    line === undefined ? [] : [...line.matchAll(/「(.+?)」/g)].map((found) => found[1])
+  // 節の中で、目印の語を含む行
+  const ruleLine = (sectionName: string, marker: string): string | undefined =>
+    section(buildBiblePrompt(bibleInput({ style: adultStyle('R18') })).system, sectionName)
+      .split('\n')
+      .find((line) => line.includes(marker))
+
+  test('書かない語は、すべて検証で不合格になる', () => {
+    const line = ruleLine('成人指定', '書かない語: ')
+    expect(quoted(line)).toEqual([
       '高校生',
       '中学生',
       '小学生',
       '女子高生',
+      '女子生徒',
+      '男子生徒',
       '未成年',
       '児童',
       '幼児',
       '美少女',
       '美少年',
+      '生徒会',
+      '高等部',
+      '中等部',
       '十代',
       '10代',
       'ティーン',
@@ -956,44 +964,109 @@ describe('buildBiblePrompt: 成人指定', () => {
       '高2',
       '中1'
     ])
-    for (const term of ng) {
+    for (const term of quoted(line)) {
+      // 外見の欄に限らず、どの欄でも当たる
       expect(findMinorTerms(term)).not.toEqual([])
     }
-    expect(ok).toEqual([
+    expect(line).toContain('1つでも残ると、この設計は採用されない')
+    expect(line).toContain('かなや英語で書いても、略語や俗語にしても同じ。')
+    // かな書きと英語も、検証は拾う
+    for (const term of ['こうこうせい', 'ジョシコウセイ', 'teenager', 'schoolgirl', 'JK']) {
+      expect(findMinorTerms(term)).not.toEqual([])
+    }
+  })
+
+  test('18 歳未満の年齢の書き方は、すべて検証で不合格になる', () => {
+    const line = ruleLine('成人指定', '書かない書き方: ')
+    expect(line).toBe(
+      '- 18歳未満の年齢も、どの項目にも書かない。書かない書き方: 「14歳」「十四才」「8歳で」「18歳未満」「20歳以下」。過去の出来事は、年齢ではなく時期で書く。'
+    )
+    for (const term of quoted(line)) {
+      expect(findMinorTerms(term)).not.toEqual([])
+    }
+    // レビューで見つかった、年齢の欄と別に年齢を書く形
+    expect(findMinorTerms('見た目は12歳ほど', { appearance: true })).not.toEqual([])
+    expect(findMinorTerms('実年齢は14歳')).not.toEqual([])
+    expect(findMinorTerms('8歳で両親を亡くし')).not.toEqual([])
+  })
+
+  test('書いてよい言い方は、すべて検証を通る (外見の欄でも)', () => {
+    const line = ruleLine('成人指定', '書いてよい言い方: ')
+    expect(quoted(line)).toEqual([
       '学生時代',
       '高校時代',
       '中学時代',
       '若い頃',
       '子供の頃',
       '大学に入る前',
+      '十年前',
+      '両親を早くに亡くし',
+      '3歳年上',
+      '20歳の誕生日',
       '高校教師',
       '高校を卒業後',
       '高校',
       '中学'
     ])
-    for (const phrase of ok) {
+    for (const phrase of quoted(line)) {
+      expect(findMinorTerms(phrase)).toEqual([])
       expect(findMinorTerms(phrase, { appearance: true })).toEqual([])
     }
-    expect(ngLine).toContain('1つでも残ると、この設計は採用されない')
   })
 
-  test('年齢と人物設定の書式を、検証に合わせて具体的に示す', () => {
-    const body = section(buildBiblePrompt(bibleInput({ style: adultStyle('R15') })).system, '成人の人物設定（cast）')
-    const ageLine = body.split('\n').find((line) => line.startsWith('- age は'))
+  test('年齢の欄の書式を、検証に合わせて具体的に示す', () => {
+    const ageLine = ruleLine('成人の人物設定（cast）', '- age は')
     expect(ageLine).toBe(
       '- age は18以上の年齢を、算用数字だけで書く。「18歳以上」「20代」「二十歳」「約20」のように、数字以外の語を足したり、幅のある書き方をしたりしない。'
     )
     // 例に挙げた書き方は、どれも検証で年齢として読めない
-    for (const bad of [...(ageLine === undefined ? '' : ageLine).matchAll(/「(.+?)」/g)].map((found) => found[1])) {
+    for (const bad of quoted(ageLine)) {
       expect(parseExactAge(bad)).toBeNull()
     }
     expect(parseExactAge('20')).toBe(20)
-    expect(body).toContain('occupation、appearance、background にも、【成人指定】の書かない語を使わない。')
-    // 外見の欄だけ、検証が「少女」「少年」も見る
-    expect(body).toContain('appearance には「少女」「少年」も書かない。')
-    expect(findMinorTerms('少女', { appearance: true })).not.toEqual([])
-    expect(findMinorTerms('少年', { appearance: true })).not.toEqual([])
-    expect(body).toContain('性格、能力、経歴、他の人物との関わりは元の内容を落とさずに書く。')
+    expect(parseExactAge('20歳')).toBe(20)
+    // 年齢は age だけに書かせる (見た目の年齢、実年齢を別に書かせない)
+    expect(ruleLine('成人の人物設定（cast）', '見た目の年齢')).toBe(
+      '- occupation、appearance、background にも、【成人指定】の書かない語と18歳未満の年齢を書かない。年齢は age だけに書き、見た目の年齢や実年齢を別に書かない。'
+    )
+    expect(ruleLine('成人の人物設定（cast）', '元の内容を落とさずに書く')).toContain(
+      '性格、能力、経歴、他の人物との関わりは元の内容を落とさずに書く。'
+    )
+  })
+
+  test('外見の欄だけの書かない語は、外見の欄の検証で不合格になる', () => {
+    const line = ruleLine('成人の人物設定（cast）', 'appearance には、次の語も書かない: ')
+    expect(quoted(line)).toEqual([
+      '少女',
+      '少年',
+      '幼い',
+      'あどけない',
+      '童顔',
+      '子供っぽい',
+      'セーラー服',
+      '学ラン',
+      '学生服',
+      '体操服',
+      'スクール水着',
+      'ブルマ',
+      'ランドセル',
+      '通学帽'
+    ])
+    for (const term of quoted(line)) {
+      expect(findMinorTerms(term, { appearance: true })).not.toEqual([])
+      // 外見の欄だけの語 (職業や背景では、少女漫画家、少年野球のコーチ、幼い頃 のような語がある)
+      expect(findMinorTerms(term)).toEqual([])
+    }
+    expect(line).toContain('学校の制服や、幼さを強調する描写を残さず、年齢相応の大人として書く。')
+    // 「制服」単独は通る (成人の職業の制服がある)
+    expect(findMinorTerms('制服', { appearance: true })).toEqual([])
+    // 「幼い頃」は背景では通るが、外見の欄では落ちる。「子供の頃」はどちらも通る
+    expect(ruleLine('成人の人物設定（cast）', '「幼い頃」')).toBe(
+      '- appearance では「幼い頃」も使えない。過去のことは「子供の頃」と書く。'
+    )
+    expect(findMinorTerms('幼い頃の傷跡', { appearance: true })).not.toEqual([])
+    expect(findMinorTerms('幼い頃に両親と別れた')).toEqual([])
+    expect(findMinorTerms('子供の頃の傷跡', { appearance: true })).toEqual([])
   })
 
   test('成人指定で名簿が空なら、cast は求めず、成人指定の規則だけ残す', () => {
