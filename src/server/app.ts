@@ -16,6 +16,7 @@ import { type Env, getEnv, getPrisma } from '@/lib/db'
 import {
   adultBibleIssues,
   type BibleEffects,
+  bibleBlocker,
   bibleOutdated,
   createBibleFlow,
   currentBibleHash,
@@ -30,10 +31,9 @@ import {
 import {
   buildCastForGemini,
   buildRelationsForGemini,
-  chapterGenPayload,
-  checkGenerationStart,
+  type GenerationStart,
   jsonCaller,
-  missingChaptersDetail,
+  prepareGenerationStart,
   recordCostsBestEffort,
   viewpointCharFor
 } from '@/lib/novel/chapter-context'
@@ -107,8 +107,14 @@ function outlineFlowInput(novel: NovelWithChapters): OutlineFlowInput {
     cast: buildCastForGemini(novel.character_links),
     relations: buildRelationsForGemini(novel.relations),
     alwaysInclude: viewpointChar !== undefined && FOCAL_POVS.includes(novel.pov) ? [viewpointChar.name] : [],
-    bible: novel.bible === null ? null : toStoryBible(novel.bible)
+    bible: novel.bible === null ? null : toStoryBible(novel.bible),
+    bibleUnreadable: novel.bible_unreadable
   }
+}
+
+// 生成の開始を止めるときの応答の本文。
+function startErrorBody(start: Exclude<GenerationStart, { ok: true }>): { error: string; detail?: string } {
+  return start.status === 404 ? { error: start.error } : { error: start.error, detail: start.detail }
 }
 
 // 作品設計の保存先とコストの記録先 (kind: 'bible'、chapter_number 0)。
@@ -349,7 +355,8 @@ export const app = new Hono()
         aux_cost_usd: novel.aux_cost_usd,
         // 作品設計 (source_hash は出さない) と、作成後に入力が変わったか
         bible: novel.bible === null ? null : toStoryBible(novel.bible),
-        bible_outdated: bibleOutdated(novel.bible, outlineFlowInput(novel)),
+        // 保存値が読めない作品設計も、作り直すか確かめてもらうために true にする (bible は null のまま返す)
+        bible_outdated: novel.bible_unreadable || bibleOutdated(novel.bible, outlineFlowInput(novel)),
         gen_job: novel.generation_job
           ? (() => {
               const parsed: unknown = JSON.parse(novel.generation_job.pending)
@@ -553,7 +560,11 @@ export const app = new Hono()
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
       // 保存済みの作品設計があれば入れる (無ければ、生成時に先に作られる)。
-      const prompt = renderPromptForStorage(buildOutlinePrompt(outlinePromptInput(outlineFlowInput(novel))))
+      // 成人指定で作品設計が検証に落ちる・読めないときは、その人物設定を含むプロンプトを組み立てて返さない。
+      const input = outlineFlowInput(novel)
+      const blocked = bibleBlocker(input)
+      if (blocked !== null) return c.json({ error: 'invalid_bible', detail: blocked }, 400)
+      const prompt = renderPromptForStorage(buildOutlinePrompt(outlinePromptInput(input)))
       return c.json({ prompt })
     } finally {
       await prisma.$disconnect()
@@ -660,25 +671,12 @@ export const app = new Hono()
       const { id, number: chapterNumber } = c.req.valid('param')
       const options = c.req.valid('json')
       const prisma = getPrisma()
-      // 小説と章立ての該当章があること、前の章が欠けていないことを確かめる。文脈 (既出の章、確定事項) は DO が組み立てる。
+      // 小説と章立ての該当章があること、作品設計が成人指定の条件を満たすこと、前の章が欠けていないことを確かめる。
+      // 文脈 (既出の章、確定事項) は DO が組み立てる (DO も同じ作品設計の判定をする)。
       const model = options.model !== undefined ? options.model : DEFAULT_CHAPTER_MODEL
-      const prepared = await (async () => {
-        try {
-          const payload = await chapterGenPayload(prisma, id, chapterNumber, model)
-          const checked = payload === null ? null : await checkGenerationStart(prisma, id, [chapterNumber])
-          return { payload, checked }
-        } finally {
-          await prisma.$disconnect()
-        }
-      })()
-      if (prepared.payload === null) return c.json({ error: 'not_found' }, 404)
-      if (prepared.checked !== null && !prepared.checked.ok) {
-        return c.json(
-          { error: 'previous_chapters_missing', detail: missingChaptersDetail(prepared.checked.missing) },
-          409
-        )
-      }
-      const payload = prepared.payload
+      const start = await prepareGenerationStart(prisma, id, [chapterNumber], model).finally(() => prisma.$disconnect())
+      if (!start.ok) return c.json(startErrorBody(start), start.status)
+      const payload = start.payload
 
       const env = getEnv()
       const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
@@ -707,21 +705,18 @@ export const app = new Hono()
       const { chapters, model } = c.req.valid('json')
       const prisma = getPrisma()
       try {
-        // 前から順に書く。対象は重複を除いて昇順にし、前の章が欠けていれば始めない (409)。
-        const checked = await checkGenerationStart(prisma, id, chapters)
-        // 小説と章立ての該当章を確かめてからジョブを running にする (404 / 409 のときに running のジョブを残さない)。
-        const first = checked.ok ? checked.targets[0] : chapters[0]
-        const payload = await chapterGenPayload(prisma, id, first, model)
-        if (!payload) return c.json({ error: 'not_found' }, 404)
-        if (!checked.ok) {
-          return c.json({ error: 'previous_chapters_missing', detail: missingChaptersDetail(checked.missing) }, 409)
-        }
+        // 前から順に書く。対象は重複を除いて昇順にする。小説と章立ての最初の章 (404)、作品設計 (400 invalid_bible)、
+        // 前の章の欠け (409) を確かめてからジョブを running にする (止めたときに running のジョブを残さない)。
+        const start = await prepareGenerationStart(prisma, id, chapters, model)
+        if (!start.ok) return c.json(startErrorBody(start), start.status)
+        const first = start.payload.chapterNumber
         await upsertGenerationJob(prisma, id, {
           status: 'running',
-          pending: JSON.stringify(checked.targets),
+          pending: JSON.stringify(start.targets),
           current: first,
           model
         })
+        const payload = start.payload
         const env = getEnv()
         const doId = env.CHAPTER_GEN.idFromName(`${id}:${first}`)
         const stub = env.CHAPTER_GEN.get(doId)

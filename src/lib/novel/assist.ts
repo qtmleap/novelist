@@ -1,12 +1,14 @@
 import type { z } from 'zod'
 import { bibleAddressPairs, buildBiblePrompt, buildRecordPrompt } from '@/lib/novel/assist-prompts'
 import {
+  type AdultBibleText,
   applyBibleCast,
   type BibleSourceInput,
   bibleSourceHash,
   completeAddresses,
   isAdultRating,
   missingAddressPairs,
+  validateAdultBibleText,
   validateAdultCast
 } from '@/lib/novel/bible'
 import { bibleJsonSchema, recordJsonSchema } from '@/lib/novel/json-schemas'
@@ -36,6 +38,7 @@ import {
 import type { UsageCounts } from '@/lib/openai/protocol'
 import type { Outline, OutlineChapter, StoredBible } from '@/schemas/novel.dto'
 import {
+  type BibleCast,
   type ChapterRecord,
   ChapterRecordDraftSchema,
   type OutlineWarning,
@@ -64,8 +67,10 @@ export type OutlineFlowInput = {
   relations: CastRelation[]
   // 各章の登場人物に必ず入れる名前 (語り手)。名簿に無い名前は無視される。
   alwaysInclude: string[]
-  // 作品設計。無い旧データでは null
+  // 作品設計。無い旧データ、または保存値が読めないときは null
   bible: StoryBible | null
+  // 作品設計の列に値があるのに読めない (壊れている) か。未作成 (列が null) は false
+  bibleUnreadable: boolean
 }
 
 export type OutlineFlowResult =
@@ -196,13 +201,50 @@ function describeIssues(issues: z.core.$ZodIssue[]): string {
 
 // ---------------------- 章立て (全章) ----------------------
 
+// 章の計画 (出来事、章末の状況) のうち欠けているもの。空なら欠けていない。
+function missingPlanParts(chapter: OutlineChapter): string[] {
+  return [
+    chapter.events.some((event) => event.trim().length > 0) ? '' : '出来事',
+    chapter.end_state.trim().length === 0 ? '章末の状況' : ''
+  ].filter((part) => part.length > 0)
+}
+
+// 計画が欠けたまま保存した章の警告 (本文のプロンプトは、計画の無い章を旧データと同じ文面で扱える)。
+export function missingPlanWarnings(chapters: OutlineChapter[]): OutlineWarning[] {
+  return chapters.flatMap((chapter) => {
+    const parts = missingPlanParts(chapter)
+    if (parts.length === 0) return []
+    return [
+      {
+        chapter_number: chapter.chapter_number,
+        kind: 'missing_plan' as const,
+        message: `第 ${chapter.chapter_number} 章の${parts.join('と')}がありません。章立てを編集するか、この章だけ作り直してください`
+      }
+    ]
+  })
+}
+
+// 計画が欠けている章の、やり直しの理由の文。
+function missingPlanError(chapters: OutlineChapter[]): string {
+  const listed = chapters
+    .filter((chapter) => missingPlanParts(chapter).length > 0)
+    .map((chapter) => `第 ${chapter.chapter_number} 章の${missingPlanParts(chapter).join('と')}がありません`)
+  return `章の計画が欠けています: ${listed.join('、')}`
+}
+
+// 章数・連番・題・概要の問題は不合格 (やり直し、2 回とも落ちたら失敗)。
+// 計画 (出来事、章末の状況) が欠けているだけなら、やり直したうえで、やり直しても欠けていれば欠けたまま使う (acceptable)。
+// 構造化出力で縛れない経路 (OpenAI 互換、schema を拒否された Gemini) や、章数が多いときに 1 章だけ欠けて、
+// 章立て全体が作れなくなるのを避けるため。欠けた章は呼び出し側が missing_plan の警告にする。
 function interpretOutline(text: string, numChapters: number): Interpreted<Outline> {
   const parsed = parseOutlineResponse(text)
   if (!parsed.ok) return parsed
   const outline = sortOutline(parsed.outline)
-  // 新しく作る章立てなので、各章の計画 (出来事、章末の状況) も求める。
-  const issues = validateOutlineShape(outline, numChapters, { requirePlan: true })
+  const issues = validateOutlineShape(outline, numChapters)
   if (issues.length > 0) return { ok: false, error: `章立てが条件を満たしていません: ${issues.join('、')}` }
+  if (missingPlanWarnings(outline.chapters).length > 0) {
+    return { ok: false, error: missingPlanError(outline.chapters), acceptable: outline }
+  }
   return { ok: true, value: outline }
 }
 
@@ -229,7 +271,7 @@ export async function generateOutlineFlow(call: JsonCaller, input: OutlineFlowIn
   return {
     ok: true,
     outline: threads.outline,
-    warnings: [...normalized.warnings, ...threads.warnings],
+    warnings: [...normalized.warnings, ...threads.warnings, ...missingPlanWarnings(threads.outline.chapters)],
     usages: outcome.usages
   }
 }
@@ -243,14 +285,15 @@ function interpretOutlineChapter(text: string, chapterNumber: number): Interpret
   if (!parsed.ok) return parsed
   // 章 1 件だけの応答では、章番号をモデルが取り違えることがあるので、対象の章番号に揃える。
   const chapter = { ...parsed.chapter, chapter_number: chapterNumber }
-  // 新しく作る章なので、計画 (出来事、章末の状況) も求める (validateOutlineShape の requirePlan と同じ条件)。
+  // 題と概要が空なら不合格。計画が欠けているだけなら、全章の生成と同じく、やり直しても欠けていれば欠けたまま使う。
   const issues = [
     chapter.title.trim().length === 0 ? `第 ${chapterNumber} 章の題が空です` : '',
-    chapter.summary.trim().length === 0 ? `第 ${chapterNumber} 章の概要が空です` : '',
-    chapter.events.some((event) => event.trim().length > 0) ? '' : `第 ${chapterNumber} 章の出来事がありません`,
-    chapter.end_state.trim().length === 0 ? `第 ${chapterNumber} 章の章末の状況が空です` : ''
+    chapter.summary.trim().length === 0 ? `第 ${chapterNumber} 章の概要が空です` : ''
   ].filter((issue) => issue.length > 0)
   if (issues.length > 0) return { ok: false, error: `章立てが条件を満たしていません: ${issues.join('、')}` }
+  if (missingPlanWarnings([chapter]).length > 0) {
+    return { ok: false, error: missingPlanError([chapter]), acceptable: chapter }
+  }
   return { ok: true, value: chapter }
 }
 
@@ -278,7 +321,12 @@ export async function regenerateOutlineChapterFlow(
   // normalizeOutlineCharacters は章を 1 対 1 で写すので、1 章を渡せば 1 章が返る。
   const [chapter] = normalized.outline.chapters
   const others = input.existing.chapters.filter((other) => other.chapter_number !== chapterNumber)
-  return { ok: true, chapter: freeSetupIds(chapter, others), warnings: normalized.warnings, usages: outcome.usages }
+  return {
+    ok: true,
+    chapter: freeSetupIds(chapter, others),
+    warnings: [...normalized.warnings, ...missingPlanWarnings([chapter])],
+    usages: outcome.usages
+  }
 }
 
 function nextFreeSetupId(taken: ReadonlySet<string>, n = 1): string {
@@ -525,6 +573,7 @@ function fixFor(issue: z.core.$ZodIssue): Fix | null {
 const FIT_ROUNDS = 4
 
 // schema の上限 (字数、個数) を超える項目を切り詰め、空の項目を捨ててから検証する。
+// 入れ子の配列 (配列の要素の中にさらに配列) を持つ schema では使えない。要素を捨てる順序を、path の最後の番号だけで決めているため。
 // モデルの出力は長すぎる 1 項目や空の 1 項目を含みがちで、それだけで応答全体を不合格にしてやり直すのは割に合わないため。
 // 上限は schema 自身が報告する値を使う (上限の数字をここに写さない)。形の違い (型が違う、必須が無い) は直さない。
 function fitToSchema<T>(
@@ -564,33 +613,152 @@ const BIBLE_TIMEOUT_MS = 180_000
 // 欠けた組をエラー文に並べる数。
 const MAX_REPORTED_PAIRS = 5
 
+// 人物設定を、名簿の人物ごとに最初の 1 行だけにする (並びは元のまま。名前は前後の空白を除いて照合する)。
+// validateAdultCast も applyBibleCast も名簿の人物ごとに最初の行しか見ないので、同じ人物の 2 行目や
+// 名簿に無い人物の行は検証されないまま保存され、画面に出てしまう。保存する行を、検証した行と同じにする。
+function rosterCast(cast: BibleCast[], roster: CastMember[]): BibleCast[] {
+  const names = new Set(roster.map((member) => member.name.trim()))
+  const seen = new Set<string>()
+  return cast.filter((row) => {
+    const name = row.name.trim()
+    if (!names.has(name) || seen.has(name)) return false
+    seen.add(name)
+    return true
+  })
+}
+
 // 作品設計を名簿と年齢指定に合わせて整える (生成の後と手動の保存で同じ)。
-// 全年齢では人物設定 (cast) を持たない。呼称表は completeAddresses で名簿と関係に照らして整える。
+// 全年齢では人物設定 (cast) を持たない。成人指定では名簿の人物ごとに最初の 1 行だけを残す。
+// 呼称表は completeAddresses で名簿と関係に照らして整える。
 export function normalizeBible(bible: StoryBible, input: BibleFlowInput): StoryBible {
   return {
     ...bible,
-    cast: isAdultStyle(input.style) ? bible.cast : [],
+    cast: isAdultStyle(input.style) ? rosterCast(bible.cast, input.cast) : [],
     addresses: completeAddresses(bible.addresses, input.cast, input.relations)
   }
 }
 
-// 成人指定のとき、作品設計の人物設定が名簿の全員ぶん、数字で 18 歳以上になっているか。問題の文 (空なら問題なし)。
-export function adultBibleIssues(bible: StoryBible, input: { style: StyleParams; cast: CastMember[] }): string[] {
-  const rating = input.style.age_rating === undefined ? '' : input.style.age_rating
-  return validateAdultCast(rating, bible.cast, castNamesOf(input.cast))
+type AdultCheckInput = { style: StyleParams; cast: CastMember[] }
+
+function ratingOf(style: StyleParams): string {
+  return style.age_rating === undefined ? '' : style.age_rating
 }
 
-// 保存済みの作品設計が成人指定の条件を満たさないとき (手で直して壊れた、年齢指定を後から変えた、など) のエラー文。
-// 問題が無ければ null。章立ても本文も、これが null でなければ始めない。
-export function brokenBibleError(bible: StoryBible, input: { style: StyleParams; cast: CastMember[] }): string | null {
+// 成人指定の検証の材料 (人物設定と、人物設定以外の文面)。
+type AdultMaterial = { cast: BibleCast[]; text: AdultBibleText }
+
+// 成人指定の検証。全年齢なら常に空。問題の文 (空なら問題なし)。
+// 人物設定 (名簿の全員ぶん、年齢は 18 以上の数字だけ、未成年を指す語が無い) と、
+// 人物設定以外の文面 (物語の核、結末、人物の変化、世界のルール、用語、時系列) に未成年を指す語が無いこと。
+// 作品設計の生成、手動保存、章立ての生成の前、本文の生成の文脈、章立てのプレビュー、生成の開始が、すべてこの関数を通る。
+function adultIssuesOf(material: AdultMaterial, input: AdultCheckInput): string[] {
+  const rating = ratingOf(input.style)
+  return [
+    ...validateAdultCast(rating, material.cast, castNamesOf(input.cast)),
+    ...validateAdultBibleText(rating, material.text)
+  ]
+}
+
+export function adultBibleIssues(bible: StoryBible, input: AdultCheckInput): string[] {
+  return adultIssuesOf({ cast: bible.cast, text: bible }, input)
+}
+
+// 保存済みの作品設計が成人指定の条件を満たさないとき (手で直して壊れた、年齢指定を後から変えた、人物を足した、など) のエラー文。
+// 問題が無ければ null。
+export function brokenBibleError(bible: StoryBible, input: AdultCheckInput): string | null {
   const issues = adultBibleIssues(bible, input)
   if (issues.length === 0) return null
-  return `作品設計の人物設定が成人指定の条件を満たしていません（${issues.join('、')}）。作品設計を作り直すか、人物設定を直してから生成してください。`
+  return `作品設計が成人指定の条件を満たしていません（${issues.join('、')}）。作品設計を作り直すか、作品設計を直してから生成してください。`
 }
 
+export const UNREADABLE_ADULT_BIBLE_ERROR =
+  '保存されている作品設計が読み込めません。成人指定の作品は、作品設計の人物設定を確かめられないまま生成しないため止めています。作品設計を作り直してください。'
+
+// 保存済みの作品設計で、生成 (章立て、本文、プレビュー) を止める理由。止めなくてよければ null。
+//   成人指定で、作品設計の列に値があるのに読めない → 止める (未作成として辞典の原文で書かない)
+//   作品設計が無い (未作成。全年齢で読めない場合も含む) → 止めない (旧データとして扱う。章立ての生成では先に作る)
+//   作品設計が成人指定の条件を満たさない → 止める
+export function bibleBlocker(
+  input: AdultCheckInput & { bible: StoryBible | null; bibleUnreadable: boolean }
+): string | null {
+  if (input.bible === null) {
+    return input.bibleUnreadable && isAdultStyle(input.style) ? UNREADABLE_ADULT_BIBLE_ERROR : null
+  }
+  return brokenBibleError(input.bible, input)
+}
+
+function rawText(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function rawTexts(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(rawText) : []
+}
+
+function rawRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter(isRecordValue) : []
+}
+
+// 文字列か、無い (undefined) こと。それ以外 (数値、null、配列など) は読めない形。
+function optionalText(value: unknown): string | null {
+  if (value === undefined) return ''
+  return typeof value === 'string' ? value : null
+}
+
+// 生の応答の人物設定。読めない形 (配列でない、要素がオブジェクトでない、name や age が文字列でない) なら null。
+// 成人指定の検証を、切り詰める前の値にかけるために使う (切り詰めると「18歳 (…) 実際は14歳」の後ろが落ちて通ってしまう)。
+function rawCast(value: unknown): BibleCast[] | null {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return null
+  const items: unknown[] = value
+  const rows = items.map((item): BibleCast | null => {
+    if (!isRecordValue(item) || typeof item.name !== 'string' || typeof item.age !== 'string') return null
+    const occupation = optionalText(item.occupation)
+    const appearance = optionalText(item.appearance)
+    const background = optionalText(item.background)
+    if (occupation === null || appearance === null || background === null) return null
+    return { name: item.name, age: item.age, occupation, appearance, background }
+  })
+  return rows.some((row) => row === null) ? null : rows.filter((row): row is BibleCast => row !== null)
+}
+
+// 生の応答の、人物設定以外の文面。文字列でない値は '' として読む (形が違えば、後の StoryBibleSchema の検証で落ちる)。
+function rawBibleText(value: Record<string, unknown>): AdultBibleText {
+  const world = isRecordValue(value.world) ? value.world : {}
+  return {
+    premise: rawText(value.premise),
+    ending: rawText(value.ending),
+    arcs: rawRecords(value.arcs).map((arc) => ({
+      name: rawText(arc.name),
+      start: rawText(arc.start),
+      end: rawText(arc.end)
+    })),
+    world: {
+      rules: rawTexts(world.rules),
+      terms: rawRecords(world.terms).map((term) => ({ term: rawText(term.term), note: rawText(term.note) }))
+    },
+    timeline: rawTexts(value.timeline)
+  }
+}
+
+// 生の応答 (JSON として読んだだけの値) に成人指定の検証をかける。全年齢なら常に空。
+function rawAdultIssues(value: unknown, input: AdultCheckInput): string[] {
+  if (!isAdultStyle(input.style)) return []
+  if (!isRecordValue(value)) return ['作品設計が JSON のオブジェクトではありません']
+  const cast = rawCast(value.cast)
+  if (cast === null) return ['作品設計の人物設定 (cast) が読める形ではありません']
+  return adultIssuesOf({ cast, text: rawBibleText(value) }, input)
+}
+
+// 順序: JSON として読む → 生の値で成人指定の検証 → schema の大きさに収める → StoryBibleSchema → 呼称表を整える
+// → 整えた値でもう一度成人指定の検証 → 呼称表の欠けの確認。
+// 成人指定の検証は、切り詰める前の値にかける (後ろが切り落とされて通るのを防ぐ)。保存する値が検証済みであることを保証するため、
+// 整えた後の値にもかける。成人指定の検証に落ちた回答は、やり直しの後に使う値 (acceptable) にもしない。
 function interpretBible(text: string, input: BibleFlowInput): Interpreted<StoryBible> {
   const json = parseJsonText(text)
   if (!json.ok) return json
+  const rawIssues = rawAdultIssues(json.value, input)
+  if (rawIssues.length > 0) return { ok: false, error: rawIssues.join('、') }
   const fitted = fitToSchema(StoryBibleSchema, json.value)
   if (!fitted.success) {
     return {
@@ -702,19 +870,17 @@ export type BibleReady =
   | { ok: false; status: 502; error: 'generation_failed'; detail: string }
 
 // 章立ての生成の前に作品設計を用意する。保存済みならそれを使い (LLM を呼ばない)、無ければ先に作って保存する。
-// 成人指定で保存済みの作品設計が条件を満たさないとき (手で直して壊れた、年齢指定を後から変えた) は、
-// 作り直さずに invalid_bible で止める (利用者の編集を黙って上書きしないため)。
+// 成人指定で保存済みの作品設計が条件を満たさないとき (手で直して壊れた、年齢指定を後から変えた、人物を足した)、
+// または読めないときは、作り直さずに invalid_bible で止める (利用者の編集を黙って上書きしないため)。
+// 全年齢で読めない作品設計は、未作成として作り直す。
 export async function prepareBibleFlow(
   call: JsonCaller,
-  input: BibleFlowInput & { bible: StoryBible | null },
+  input: BibleFlowInput & { bible: StoryBible | null; bibleUnreadable: boolean },
   effects: BibleEffects
 ): Promise<BibleReady> {
-  if (input.bible !== null) {
-    const broken = brokenBibleError(input.bible, input)
-    return broken === null
-      ? { ok: true, bible: input.bible }
-      : { ok: false, status: 400, error: 'invalid_bible', detail: broken }
-  }
+  const blocked = bibleBlocker(input)
+  if (blocked !== null) return { ok: false, status: 400, error: 'invalid_bible', detail: blocked }
+  if (input.bible !== null) return { ok: true, bible: input.bible }
   const created = await createBibleFlow(call, input, effects)
   return created.ok
     ? { ok: true, bible: created.bible }

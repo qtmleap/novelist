@@ -12,7 +12,6 @@ import {
   saveBible,
   saveChapter,
   saveOutlineWithStamps,
-  writtenChapterNumbers,
   chapterStaleness,
   saveChapterRecord
 } from '@/lib/novel/repository'
@@ -239,6 +238,12 @@ describe('bible and writing_notes', () => {
     expect(novel?.bible).toEqual(stored)
     const broken = await getNovelWithChapters(novelPrisma({ bible: '{oops', writing_notes: '擬音語なし' }), 'n1')
     expect(broken?.bible).toBeNull()
+    // 値があるのに読めないのと、未作成とを区別する
+    expect(broken?.bible_unreadable).toBe(true)
+    const missing = await getNovelWithChapters(novelPrisma({ bible: null, writing_notes: null }), 'n1')
+    expect(missing?.bible_unreadable).toBe(false)
+    const fresh = await getNovelWithChapters(novelPrisma({ bible: JSON.stringify(stored), writing_notes: null }), 'n1')
+    expect(fresh?.bible_unreadable).toBe(false)
     expect(broken?.writing_notes).toBe('擬音語なし')
   })
 
@@ -392,13 +397,6 @@ describe('lineage writes', () => {
       { chapter: { where: { id: 'v1' }, data: { outline_hash: 'h1' } } },
       { novel: { where: { id: 'n1' }, data: { outline: '{"chapters":[]}' } } }
     ])
-  })
-
-  test('writtenChapterNumbers', async () => {
-    const prisma: PrismaClient = Object.assign(Object.create(null), {
-      chapter: { findMany: async () => [{ chapter_number: 1 }, { chapter_number: 3 }] }
-    })
-    expect(await writtenChapterNumbers(prisma, 'n1')).toEqual(new Set([1, 3]))
   })
 
   test('getNovelWithChapters reads the lineage columns', async () => {

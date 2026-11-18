@@ -3,11 +3,12 @@ import type { PrismaClient } from '@/generated/prisma/client'
 import type { Env } from '@/lib/db'
 import {
   buildChapterContext,
-  chapterGenPayload,
   checkGenerationTargets,
   type ContextChapter,
   type ContextSource,
   contextBlocker,
+  decideGenerationStart,
+  prepareGenerationStart,
   contextBudget,
   extractAndSaveRecord,
   ledgerMaxChars,
@@ -16,7 +17,6 @@ import {
   missingChaptersDetail,
   nextChapterOf,
   nextOpening,
-  outlineHasChapter,
   planChapterContext,
   provisionalRecord,
   recordMaterials,
@@ -90,6 +90,7 @@ function source(chapters: ContextChapter[], chapterNumber = 5): ContextSource {
     cast: [],
     relations: [],
     bible: null,
+    bibleUnreadable: false,
     writingNotes: '',
     chapters
   }
@@ -345,15 +346,6 @@ describe('helpers', () => {
     expect(contextBudget('openai:some-model', 100_000)).toEqual({ budgetTokens: 50_000, tokensPerChar: 1 })
     expect(contextBudget('openai:some-model', null)).toEqual({ budgetTokens: 120_000, tokensPerChar: 1 })
   })
-
-  test('outlineHasChapter', () => {
-    const raw = JSON.stringify(outline)
-    expect(outlineHasChapter(raw, 3)).toBe(true)
-    expect(outlineHasChapter(raw, 7)).toBe(false)
-    expect(outlineHasChapter(null, 1)).toBe(false)
-    expect(outlineHasChapter('', 1)).toBe(false)
-    expect(outlineHasChapter('{broken', 1)).toBe(false)
-  })
 })
 
 describe('resume', () => {
@@ -566,10 +558,10 @@ describe('extractAndSaveRecord', () => {
   })
 })
 
-describe('buildChapterContext errors and chapterGenPayload', () => {
+describe('buildChapterContext errors and prepareGenerationStart', () => {
   const storedOutline = JSON.stringify(outline)
 
-  // getNovelWithChapters と chapterGenPayload が読むだけの偽物。novel が null なら小説が無い。
+  // getNovelWithChapters が読むだけの偽物 (章は無い)。novel が null なら小説が無い。
   function novelPrisma(novel: Record<string, unknown> | null): PrismaClient {
     return Object.assign(Object.create(null), {
       novel: {
@@ -670,16 +662,61 @@ describe('buildChapterContext errors and chapterGenPayload', () => {
     expect(legacy.ok).toBe(true)
   })
 
-  test('chapterGenPayload needs the novel and the chapter in the outline', async () => {
-    expect(await chapterGenPayload(novelPrisma(null), 'n1', 1, 'gemini-2.5-flash')).toBeNull()
-    expect(await chapterGenPayload(novelPrisma({ outline: null }), 'n1', 1, 'gemini-2.5-flash')).toBeNull()
-    expect(await chapterGenPayload(novelPrisma({ outline: '{oops' }), 'n1', 1, 'gemini-2.5-flash')).toBeNull()
-    expect(await chapterGenPayload(novelPrisma({ outline: storedOutline }), 'n1', 9, 'gemini-2.5-flash')).toBeNull()
-    expect(await chapterGenPayload(novelPrisma({ outline: storedOutline }), 'n1', 2, 'gemini-2.5-flash')).toEqual({
-      novelId: 'n1',
-      chapterNumber: 2,
-      model: 'gemini-2.5-flash'
+  test('prepareGenerationStart: 404 without the novel or the first chapter in the outline', async () => {
+    const model = 'gemini-2.5-flash'
+    expect(await prepareGenerationStart(novelPrisma(null), 'n1', [1], model)).toEqual({
+      ok: false,
+      status: 404,
+      error: 'not_found'
     })
+    for (const raw of [null, '{oops']) {
+      expect((await prepareGenerationStart(novelPrisma({ outline: raw }), 'n1', [1], model)).ok).toBe(false)
+    }
+    const missing = await prepareGenerationStart(novelPrisma({ outline: storedOutline }), 'n1', [9], model)
+    expect(missing).toEqual({ ok: false, status: 404, error: 'not_found' })
+    expect(await prepareGenerationStart(novelPrisma({ outline: storedOutline }), 'n1', [1], model)).toEqual({
+      ok: true,
+      payload: { novelId: 'n1', chapterNumber: 1, model },
+      targets: [1]
+    })
+  })
+
+  test('prepareGenerationStart: 409 when an earlier chapter has no text', async () => {
+    const start = await prepareGenerationStart(novelPrisma({ outline: storedOutline }), 'n1', [3], 'gemini-2.5-flash')
+    expect(start).toEqual({ ok: false, status: 409, error: 'previous_chapters_missing', detail: '第 1、2 章' })
+  })
+
+  test('prepareGenerationStart: 400 for an adult novel whose bible fails, before anything starts', async () => {
+    const bible = { premise: '', ending: '', arcs: [], world: { rules: [], terms: [] }, timeline: [], addresses: [], cast: [] }
+    const link = {
+      character_id: 'c1',
+      role: '主人公',
+      variant_id: null,
+      character: {
+        name: '酒寄彩葉',
+        gender: '',
+        age: '20',
+        occupation: '',
+        appearance: '',
+        first_person: '私',
+        address_others: '',
+        speech_examples: '[]',
+        description: '',
+        variants: []
+      }
+    }
+    const adult = { outline: storedOutline, age_rating: 'R18', character_links: [link] }
+    const broken = await prepareGenerationStart(
+      novelPrisma({ ...adult, bible: JSON.stringify(bible) }),
+      'n1',
+      [1],
+      'gemini-2.5-flash'
+    )
+    if (broken.ok || broken.status !== 400) throw new Error('expected invalid_bible')
+    expect(broken.error).toBe('invalid_bible')
+    expect(broken.detail).toContain('作品設計を作り直す')
+    const unreadable = await prepareGenerationStart(novelPrisma({ ...adult, bible: '{oops' }), 'n1', [1], 'gemini-2.5-flash')
+    expect(unreadable).toMatchObject({ ok: false, status: 400, error: 'invalid_bible' })
   })
 })
 
@@ -771,5 +808,98 @@ describe('generation start checks', () => {
   test('the 409 detail lists the chapters', () => {
     expect(missingChaptersDetail([2, 3])).toBe('第 2、3 章')
     expect(missingChaptersDetail([5])).toBe('第 5 章')
+  })
+})
+
+describe('decideGenerationStart', () => {
+  const ready = { outline, written: new Set([1, 2]), blocker: null }
+
+  test('targets are sorted and deduplicated, and the first one is started', () => {
+    expect(decideGenerationStart(ready, 'n1', [4, 3, 3], 'm')).toEqual({
+      ok: true,
+      payload: { novelId: 'n1', chapterNumber: 3, model: 'm' },
+      targets: [3, 4]
+    })
+  })
+
+  test('404 comes first, then the bible, then missing chapters', () => {
+    expect(decideGenerationStart(null, 'n1', [1], 'm')).toMatchObject({ status: 404 })
+    expect(decideGenerationStart({ ...ready, outline: null }, 'n1', [1], 'm')).toMatchObject({ status: 404 })
+    expect(decideGenerationStart(ready, 'n1', [9], 'm')).toMatchObject({ status: 404 })
+    const blocked = { ...ready, written: new Set<number>(), blocker: '作品設計を作り直してください' }
+    expect(decideGenerationStart(blocked, 'n1', [3], 'm')).toEqual({
+      ok: false,
+      status: 400,
+      error: 'invalid_bible',
+      detail: '作品設計を作り直してください'
+    })
+    expect(decideGenerationStart({ ...ready, written: new Set<number>() }, 'n1', [3], 'm')).toEqual({
+      ok: false,
+      status: 409,
+      error: 'previous_chapters_missing',
+      detail: '第 1、2 章'
+    })
+  })
+})
+
+// ---------------------- 成人指定の作品設計で止める (Phase 3 レビュー) ----------------------
+
+describe('contextBlocker for adult novels', () => {
+  function castMember(name: string): CastMember {
+    return {
+      name,
+      role: '',
+      gender: '',
+      age: '20',
+      occupation: '',
+      appearance: '',
+      first_person: '私',
+      address_others: '',
+      speech_examples: [],
+      description: ''
+    }
+  }
+  const style: StyleParams = { pov: '三人称多元視点', tone: '一般文芸', age_rating: 'R18' }
+  const emptyBible: StoryBible = {
+    premise: '',
+    ending: '',
+    arcs: [],
+    world: { rules: [], terms: [] },
+    timeline: [],
+    addresses: [],
+    cast: []
+  }
+  const adultRow = { name: '酒寄彩葉', age: '20', occupation: '大学生', appearance: '', background: '' }
+
+  test('a bible made while the novel was all-ages (no cast) stops after switching to R18', () => {
+    const message = contextBlocker({ style, cast: [castMember('酒寄彩葉')], bible: emptyBible, bibleUnreadable: false })
+    expect(message).toContain(validateAdultCast('R18', [], ['酒寄彩葉'])[0])
+    expect(message).toContain('作品設計を作り直す')
+  })
+
+  test('a character added after the bible was made stops the generation', () => {
+    const bible = { ...emptyBible, cast: [adultRow] }
+    const cast = [castMember('酒寄彩葉'), castMember('月見ヤチヨ')]
+    expect(contextBlocker({ style, cast: [castMember('酒寄彩葉')], bible, bibleUnreadable: false })).toBeNull()
+    const message = contextBlocker({ style, cast, bible, bibleUnreadable: false })
+    expect(message).toContain(validateAdultCast('R18', [adultRow], ['月見ヤチヨ'])[0])
+    expect(message).toContain('作品設計を作り直す')
+  })
+
+  test('words for minors in the bible text stop the generation', () => {
+    const bible = { ...emptyBible, cast: [adultRow], premise: '女子高生の彩葉が灯台の鍵を探す' }
+    const message = contextBlocker({ style, cast: [castMember('酒寄彩葉')], bible, bibleUnreadable: false })
+    expect(message).not.toBeNull()
+    expect(message).toContain('物語の核')
+  })
+
+  test('an unreadable bible stops an adult novel, but not an all-ages one', () => {
+    const cast = [castMember('酒寄彩葉')]
+    expect(contextBlocker({ style, cast, bible: null, bibleUnreadable: true })).toContain('作品設計を作り直してください')
+    expect(
+      contextBlocker({ style: { ...style, age_rating: '全年齢' }, cast, bible: null, bibleUnreadable: true })
+    ).toBeNull()
+    // 未作成 (列が null) は旧データとして止めない
+    expect(contextBlocker({ style, cast, bible: null, bibleUnreadable: false })).toBeNull()
   })
 })

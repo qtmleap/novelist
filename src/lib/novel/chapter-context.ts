@@ -2,7 +2,7 @@ import type { PrismaClient } from '@/generated/prisma/client'
 import type { Env } from '@/lib/db'
 import { generateJson } from '@/lib/gemini/client'
 import {
-  brokenBibleError,
+  bibleBlocker,
   castForPrompt,
   extractRecordFlow,
   type JsonCaller,
@@ -27,12 +27,7 @@ import {
   type StyleParams,
   trimChapterText
 } from '@/lib/novel/prompts'
-import {
-  type ChapterLineage,
-  getNovelWithChapters,
-  saveChapterRecord,
-  writtenChapterNumbers
-} from '@/lib/novel/repository'
+import { type ChapterLineage, getNovelWithChapters, saveChapterRecord } from '@/lib/novel/repository'
 import { missingPredecessors, normalizeTargets, outlineEntryHash } from '@/lib/novel/staleness'
 import { findContextWindow } from '@/lib/openai/models'
 import type { UsageCounts } from '@/lib/openai/protocol'
@@ -192,19 +187,23 @@ export type ContextSource = {
   // 辞典の人物設定 (variant を反映したもの)。成人指定で作品設計があれば、プロンプトには作品設計の設定に差し替えて渡す
   cast: CastMember[]
   relations: CastRelation[]
-  // 作品設計。無い旧データでは null
+  // 作品設計。無い旧データ、または保存値が読めないときは null
   bible: StoryBible | null
+  // 作品設計の列に値があるのに読めない (壊れている) か
+  bibleUnreadable: boolean
   // 執筆上の指示 (Novel.writing_notes)。無ければ ''
   writingNotes: string
   // 各章の最新 version。今回の章以降を含んでいてもよい (組み立てで除く)
   chapters: ContextChapter[]
 }
 
-// 生成を始めてはいけない理由 (無ければ null)。
-// 成人指定で、作品設計はあるのに人物設定が条件を満たさないとき (手で直して壊れた、年齢指定を後から変えた)。
-// 作品設計が無い旧データは止めない (辞典の原文と読み替えの指示で書く。prompts.ts が指示を出す)。
-export function contextBlocker(source: Pick<ContextSource, 'bible' | 'style' | 'cast'>): string | null {
-  return source.bible === null ? null : brokenBibleError(source.bible, source)
+// 生成を始めてはいけない理由 (無ければ null)。判定は assist.ts の bibleBlocker (章立ての生成、プレビューと同じ)。
+// 成人指定で、作品設計が条件を満たさないとき (手で直して壊れた、年齢指定を後から変えた、人物を足した) と、
+// 作品設計の保存値が読めないとき。作品設計が無い旧データは止めない (辞典の原文と読み替えの指示で書く)。
+export function contextBlocker(
+  source: Pick<ContextSource, 'bible' | 'bibleUnreadable' | 'style' | 'cast'>
+): string | null {
+  return bibleBlocker(source)
 }
 
 // 章立てでその章に張る予定の伏線。章立てにその章が無ければ空。
@@ -544,13 +543,6 @@ export function recordStageAction(saved: { record: ChapterRecord | null } | null
   return saved.record === null ? 'extract' : 'skip'
 }
 
-// 保存済みの章立て (JSON 文字列) に、その章があるか。壊れた章立ては「無い」とみなす。
-export function outlineHasChapter(raw: string | null, chapterNumber: number): boolean {
-  const outline = parseOutline(raw)
-  if (outline === null) return false
-  return outline.chapters.some((chapter) => chapter.chapter_number === chapterNumber)
-}
-
 function parseOutline(raw: string | null): Outline | null {
   if (raw === null || raw.length === 0) return null
   try {
@@ -700,6 +692,7 @@ export async function buildChapterContext(
     cast,
     relations: buildRelationsForGemini(novel.relations),
     bible: novel.bible === null ? null : toStoryBible(novel.bible),
+    bibleUnreadable: novel.bible_unreadable,
     writingNotes: novel.writing_notes,
     chapters: contextChapters(novel)
   }
@@ -785,22 +778,71 @@ export function missingChaptersDetail(missing: number[]): string {
   return `第 ${missing.join('、')} 章`
 }
 
-// 生成の開始の検証を D1 から行う。本文がある章の番号を読むだけ。
-export async function checkGenerationStart(
-  prisma: PrismaClient,
-  novelId: string,
-  targets: number[]
-): Promise<GenerationTargets> {
-  return checkGenerationTargets(targets, await writtenChapterNumbers(prisma, novelId))
+export type GenerationStart =
+  | { ok: true; payload: ChapterGenPayload; targets: number[] }
+  | { ok: false; status: 404; error: 'not_found' }
+  | { ok: false; status: 400; error: 'invalid_bible'; detail: string }
+  | { ok: false; status: 409; error: 'previous_chapters_missing'; detail: string }
+
+// 生成の開始の判定の材料 (D1 から読んだもの)。
+export type GenerationStartSource = {
+  outline: Outline | null
+  // 本文がある章の番号
+  written: Set<number>
+  // 作品設計で生成を止める理由 (contextBlocker と同じ判定)。止めなければ null
+  blocker: string | null
 }
 
-export async function chapterGenPayload(
+// 生成を始めてよいか。順に、小説と章立ての最初の対象の章 (404)、成人指定の作品設計 (400 invalid_bible)、
+// 前の章が欠けていないか (409)。ジョブを running にする前、DO を起動する前に判定する
+// (DO の文脈の段階でも同じ判定をする。開始の時点で止めれば、利用者がストリームのエラーで初めて気付くことも、
+// ジョブが一度 running になることも無い)。対象は重複を除いて昇順にする。
+export function decideGenerationStart(
+  source: GenerationStartSource | null,
+  novelId: string,
+  targets: number[],
+  model: ModelRef
+): GenerationStart {
+  const normalized = normalizeTargets(targets)
+  const first = normalized.length === 0 ? undefined : normalized[0]
+  if (source === null || source.outline === null || first === undefined) {
+    return { ok: false, status: 404, error: 'not_found' }
+  }
+  if (!source.outline.chapters.some((chapter) => chapter.chapter_number === first)) {
+    return { ok: false, status: 404, error: 'not_found' }
+  }
+  if (source.blocker !== null) return { ok: false, status: 400, error: 'invalid_bible', detail: source.blocker }
+  const checked = checkGenerationTargets(normalized, source.written)
+  if (!checked.ok) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'previous_chapters_missing',
+      detail: missingChaptersDetail(checked.missing)
+    }
+  }
+  return { ok: true, payload: { novelId, chapterNumber: first, model }, targets: checked.targets }
+}
+
+// 生成の開始の判定を D1 から行う (小説、章立て、名簿、作品設計、各章の最新 version を読む)。
+export async function prepareGenerationStart(
   prisma: PrismaClient,
   novelId: string,
-  chapterNumber: number,
+  targets: number[],
   model: ModelRef
-): Promise<ChapterGenPayload | null> {
-  const novel = await prisma.novel.findUnique({ where: { id: novelId }, select: { outline: true } })
-  if (novel === null) return null
-  return outlineHasChapter(novel.outline, chapterNumber) ? { novelId, chapterNumber, model } : null
+): Promise<GenerationStart> {
+  const novel = await getNovelWithChapters(prisma, novelId)
+  if (novel === null) return decideGenerationStart(null, novelId, targets, model)
+  const blocker = contextBlocker({
+    style: styleOf(novel),
+    cast: buildCastForGemini(novel.character_links),
+    bible: novel.bible === null ? null : toStoryBible(novel.bible),
+    bibleUnreadable: novel.bible_unreadable
+  })
+  const source = {
+    outline: parseOutline(novel.outline),
+    written: new Set(novel.chapters.map((chapter) => chapter.chapter_number)),
+    blocker
+  }
+  return decideGenerationStart(source, novelId, targets, model)
 }

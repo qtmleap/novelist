@@ -145,16 +145,6 @@ export async function saveChapter(
   })
 }
 
-// 本文がある章の番号 (どれかの version がある章)。生成の開始で、前の章が欠けていないかを確かめるのに使う。
-export async function writtenChapterNumbers(prisma: PrismaClient, novelId: string): Promise<Set<number>> {
-  const rows = await prisma.chapter.findMany({
-    where: { novel_id: novelId },
-    select: { chapter_number: true },
-    distinct: ['chapter_number']
-  })
-  return new Set(rows.map((row) => row.chapter_number))
-}
-
 export type OutlineHashStamp = { id: string; outlineHash: string }
 
 // outline_hash が null の章に変更前のハッシュを書き (outlineStamps)、それから章立てを保存する。
@@ -358,10 +348,14 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
     .filter((row) => row.kind !== 'chapter')
     .reduce((sum, row) => sum + row.cost_usd, 0)
 
+  const bible = parseStoredBible(novel.bible)
   return {
     ...withWritingNotes(novel),
     // 作品設計 (検証済み。source_hash を含む)。未作成や壊れた値は null
-    bible: parseStoredBible(novel.bible),
+    bible,
+    // 列に値があるのに読めない (壊れている)。未作成 (null や空) とは区別する: 成人指定では、未作成と同じ扱い
+    // (辞典の原文と読み替えの指示で書く) にせず生成を止めるため。
+    bible_unreadable: novel.bible !== null && novel.bible.length > 0 && bible === null,
     chapters,
     cast: novel.character_links.map((l) => ({
       character_id: l.character_id,

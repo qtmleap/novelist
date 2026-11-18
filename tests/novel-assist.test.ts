@@ -53,7 +53,8 @@ const input: OutlineFlowInput = {
   cast: [member('酒寄彩葉', '主人公'), member('月見ヤチヨ', '相棒')],
   relations: [],
   alwaysInclude: [],
-  bible: null
+  bible: null,
+  bibleUnreadable: false
 }
 
 // 新しく作る章立ては、各章に出来事と章末の状況が要る (requirePlan)。応答の見本に入れる計画の項目。
@@ -919,16 +920,20 @@ describe('outline flow with a bible', () => {
     expect(chapterSent).toContain('大学二年生')
   })
 
-  test('chapters without a plan are retried', async () => {
+  test('chapters without a plan are retried, then kept with missing_plan warnings', async () => {
     const noPlan = JSON.stringify({
       chapters: [1, 2, 3].map((n) => ({ chapter_number: n, title: `題${n}`, summary: `概要${n}`, characters: [] }))
     })
     const { call, calls } = fakeCall([{ text: noPlan }, { text: noPlan }])
     const result = await generateOutlineFlow(call, input)
     expect(calls).toHaveLength(2)
-    if (result.ok) throw new Error('expected failure')
-    expect(result.error).toContain('第 1 章の出来事がありません')
-    expect(result.error).toContain('第 1 章の章末の状況が空です')
+    if (!result.ok) throw new Error(result.error)
+    expect(result.outline.chapters).toHaveLength(3)
+    const planWarnings = result.warnings.filter((w) => w.kind === 'missing_plan')
+    expect(planWarnings.map((w) => w.chapter_number)).toEqual([1, 2, 3])
+    expect(planWarnings[0].message).toBe(
+      '第 1 章の出来事と章末の状況がありません。章立てを編集するか、この章だけ作り直してください'
+    )
   })
 
   test('validateThreads warnings come back with the outline', async () => {
@@ -1058,7 +1063,7 @@ describe('preparing the bible for the outline', () => {
   test('a stored bible is used as it is, without calling the model', async () => {
     const { call, calls } = fakeCall([])
     const fx = effects()
-    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: stored }, fx.effects)
+    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: stored, bibleUnreadable: false }, fx.effects)
     expect(result).toEqual({ ok: true, bible: stored })
     expect(calls).toHaveLength(0)
     expect(fx.saved).toEqual([])
@@ -1069,7 +1074,7 @@ describe('preparing the bible for the outline', () => {
     const { call, calls } = fakeCall([])
     const fx = effects()
     const broken = { ...stored, cast: [{ ...ADULT_CAST[0], age: '16' }, ADULT_CAST[1]] }
-    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: broken }, fx.effects)
+    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: broken, bibleUnreadable: false }, fx.effects)
     if (result.ok) throw new Error('expected failure')
     expect(result.status).toBe(400)
     expect(result.error).toBe('invalid_bible')
@@ -1083,7 +1088,7 @@ describe('preparing the bible for the outline', () => {
   test('without a bible, one is generated and saved with the current input hash', async () => {
     const { call, calls } = fakeCall([{ text: bibleJson(), usage: usage(1) }])
     const fx = effects()
-    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: null }, fx.effects)
+    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: null, bibleUnreadable: false }, fx.effects)
     expect(calls).toHaveLength(1)
     if (!result.ok) throw new Error(result.detail)
     expect(fx.saved).toHaveLength(1)
@@ -1098,7 +1103,7 @@ describe('preparing the bible for the outline', () => {
       { text: minor, usage: usage(2) }
     ])
     const fx = effects()
-    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: null }, fx.effects)
+    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: null, bibleUnreadable: false }, fx.effects)
     if (result.ok) throw new Error('expected failure')
     expect(result.status).toBe(502)
     expect(result.error).toBe('generation_failed')
@@ -1152,5 +1157,248 @@ describe('bible source hash', () => {
       false
     )
     expect(bibleOutdated(null, bibleInput)).toBe(false)
+  })
+})
+
+// ---------------------- 章の計画が欠けた章立て (Phase 3 レビュー F) ----------------------
+
+describe('outlines with a missing plan', () => {
+  // 第 2 章だけ出来事が無い章立て
+  function partlyPlanned(flag = ''): string {
+    return JSON.stringify({
+      chapters: [1, 2, 3].map((n) => ({
+        chapter_number: n,
+        title: `題${n}${flag}`,
+        summary: `概要${n}`,
+        characters: [],
+        ...(n === 2 ? { events: [], end_state: '章末' } : PLAN)
+      }))
+    })
+  }
+
+  test('the warning names only what is missing', async () => {
+    const { call } = fakeCall([{ text: partlyPlanned() }, { text: partlyPlanned() }])
+    const result = await generateOutlineFlow(call, input)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.warnings.filter((w) => w.kind === 'missing_plan')).toEqual([
+      {
+        chapter_number: 2,
+        kind: 'missing_plan',
+        message: '第 2 章の出来事がありません。章立てを編集するか、この章だけ作り直してください'
+      }
+    ])
+  })
+
+  test('a complete retry is taken over the first answer', async () => {
+    const { call } = fakeCall([{ text: partlyPlanned('（1 回目）') }, { text: threeChapters }])
+    const result = await generateOutlineFlow(call, input)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.outline.chapters[0].title).toBe('第1章の題')
+    expect(result.warnings.filter((w) => w.kind === 'missing_plan')).toEqual([])
+  })
+
+  test('the first answer is used when the retry breaks the shape or throws', async () => {
+    const broken = outlineJson([{ n: 1 }, { n: 2 }])
+    const shape = await generateOutlineFlow(fakeCall([{ text: partlyPlanned('（1 回目）') }, { text: broken }]).call, input)
+    if (!shape.ok) throw new Error(shape.error)
+    expect(shape.outline.chapters[0].title).toBe('題1（1 回目）')
+    const thrown = await generateOutlineFlow(
+      fakeCall([{ text: partlyPlanned('（1 回目）'), usage: usage(1) }, new Error('timeout')]).call,
+      input
+    )
+    if (!thrown.ok) throw new Error(thrown.error)
+    expect(thrown.outline.chapters[0].title).toBe('題1（1 回目）')
+    expect(thrown.usages).toEqual([usage(1)])
+  })
+
+  test('shape problems still fail even when the plan is also missing', async () => {
+    const noTitle = JSON.stringify({
+      chapters: [1, 2, 3].map((n) => ({ chapter_number: n, title: n === 1 ? '' : `題${n}`, summary: '概要', characters: [] }))
+    })
+    const { call, calls } = fakeCall([{ text: noTitle }, { text: noTitle }])
+    const result = await generateOutlineFlow(call, input)
+    expect(calls).toHaveLength(2)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('第 1 章の題が空です')
+  })
+
+  test('a rewritten chapter without a plan is kept with a warning after the retry', async () => {
+    const existing: Outline = {
+      chapters: [1, 2, 3].map((n) => storedChapter({ chapter_number: n, title: `旧${n}`, summary: '概要', characters: [] }))
+    }
+    const noPlan = JSON.stringify({ chapter_number: 2, title: '新', summary: '概要', characters: [], end_state: '章末' })
+    const { call, calls } = fakeCall([{ text: noPlan }, { text: noPlan }])
+    const result = await regenerateOutlineChapterFlow(call, { ...input, existing, chapterNumber: 2 })
+    expect(calls).toHaveLength(2)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.chapter.title).toBe('新')
+    expect(result.warnings).toEqual([
+      {
+        chapter_number: 2,
+        kind: 'missing_plan',
+        message: '第 2 章の出来事がありません。章立てを編集するか、この章だけ作り直してください'
+      }
+    ])
+    // 題が空なら今までどおり不合格
+    const empty = JSON.stringify({ chapter_number: 2, title: '', summary: '概要', characters: [], ...PLAN })
+    const failed = await regenerateOutlineChapterFlow(fakeCall([{ text: empty }, { text: empty }]).call, {
+      ...input,
+      existing,
+      chapterNumber: 2
+    })
+    expect(failed.ok).toBe(false)
+  })
+})
+
+// ---------------------- 成人指定の検証 (Phase 3 レビュー A〜D) ----------------------
+
+describe('adult checks on the raw answer', () => {
+  test('a long age is checked before it is cut to the stored size', async () => {
+    // 50 字を超える年齢。保存の上限 (50 字) で切ると「18」と空白だけが残り、後ろの「実際は14歳」が落ちる
+    const longAge = `18${' '.repeat(60)}実際は14歳`
+    // 切り詰めた値だけなら通ってしまう (だから切り詰める前に検証する)
+    const cut = { ...ADULT_CAST[0], age: longAge.slice(0, 50) }
+    expect(adultIssues([cut, ADULT_CAST[1]])).toEqual([])
+    const answer = bibleJson({ cast: [{ ...ADULT_CAST[0], age: longAge }, ADULT_CAST[1]] })
+    const { call, calls } = fakeCall([{ text: answer }, { text: answer }])
+    const result = await generateBibleFlow(call, adultBibleInput)
+    expect(calls).toHaveLength(2)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('酒寄彩葉')
+  })
+
+  test('a long occupation is checked before it is cut', async () => {
+    // 職業は 100 字まで。後ろに残った「高校生」も見る
+    const longJob = `大学生${' '.repeat(120)}高校生`
+    expect(adultIssues([{ ...ADULT_CAST[0], occupation: longJob.slice(0, 100) }, ADULT_CAST[1]])).toEqual([])
+    const answer = bibleJson({ cast: [{ ...ADULT_CAST[0], occupation: longJob }, ADULT_CAST[1]] })
+    const result = await generateBibleFlow(fakeCall([{ text: answer }, { text: answer }]).call, adultBibleInput)
+    expect(result.ok).toBe(false)
+  })
+
+  test('a cast that cannot be read fails for adult novels', async () => {
+    for (const cast of ['全員 20 歳', [{ ...ADULT_CAST[0], age: 20 }, ADULT_CAST[1]], [null, ADULT_CAST[1]]]) {
+      const answer = bibleJson({ cast })
+      const result = await generateBibleFlow(fakeCall([{ text: answer }, { text: answer }]).call, adultBibleInput)
+      if (result.ok) throw new Error(`expected failure for ${JSON.stringify(cast)}`)
+      expect(result.error).toContain('人物設定')
+    }
+  })
+
+  test('words for minors in the story text fail for adult novels, not for all ages', async () => {
+    const answer = bibleJson({ premise: '女子高生の彩葉が灯台の鍵を探す' })
+    const adult = await generateBibleFlow(fakeCall([{ text: answer }, { text: answer }]).call, adultBibleInput)
+    if (adult.ok) throw new Error('expected failure')
+    expect(adult.error).toContain('物語の核')
+    const allAges = await generateBibleFlow(fakeCall([{ text: answer }]).call, bibleInput)
+    expect(allAges.ok).toBe(true)
+  })
+
+  test('a long text is checked before it is cut', async () => {
+    // 物語の核は 3,000 字まで。その後ろにある語も見る (切り詰めた値だけなら通る)
+    const premise = `${'あ'.repeat(3100)}高校生`
+    const cutBible = { ...JSON.parse(bibleJson()), premise: premise.slice(0, 3000) }
+    expect(adultBibleIssues(cutBible, adultBibleInput)).toEqual([])
+    const answer = bibleJson({ premise })
+    const result = await generateBibleFlow(fakeCall([{ text: answer }, { text: answer }]).call, adultBibleInput)
+    expect(result.ok).toBe(false)
+  })
+
+  test('an answer that fails the adult check is never kept for later', async () => {
+    const minor = bibleJson({ premise: '女子高生の物語', addresses: ADDRESSES })
+    // 1 回目: 成人指定に落ちる。2 回目: throw。1 回目を「使える値」として残していないので失敗
+    const thrown = await generateBibleFlow(fakeCall([{ text: minor }, new Error('timeout')]).call, adultBibleInput)
+    expect(thrown.ok).toBe(false)
+    // 1 回目: 成人指定に落ちる。2 回目: 呼称表が欠けているだけ → 2 回目を使う
+    const second = bibleJson({ premise: '2 回目', addresses: [ADDRESSES[0]] })
+    const kept = await generateBibleFlow(fakeCall([{ text: minor }, { text: second }]).call, adultBibleInput)
+    if (!kept.ok) throw new Error(kept.error)
+    expect(kept.bible.premise).toBe('2 回目')
+  })
+
+  test('adultBibleIssues covers the cast and the story text', () => {
+    const bible: StoryBible = {
+      premise: '美少女の物語',
+      ending: '',
+      arcs: [],
+      world: { rules: [], terms: [] },
+      timeline: ['高2の夏'],
+      addresses: [],
+      cast: ADULT_CAST
+    }
+    const issues = adultBibleIssues(bible, adultBibleInput)
+    expect(issues.length).toBeGreaterThanOrEqual(2)
+    expect(issues.some((issue) => issue.includes('物語の核'))).toBe(true)
+    expect(issues.some((issue) => issue.includes('時系列'))).toBe(true)
+  })
+})
+
+describe('prepareBibleFlow with a stale or unreadable bible', () => {
+  const allAgesBible: StoryBible = {
+    premise: '核',
+    ending: '',
+    arcs: [],
+    world: { rules: [], terms: [] },
+    timeline: [],
+    addresses: [],
+    cast: []
+  }
+
+  function noEffects() {
+    return { save: async () => {}, recordUsages: async () => {} }
+  }
+
+  test('a bible made while the novel was all-ages stops after switching to R18', async () => {
+    const { call, calls } = fakeCall([])
+    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: allAgesBible, bibleUnreadable: false }, noEffects())
+    if (result.ok) throw new Error('expected failure')
+    expect(result).toMatchObject({ status: 400, error: 'invalid_bible' })
+    expect(result.detail).toContain('作品設計を作り直す')
+    expect(calls).toHaveLength(0)
+  })
+
+  test('a character added after the bible was made stops the outline', async () => {
+    const bible = { ...allAgesBible, cast: ADULT_CAST }
+    const withNewcomer = { ...adultBibleInput, cast: [...adultBibleInput.cast, minorMember('新参者')] }
+    const { call, calls } = fakeCall([])
+    const result = await prepareBibleFlow(call, { ...withNewcomer, bible, bibleUnreadable: false }, noEffects())
+    if (result.ok) throw new Error('expected failure')
+    expect(result.detail).toContain(validateAdultCast('R18', ADULT_CAST, ['新参者'])[0])
+    expect(result.detail).toContain('作品設計を作り直す')
+    expect(calls).toHaveLength(0)
+  })
+
+  test('an unreadable bible stops an adult novel without calling the model', async () => {
+    const { call, calls } = fakeCall([])
+    const result = await prepareBibleFlow(call, { ...adultBibleInput, bible: null, bibleUnreadable: true }, noEffects())
+    if (result.ok) throw new Error('expected failure')
+    expect(result).toMatchObject({ status: 400, error: 'invalid_bible' })
+    expect(result.detail).toContain('作品設計を作り直してください')
+    expect(calls).toHaveLength(0)
+  })
+
+  test('an unreadable bible of an all-ages novel is made again', async () => {
+    const { call, calls } = fakeCall([{ text: bibleJson() }])
+    const result = await prepareBibleFlow(call, { ...bibleInput, bible: null, bibleUnreadable: true }, noEffects())
+    expect(calls).toHaveLength(1)
+    expect(result.ok).toBe(true)
+  })
+})
+
+describe('cast rows the validator does not read', () => {
+  test('only the first row per roster name is kept, so the stored cast is exactly what was checked', async () => {
+    const answer = bibleJson({
+      cast: [
+        ADULT_CAST[0],
+        // 同じ人物の 2 行目 (validateAdultCast は 1 行目しか見ない)
+        { ...ADULT_CAST[0], age: '14', occupation: '中学生' },
+        ADULT_CAST[1],
+        // 名簿に無い人物
+        { name: '通りすがり', age: '12', occupation: '小学生', appearance: '', background: '' }
+      ]
+    })
+    const result = await generateBibleFlow(fakeCall([{ text: answer }]).call, adultBibleInput)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.bible.cast).toEqual(ADULT_CAST)
   })
 })
