@@ -35,6 +35,18 @@ jobs:
         run: bunx prisma generate
         env:
           DATABASE_URL: file:./dev.db
+      # Before the deploy, so new code never runs against a schema it does not
+      # expect. A failed migration stops the job and the Worker is not deployed.
+      # Runs before the build: the build writes .wrangler/deploy/config.json,
+      # and wrangler rejects --env for that generated config. --config pins the
+      # source wrangler.toml all the same.
+      - name: Apply D1 migrations
+        uses: cloudflare/wrangler-action@v4
+        with:
+          wranglerVersion: latest
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 migrations apply DB --remote --env ${{ env.ENVIRONMENT }} --config wrangler.toml
       - name: Build
         run: bun run build
         env:
