@@ -557,14 +557,14 @@ describe('extractRecordFlow', () => {
     })
   })
 
-  test('passes the prompt, op, schema and a 60 second timeout to call', async () => {
+  test('passes the prompt, op, schema and a 120 second timeout to call', async () => {
     const { call, calls } = fakeCall([{ text: draftJson() }])
     await extractRecordFlow(call, recordInput)
     expect(calls[0].prompt).toEqual(buildRecordPrompt(recordInput))
     expect(calls[0].options).toEqual({
       op: 'extractRecord',
       schema: recordJsonSchema({ castNames: ['酒寄彩葉', '月見ヤチヨ'], openThreadIds: ['s1'], plannedSetupIds: [] }),
-      timeoutMs: 60_000
+      timeoutMs: 120_000
     })
   })
 

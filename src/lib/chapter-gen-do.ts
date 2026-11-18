@@ -179,11 +179,6 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   // - phase=done/error/idle なら alarm chain を終わらせて DO は自然に hibernate へ
   async alarm() {
     if (this.phase !== 'streaming') return
-    // 本文が流れない段階 (資料の準備、記録の抽出) は数十秒〜数分続く。その間 SSE に何も流れないと、
-    // 途中の経路が無通信の接続を切り、EventSource が再接続して本文の送り直しが起きる。
-    // SSE のコメント行はクライアントの onmessage に届かないので、画面側は何もしなくてよい。
-    // 段階の切り替わり ({ stage }) も通信になるので、そこでは別に送らない。
-    await this.fanout(new TextEncoder().encode(': keep-alive\n\n'))
     const sinceProgress = Date.now() - this.lastProgressAt
     if (sinceProgress > STALE_STREAMING_MS && this.payload !== null && !this.running) {
       // run() の Promise が消えているはずなので新しく起動。本文を保存済みなら記録の抽出から続ける。
@@ -192,6 +187,12 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.ctx.waitUntil(this.run())
     }
     await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_INTERVAL_MS)
+    // 本文が流れない段階 (資料の準備、記録の抽出) は数十秒〜数分続く。その間 SSE に何も流れないと、
+    // 途中の経路が無通信の接続を切り、EventSource が再接続して本文の送り直しが起きる。
+    // SSE のコメント行はクライアントの onmessage に届かないので、画面側は何もしなくてよい。
+    // 段階の切り替わり ({ stage }) も通信になるので、そこでは別に送らない。
+    // 判定と次の alarm の予約を先に済ませ、送信は待たない (購読者への書き込みが詰まっても、watchdog を止めないため)。
+    this.ctx.waitUntil(this.fanout(new TextEncoder().encode(': keep-alive\n\n')).catch(() => undefined))
   }
 
   // SSE で接続する。現バッファ replay → 以降の差分を fan-out。
@@ -444,19 +445,9 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       return null
     }
 
-    // 保存できたら、すぐに保存先をストレージに書く。この後で run() が止まっても、再開は記録の抽出から (本文を二重に作らない)。
-    // 打ち切りの error も同じ書き込みに入れる。chapterId だけを先に書くと、その直後に止まったときに
-    // 再開が打ち切りを見落として done にしてしまうため。
-    this.chapterId = saved.id
-    this.chapterTitle = context.title
-    if (truncated) {
-      this.phase = 'error'
-      this.errMsg = truncationMessage(finishReason)
-      this.stage = null
-    }
-    await this.persistAll()
-
-    // コスト記録 (best-effort。記録の失敗で保存済みの本文を error にしない)
+    // コスト記録 (best-effort。記録の失敗で保存済みの本文を error にしない)。
+    // 保存先をストレージに書く前に記録する。書いた後に止まると、再開は記録の抽出から始まり、本文のコストが残らないため。
+    // 記録の後、保存先を書く前に止まった場合は最初からやり直して本文を作り直すので、コストの行が 2 つになるのは実費どおり。
     if (usage) {
       try {
         await recordGenerationCost(prisma, this.env, {
@@ -470,6 +461,18 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       }
     }
     await prisma.$disconnect()
+
+    // 保存先をストレージに書く。この後で run() が止まっても、再開は記録の抽出から (本文を二重に作らない)。
+    // 打ち切りの error も同じ書き込みに入れる。chapterId だけを先に書くと、その直後に止まったときに
+    // 再開が打ち切りを見落として done にしてしまうため。
+    this.chapterId = saved.id
+    this.chapterTitle = context.title
+    if (truncated) {
+      this.phase = 'error'
+      this.errMsg = truncationMessage(finishReason)
+      this.stage = null
+    }
+    await this.persistAll()
 
     if (truncated) {
       // 途中打ち切り: 部分本文は D1 に保存済み。UI には error として通知し、ユーザーが再生成を判断できるようにする。
@@ -515,7 +518,10 @@ export class ChapterGenerationDO extends DurableObject<Env> {
           job.materials
         )
         this.markProgress()
-        return 'ok'
+        // 抽出の間 (1〜2 分) に章が削除されていたら、次の章へ進まずに error にする (再開の経路と同じ扱い)。
+        // 消えた保存先で done を送ると、画面とジョブが存在しない版を完了として扱うため。
+        const still = await findChapterVersion(prisma, saved.chapterId)
+        return recordStageAction(still) === 'missing' ? 'missing' : 'ok'
       })
     } catch (e) {
       console.warn(`chapter ${payload.chapterNumber} record stage failed`, e)

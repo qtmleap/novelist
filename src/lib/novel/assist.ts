@@ -373,8 +373,10 @@ export type RecordFlowResult =
   | { ok: true; record: ChapterRecord; usages: UsageCounts[] }
   | { ok: false; error: string; usages: UsageCounts[] }
 
-// 記録の応答を待つ上限。抽出に失敗しても章は完了扱いにするので、長く待たせない。
-const RECORD_TIMEOUT_MS = 60_000
+// 記録の応答を待つ上限。抽出に失敗しても章は完了扱いにするので、待ちすぎない。
+// 思考するモデルで本文が長いと 60 秒を超えることがある。時間切れは usage も残らず、記録に置き換える古い章では
+// 毎回の生成で抽出をやり直すことになるので、2 分まで待つ。
+const RECORD_TIMEOUT_MS = 120_000
 
 // 応答を記録の下書きとして読み、保存できる形に整える。名前の正規化、空の項目の除去、切り詰め、伏線の id 振りは
 // finalizeRecord が全部やる。finalizeRecord が throw する下書き (要約が空など) は解釈の失敗として、やり直しに回す。

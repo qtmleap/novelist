@@ -4,6 +4,7 @@ import {
   type AvailableModel,
   type ModelCatalog,
   type ModelPrice,
+  type UpstreamModel,
   UpstreamModelListSchema,
   UpstreamModelSchema
 } from '@/schemas/provider.dto'
@@ -20,6 +21,19 @@ export function openaiConfig(env: Env): OpenAIConfig | null {
   const trimmedKey = apiKey.trim()
   if (trimmedUrl.length === 0 || trimmedKey.length === 0) return null
   return { baseUrl: trimmedUrl, apiKey: trimmedKey, format: resolveFormat(env.OPENAI_API_FORMAT) }
+}
+
+// 入力の上限の項目名。上から順に見て、正の整数の最初のものを採る。
+const CONTEXT_WINDOW_FIELDS = ['context_window', 'context_length', 'max_model_len'] as const
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
+// /models の 1 件から入力の上限 (トークン) を読む。どの項目にも正の整数が無ければ null (既定の予算を使う)。
+export function contextWindowOf(model: UpstreamModel): number | null {
+  const found = CONTEXT_WINDOW_FIELDS.map((key) => model[key]).find(isPositiveInteger)
+  return found === undefined ? null : found
 }
 
 const CACHE_TTL_MS = 5 * 60 * 1000
@@ -61,7 +75,7 @@ export async function fetchOpenAIModels(env: Env): Promise<UpstreamResult> {
           name: m.id,
           provider: 'openai',
           owner: m.owned_by === undefined ? null : m.owned_by,
-          contextWindow: m.context_window === undefined ? null : m.context_window,
+          contextWindow: contextWindowOf(m),
           price:
             m.pricing === undefined
               ? null

@@ -1,9 +1,15 @@
 import { describe, expect, test } from 'bun:test'
+import type { PrismaClient } from '@/generated/prisma/client'
+import type { Env } from '@/lib/db'
 import {
+  buildChapterContext,
+  chapterGenPayload,
   type ContextChapter,
   type ContextSource,
   contextBlocker,
   contextBudget,
+  extractAndSaveRecord,
+  ledgerMaxChars,
   ledgerOf,
   outlineHasChapter,
   planChapterContext,
@@ -16,7 +22,8 @@ import {
   resumePoint,
   setupsOf
 } from '@/lib/novel/chapter-context'
-import { renderLedger } from '@/lib/novel/ledger'
+import type { JsonCaller } from '@/lib/novel/assist'
+import { LEDGER_MAX_CHARS, renderLedger } from '@/lib/novel/ledger'
 import { RECORDED_CHAPTER_CHARS } from '@/lib/novel/memory'
 import { buildChapterPrompt, type CastMember, type StyleParams } from '@/lib/novel/prompts'
 import type { Outline } from '@/schemas/novel.dto'
@@ -84,6 +91,7 @@ function source(chapters: ContextChapter[], chapterNumber = 5): ContextSource {
 const huge = { budgetTokens: 10_000_000, tokensPerChar: 1 }
 
 // 既出の章を 1 つも入れず、確定事項は入れたプロンプトの文字数 (planChapterContext の reservedChars と同じ計算)。
+// 確定事項の上限は予算で変わるが、ここで使う予算 (budgetTokens が数万字以上) では、テストの確定事項は上限より小さい。
 function reservedChars(src: ContextSource): number {
   const prior = src.chapters.filter((c) => c.number < src.chapterNumber)
   const skeleton = buildChapterPrompt({
@@ -94,7 +102,7 @@ function reservedChars(src: ContextSource): number {
     style: src.style,
     cast: src.cast,
     relations: src.relations,
-    ledgerText: renderLedger(ledgerOf(prior, new Map())),
+    ledgerText: renderLedger(ledgerOf(prior, new Map()), { previousChapter: src.chapterNumber - 1 }),
     bible: src.bible,
     writingNotes: src.writingNotes,
     priorChapters: []
@@ -434,5 +442,229 @@ describe('bible, writing notes and planned setups (Phase 3)', () => {
     const result = await resolveChapterContext(source(sixChapters), huge, async () => null)
     expect(result.record.plannedSetups).toEqual([{ id: 's5', description: '第5章で張る伏線' }])
     expect(setupsOf(outline, 9)).toEqual([])
+  })
+})
+
+describe('ledger size and the previous chapter (review fixes)', () => {
+  test('ledgerMaxChars is a quarter of the budget, capped at the default', () => {
+    expect(ledgerMaxChars({ budgetTokens: 120_000, tokensPerChar: 0.65 })).toBe(LEDGER_MAX_CHARS)
+    expect(ledgerMaxChars({ budgetTokens: 120_000, tokensPerChar: 1 })).toBe(30_000)
+    expect(ledgerMaxChars({ budgetTokens: 8_000, tokensPerChar: 1 })).toBe(2_000)
+    expect(ledgerMaxChars(contextBudget('openai:small', 16_000))).toBe(2_000)
+  })
+
+  // 人物の「したこと」が長い記録。予算が小さいと古い章から省かれる。
+  function actionRecord(n: number): ChapterRecord {
+    return record(n, {
+      characters: [{ name: '酒寄彩葉', actions: [`第${n}章の行動の目印${'い'.repeat(400)}`], learned: [], state: '' }]
+    })
+  }
+  const withActions = [1, 2, 3, 4].map((n) => chapter(n, actionRecord(n)))
+
+  test('a small budget shrinks the ledger by dropping the oldest actions', () => {
+    const large = planChapterContext(source(withActions), huge)
+    expect(large.prompt.user).toContain('第1章の行動の目印')
+    // 予算 4,000 トークン → 確定事項は 1,000 字まで
+    const small = planChapterContext(source(withActions), { budgetTokens: 4_000, tokensPerChar: 1 })
+    expect(small.prompt.user).not.toContain('第1章の行動の目印')
+    // 流れ (要約) は削らない
+    expect(small.prompt.user).toContain('第1章の記録の要約')
+  })
+
+  test('the end of an older chapter is not shown as the previous chapter', () => {
+    const ended = (n: number) => record(n, { end_state: { time: `第${n}章の夜`, place: '港', present: [] } })
+    // 第 4 章の記録が無い (抽出に失敗した) と、第 3 章の章末を「直前の章の終わり」として出さない
+    const gap = [chapter(1), chapter(2), chapter(3, ended(3)), chapter(4, null)]
+    expect(planChapterContext(source(gap), huge).prompt.user).not.toContain('第3章の夜')
+    const full = [chapter(1), chapter(2), chapter(3), chapter(4, ended(4))]
+    expect(planChapterContext(source(full), huge).prompt.user).toContain('第4章の夜')
+  })
+})
+
+// ---------------------- D1 に触れる関数 (偽の prisma) ----------------------
+
+// Gemini のモデルのコストは env を読まない。読んだら失敗する偽物で、ネットワークに行かないことを確かめる。
+const untouchedEnv: Env = new Proxy(Object.create(null), {
+  get(_target, key) {
+    throw new Error(`env.${String(key)} should not be read`)
+  }
+})
+
+describe('extractAndSaveRecord', () => {
+  const target = { novelId: 'n1', chapterId: 'v3', chapterNumber: 3, title: '題', content: '　本文がある。' }
+  const materials = { castNames: [], openThreads: [], plannedSetups: [] }
+  const usage = (n: number) => ({ model: 'gemini-2.5-flash', promptTokens: n, outputTokens: n, totalTokens: 2 * n })
+  const draft = JSON.stringify({ summary: '要約', facts: [], characters: [], new_threads: [], end_state: {} })
+
+  function fake(options: { failUpdate?: boolean } = {}) {
+    const costs: unknown[] = []
+    const updates: unknown[] = []
+    const prisma: PrismaClient = Object.assign(Object.create(null), {
+      chapterGenerationCost: {
+        create: async (args: unknown) => {
+          costs.push(args)
+        }
+      },
+      chapter: {
+        update: async (args: unknown) => {
+          if (options.failUpdate === true) throw new Error('Record to update not found')
+          updates.push(args)
+        }
+      }
+    })
+    return { prisma, costs, updates }
+  }
+
+  function caller(replies: Array<{ text: string; usage: ReturnType<typeof usage> }>): JsonCaller {
+    const queue = [...replies]
+    return async () => {
+      const next = queue.shift()
+      if (next === undefined) throw new Error('unexpected extra call')
+      return next
+    }
+  }
+
+  test('a failed extraction still records the cost of every answered call', async () => {
+    const fx = fake()
+    const call = caller([
+      { text: 'not json', usage: usage(1) },
+      { text: 'still not json', usage: usage(2) }
+    ])
+    const result = await extractAndSaveRecord(fx.prisma, untouchedEnv, call, target, materials)
+    expect(result.ok).toBe(false)
+    expect(fx.costs).toHaveLength(2)
+    expect(fx.costs[0]).toMatchObject({ data: { novel_id: 'n1', chapter_number: 3, kind: 'record', prompt_tokens: 1 } })
+    expect(fx.updates).toEqual([])
+  })
+
+  test('a successful extraction is saved on the version', async () => {
+    const fx = fake()
+    const result = await extractAndSaveRecord(fx.prisma, untouchedEnv, caller([{ text: draft, usage: usage(1) }]), target, materials)
+    expect(result.ok).toBe(true)
+    expect(fx.updates).toHaveLength(1)
+    expect(fx.updates[0]).toMatchObject({ where: { id: 'v3' } })
+  })
+
+  test('a failed save still returns the record', async () => {
+    const fx = fake({ failUpdate: true })
+    const result = await extractAndSaveRecord(fx.prisma, untouchedEnv, caller([{ text: draft, usage: usage(1) }]), target, materials)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.record.summary).toBe('要約')
+    expect(fx.costs).toHaveLength(1)
+  })
+})
+
+describe('buildChapterContext errors and chapterGenPayload', () => {
+  const storedOutline = JSON.stringify(outline)
+
+  // getNovelWithChapters と chapterGenPayload が読むだけの偽物。novel が null なら小説が無い。
+  function novelPrisma(novel: Record<string, unknown> | null): PrismaClient {
+    return Object.assign(Object.create(null), {
+      novel: {
+        findUnique: async () =>
+          novel === null
+            ? null
+            : {
+                id: 'n1',
+                title: 't',
+                genre: 'g',
+                setting: 's',
+                num_chapters: 6,
+                target_chars: 2000,
+                outline_summary_chars: 200,
+                pov: '一人称',
+                tone: '一般文芸',
+                age_rating: '全年齢',
+                pov_character_id: '',
+                ending: '未指定',
+                notes: '',
+                writing_notes: null,
+                editor_model: 'gemini-2.5-flash',
+                bible: null,
+                chapters: [],
+                character_links: [],
+                relations: [],
+                generation_costs: [],
+                generation_job: null,
+                category: null,
+                ...novel
+              }
+      }
+    })
+  }
+  const payload = { novelId: 'n1', chapterNumber: 3, model: 'gemini-2.5-flash' }
+
+  test('a missing novel, outline or chapter fails with a reason', async () => {
+    expect(await buildChapterContext(novelPrisma(null), untouchedEnv, payload)).toEqual({
+      ok: false,
+      error: '小説が見つかりません'
+    })
+    const noOutline = await buildChapterContext(novelPrisma({ outline: null }), untouchedEnv, payload)
+    expect(noOutline.ok).toBe(false)
+    const broken = await buildChapterContext(novelPrisma({ outline: '{oops' }), untouchedEnv, payload)
+    expect(broken.ok).toBe(false)
+    const missing = await buildChapterContext(novelPrisma({ outline: storedOutline }), untouchedEnv, {
+      ...payload,
+      chapterNumber: 9
+    })
+    expect(missing).toEqual({ ok: false, error: '章立てに第 9 章がありません' })
+  })
+
+  test('a broken adult bible stops before any extraction or model lookup', async () => {
+    const bible = {
+      premise: '',
+      ending: '',
+      arcs: [],
+      world: { rules: [], terms: [] },
+      timeline: [],
+      addresses: [],
+      cast: [],
+      source_hash: ''
+    }
+    // 名簿に 1 人いて、作品設計にその人の成人としての設定が無い
+    const link = {
+      character_id: 'c1',
+      role: '主人公',
+      variant_id: null,
+      character: {
+        name: '酒寄彩葉',
+        gender: '',
+        age: '17',
+        occupation: '高校生',
+        appearance: '',
+        first_person: '私',
+        address_others: '',
+        speech_examples: '[]',
+        description: '',
+        variants: []
+      }
+    }
+    const result = await buildChapterContext(
+      novelPrisma({ outline: storedOutline, age_rating: 'R18', bible: JSON.stringify(bible), character_links: [link] }),
+      untouchedEnv,
+      payload
+    )
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('酒寄彩葉 の成人としての設定がありません')
+    expect(result.error).toContain('作品設計を作り直す')
+    // 作品設計が無い旧データは止めない
+    const legacy = await buildChapterContext(
+      novelPrisma({ outline: storedOutline, age_rating: 'R18', character_links: [link] }),
+      untouchedEnv,
+      payload
+    )
+    expect(legacy.ok).toBe(true)
+  })
+
+  test('chapterGenPayload needs the novel and the chapter in the outline', async () => {
+    expect(await chapterGenPayload(novelPrisma(null), 'n1', 1, 'gemini-2.5-flash')).toBeNull()
+    expect(await chapterGenPayload(novelPrisma({ outline: null }), 'n1', 1, 'gemini-2.5-flash')).toBeNull()
+    expect(await chapterGenPayload(novelPrisma({ outline: '{oops' }), 'n1', 1, 'gemini-2.5-flash')).toBeNull()
+    expect(await chapterGenPayload(novelPrisma({ outline: storedOutline }), 'n1', 9, 'gemini-2.5-flash')).toBeNull()
+    expect(await chapterGenPayload(novelPrisma({ outline: storedOutline }), 'n1', 2, 'gemini-2.5-flash')).toEqual({
+      novelId: 'n1',
+      chapterNumber: 2,
+      model: 'gemini-2.5-flash'
+    })
   })
 })

@@ -11,7 +11,7 @@ import {
   toStoryBible
 } from '@/lib/novel/assist'
 import { type GenerationCostInput, recordGenerationCost } from '@/lib/novel/cost'
-import { buildLedger, type Ledger, renderLedger } from '@/lib/novel/ledger'
+import { buildLedger, LEDGER_MAX_CHARS, type Ledger, renderLedger } from '@/lib/novel/ledger'
 import { contextBudgetTokens, selectPriorChapters, TOKENS_PER_CHAR } from '@/lib/novel/memory'
 import {
   buildChapterPrompt,
@@ -212,6 +212,17 @@ export function contextBudget(model: ModelRef | undefined, contextWindow: number
   return { budgetTokens: contextBudgetTokens(contextWindow), tokensPerChar: TOKENS_PER_CHAR[provider] }
 }
 
+// 【確定事項】に使ってよいのは、既出の章の予算のうちこの割合まで。
+// 確定事項は予算に関係なく毎章入るので、入力の上限が小さいモデルでは、これが無いと確定事項だけで溢れる。
+const LEDGER_BUDGET_SHARE = 0.25
+
+// 【確定事項】の文字数の上限。既定の上限 (LEDGER_MAX_CHARS) と、予算の LEDGER_BUDGET_SHARE ぶんの小さい方。
+// 既定の予算 (12 万トークン、Gemini の 0.65 トークン/字) では既定の上限のまま。
+// 直近 2 章は予算を超えても全文で入れる (memory.ts) ので、それでも溢れるほど小さいモデルは対象外。
+export function ledgerMaxChars(budget: ContextBudget): number {
+  return Math.min(LEDGER_MAX_CHARS, Math.floor((budget.budgetTokens * LEDGER_BUDGET_SHARE) / budget.tokensPerChar))
+}
+
 export type ContextPlan = {
   // モデルに送るプロンプト
   prompt: Prompt
@@ -266,7 +277,8 @@ export function planChapterContext(
     style: source.style,
     cast: castForPrompt(source.cast, source.style, source.bible),
     relations: source.relations,
-    ledgerText: renderLedger(ledger),
+    // 直前の章の記録が無いとき、もっと前の章の章末を「直前の章の終わり」として出さない (previousChapter)。
+    ledgerText: renderLedger(ledger, { maxChars: ledgerMaxChars(budget), previousChapter: source.chapterNumber - 1 }),
     bible: source.bible,
     writingNotes: source.writingNotes
   }
