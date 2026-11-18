@@ -6,7 +6,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { STALE_REASON_LABELS } from '@/components/novel/ChapterReader'
 import { ChapterRecordView } from '@/components/novel/ChapterRecordView'
-import { ChapterReviewView } from '@/components/novel/ChapterReviewView'
+import { ChapterReviewView, hasMinorTermWarning } from '@/components/novel/ChapterReviewView'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { CHAPTER_STAGE_LABELS } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
@@ -585,6 +585,13 @@ export default function ChapterDetailPage() {
               <p className='mt-0.5 text-sm text-muted-foreground'>
                 指示した点だけを直した新しい版を作ります。元の版は履歴に残ります。
               </p>
+              {/* ボタンは無効にしない (断られたら、サーバーの理由を ReviseDialog に出す)。先に知らせるだけ。 */}
+              {hasMinorTermWarning(chapter.review) && (
+                <p className='mt-1.5 flex items-start gap-1.5 text-sm text-amber-800 dark:text-amber-200'>
+                  <TriangleAlert className='mt-0.5 size-4 shrink-0' aria-hidden='true' />
+                  未成年を指す語の警告がある章は、書き直しでは直せません。章を再生成してください。
+                </p>
+              )}
             </div>
             <Button
               type='button'

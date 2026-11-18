@@ -1,6 +1,6 @@
 'use client'
 
-import { ListChecks } from 'lucide-react'
+import { ListChecks, TriangleAlert } from 'lucide-react'
 import { useId } from 'react'
 import { Checkbox } from '@/components/ui/checkbox'
 import { withKeys } from '@/lib/keys'
@@ -15,6 +15,14 @@ export const REVIEW_ISSUE_LABELS: Record<ReviewIssueKind, string> = {
   thread: '伏線',
   presence: '人物の居場所・知識',
   other: 'その他'
+}
+
+// 成人指定の作品の本文に、未成年を指す語がある (minor_term)。この警告が出ている章は、書き直しの元の版に語があるので、
+// どんな指示でもサーバーが断る。書き直しでは直せないので、章を再生成してもらう。
+export const MINOR_TERM_NOTE = 'この警告は書き直しでは直せません。章を再生成してください。'
+
+export function hasMinorTermWarning(review: ChapterReview | null): boolean {
+  return review?.checks.some((c) => c.kind === 'minor_term') === true
 }
 
 // 警告の件数 (機械的な検査 + 内容の指摘)。review が無い (未検査) 章は 0。
@@ -94,7 +102,15 @@ export function ChapterReviewView({ review, selectedIssues, onToggleIssue, disab
             <h3 className='text-xs font-medium text-muted-foreground'>機械的な検査</h3>
             <ul className='list-disc space-y-0.5 pl-5'>
               {withKeys(review.checks, (c) => `${c.kind}:${c.message}`).map(({ key, item }) => (
-                <li key={key}>{item.message}</li>
+                <li key={key}>
+                  {item.message}
+                  {item.kind === 'minor_term' && (
+                    <span className='mt-0.5 flex items-start gap-1.5 text-xs text-amber-800 dark:text-amber-200'>
+                      <TriangleAlert className='mt-px size-3.5 shrink-0' aria-hidden='true' />
+                      {MINOR_TERM_NOTE}
+                    </span>
+                  )}
+                </li>
               ))}
             </ul>
           </section>
