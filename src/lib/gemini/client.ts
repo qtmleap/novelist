@@ -1,17 +1,19 @@
 import { z } from 'zod'
 import type { Env } from '@/lib/db'
+import type { JsonSchema } from '@/lib/novel/outline'
+import type { Prompt } from '@/lib/novel/prompts'
 import { openaiCompleteJsonText, openaiStreamTarget } from '@/lib/openai/client'
-import type { ParsedChunk, StreamTarget } from '@/lib/openai/protocol'
-import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
 import {
-  MODEL_PRICING_USD_PER_M_TOKENS,
-  type ModelPricing,
-  type ModelRef,
-  type Outline,
-  type OutlineChapter,
-  OutlineSchema,
-  parseModelRef
-} from '@/schemas/novel.dto'
+  type ParsedChunk,
+  type StreamTarget,
+  timeoutMessage,
+  timeoutSignal,
+  type UsageCounts
+} from '@/lib/openai/protocol'
+import { MODEL_PRICING_USD_PER_M_TOKENS, type ModelPricing, type ModelRef, parseModelRef } from '@/schemas/novel.dto'
+
+// LLM の呼び出し口 (Gemini と OpenAI 互換の振り分け、要求の組み立て、応答と usage の解釈)。
+// プロンプトの文面と小説に固有の流れは持たない (src/lib/novel/prompts.ts と assist.ts にある)。
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 
@@ -35,11 +37,15 @@ const GeminiCandidateSchema = z.object({
     .optional()
 })
 
+// thoughtsTokenCount は思考が有効なモデルだけが返す。思考トークンは出力として課金されるので、
+// 出力トークンは candidatesTokenCount との合計で数える。
 const GeminiUsageMetadataSchema = z.object({
   promptTokenCount: z.number().optional(),
   candidatesTokenCount: z.number().optional(),
+  thoughtsTokenCount: z.number().optional(),
   totalTokenCount: z.number().optional()
 })
+type GeminiUsageMetadata = z.infer<typeof GeminiUsageMetadataSchema>
 
 const GeminiResponseSchema = z.object({
   candidates: z.array(GeminiCandidateSchema).optional(),
@@ -53,71 +59,8 @@ const GeminiResponseSchema = z.object({
 })
 type GeminiResponse = z.infer<typeof GeminiResponseSchema>
 
-type GeminiNovelParams = {
-  title: string
-  genre: string
-  setting: string
-  num_chapters: number
-  // 章立ての各章 summary の概算文字数 (章立て生成プロンプトに反映)。
-  outline_summary_chars: number
-  // ユーザーが PremiseForm の備考欄に書いた追加指示 (任意)。
-  notes?: string
-}
-
-// 章立て生成時にのみ参照する「物語に取り込みたい要素」セクション。
-// 箇条書きで何個でも記述された自由テキストを、AI が物語の自然な箇所に振り分けて
-// outline の構成 (各章の summary) に反映することを期待する。
-function buildNotesSection(notes: string | undefined): string {
-  if (!notes || notes.trim().length === 0) return ''
-  return `【物語に取り込みたい要素】\n${notes.trim()}\n上記の各項目を、物語のどこかに自然に組み込むよう章立て (各章の概要) に反映してください。配置や順序は AI 側で判断して構いません。`
-}
-
-type ViewpointChar = {
-  name: string
-  first_person: string
-}
-
-// 小説に登場するキャラの詳細 (Gemini プロンプト向け)。
-// 辞典 (Character) + その小説での役割 (NovelCharacter.role) をマージしたもの。
-export type CastMember = {
-  name: string
-  role: string
-  gender: string
-  age: string
-  occupation: string
-  appearance: string
-  first_person: string
-  address_others: string
-  speech_examples: string[]
-  description: string
-}
-
-// キャラ A → キャラ B の関係 (呼び方上書きを含む)。
-export type CastRelation = {
-  source_name: string
-  target_name: string
-  relation: string
-  description: string
-  address_override: string
-}
-
-type StyleParams = {
-  pov: string
-  tone: string
-  ending?: string
-  age_rating?: string
-  viewpointChar?: ViewpointChar
-}
-
 type StreamChapterParams = {
-  novel: GeminiNovelParams
-  outline: Outline
-  chapterNumber: number
-  previousChapters: Array<{ chapter_number: number; content: string }>
-  targetChars: number
-  style: StyleParams
-  cast?: CastMember[]
-  relations?: CastRelation[]
+  prompt: Prompt
   model?: ModelRef
   // 上流から任意のチャンク (thinking 含む) を受け取るたびに呼ばれるコールバック。
   // DO 側が lastProgressAt を更新して stale 誤検知を防ぐために使う。
@@ -155,339 +98,139 @@ function resolveModel(env: Env, model?: ModelRef): ModelRef {
   return model ?? env.GEMINI_MODEL ?? 'gemini-2.5-flash'
 }
 
-// Gemini の非ストリーム呼び出し (章立て用)。本文テキストを返し、空なら理由つきで throw する。
-async function geminiGenerateJsonText(env: Env, id: string, prompt: string, op: string): Promise<string> {
-  const url = `${GEMINI_BASE}/${id}:generateContent?key=${env.GEMINI_API_KEY}`
-  const body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    safetySettings: SAFETY_SETTINGS_OFF,
-    generationConfig: { responseMimeType: 'application/json' }
+// ---------------------- 要求の body ----------------------
+
+// stream = 本文のストリーム生成。json = JSON を 1 回で受け取る呼び出し (schema があれば構造化出力)。
+export type GeminiRequest = { kind: 'stream'; prompt: Prompt } | { kind: 'json'; prompt: Prompt; schema?: JsonSchema }
+
+function generationConfig(request: GeminiRequest): Record<string, unknown> {
+  if (request.kind === 'stream') return { temperature: 0.9 }
+  // 構造化出力は responseFormat で指定する (responseSchema は非推奨)。schema の型名は小文字の JSON Schema。
+  if (request.schema !== undefined) {
+    return { responseFormat: { text: { mimeType: 'APPLICATION_JSON', schema: request.schema } } }
   }
-  const res = await fetch(url, {
+  return { responseMimeType: 'application/json' }
+}
+
+// Gemini の generateContent / streamGenerateContent に送る body。API キーや env には触れない (bun test で検証する)。
+// system は systemInstruction、user は contents に入れる。system が空なら systemInstruction を付けない。
+export function buildGeminiBody(request: GeminiRequest): Record<string, unknown> {
+  const { system, user } = request.prompt
+  return {
+    ...(system.length > 0 ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+    contents: [{ role: 'user', parts: [{ text: user }] }],
+    safetySettings: SAFETY_SETTINGS_OFF,
+    generationConfig: generationConfig(request)
+  }
+}
+
+// ---------------------- 非ストリーム (JSON) ----------------------
+
+// 非ストリーム呼び出し 1 回分の結果。usage はコストの記録に使う (上流が返さなければ undefined)。
+export type JsonTextResult = { text: string; usage: UsageCounts | undefined }
+
+export type GenerateJsonOptions = {
+  // エラー文とログに出す呼び出しの名前。
+  op: string
+  // 構造化出力の JSON Schema。Gemini だけが使う (OpenAI 互換は json_object のまま)。
+  schema?: JsonSchema
+  // 応答を待つ上限 (ミリ秒)。超えたら中断して throw する。無ければ打ち切らない。
+  timeoutMs?: number
+}
+
+function postGemini(url: string, body: Record<string, unknown>, signal: AbortSignal | undefined): Promise<Response> {
+  return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal
   })
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gemini ${op} failed: ${res.status} ${err}`)
-  }
-
-  const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) {
-    const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
-    const promptBlock = data.promptFeedback?.blockReason
-    const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
-    const detail = [
-      `finishReason=${finishReason}`,
-      promptBlock ? `promptBlockReason=${promptBlock}` : '',
-      blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
-    ]
-      .filter((x) => x.length > 0)
-      .join(' / ')
-    throw new Error(`Gemini returned empty ${op} response (${detail})`)
-  }
-  return text
 }
 
-// 章立て用の非ストリーム呼び出し。モデルの接頭辞で Gemini / OpenAI 互換を切り替える。
-async function generateJsonText(env: Env, ref: ModelRef, prompt: string, op: string): Promise<string> {
-  const target = parseModelRef(ref)
-  if (target.provider === 'openai') return openaiCompleteJsonText(env, target.id, prompt, op)
-  return geminiGenerateJsonText(env, target.id, prompt, op)
+// 構造化出力の新しい形式 (responseFormat) を受け付けない古いモデルは 400 を返す。
+// schema を外して JSON の MIME 指定だけで 1 回だけやり直す (形の検証は呼び出し側のコードで行う)。
+async function retryWithoutSchema(
+  rejected: Response,
+  url: string,
+  prompt: Prompt,
+  signal: AbortSignal | undefined,
+  op: string
+): Promise<Response> {
+  const reason = await rejected.text().catch(() => '')
+  console.warn(`Gemini ${op}: structured output was rejected (400), retrying without schema: ${reason}`)
+  return postGemini(url, buildGeminiBody({ kind: 'json', prompt }), signal)
 }
 
-// プロンプト用のキャラクター詳細セクションを組み立てる。speech_examples・address_others・
-// description を含めて Gemini が口調・呼び方を踏襲できるようにする。
-function buildCastSection(cast: CastMember[] | undefined): string {
-  if (!cast || cast.length === 0) return ''
-  const blocks = cast.map((c) => {
-    const meta = [c.age, c.gender, c.occupation].filter((v) => v && v.length > 0).join('・')
-    const lines: string[] = []
-    const header = meta ? `■ ${c.name} (${meta})` : `■ ${c.name}`
-    lines.push(c.role ? `${header} - ${c.role}` : header)
-    const fpDisplay = c.first_person === FIRST_PERSON_AS_NAME ? `自分自身を「${c.name}」と名前で呼ぶ` : c.first_person
-    const idLine = [
-      fpDisplay ? `一人称: ${fpDisplay}` : '',
-      c.address_others ? `他者の呼び方: ${c.address_others}` : ''
-    ]
-      .filter((s) => s.length > 0)
-      .join(' / ')
-    if (idLine) lines.push(`  ${idLine}`)
-    if (c.appearance) lines.push(`  外見: ${c.appearance}`)
-    if (c.speech_examples.length > 0) {
-      lines.push('  口調の例:')
-      for (const ex of c.speech_examples) lines.push(`    「${ex}」`)
-    }
-    if (c.description) lines.push(`  背景: ${c.description}`)
-    return lines.join('\n')
-  })
-  return `【登場キャラクター詳細】\n${blocks.join('\n\n')}`
-}
-
-function buildRelationsSection(relations: CastRelation[] | undefined): string {
-  if (!relations || relations.length === 0) return ''
-  const lines = relations.map((r) => {
-    const addr = r.address_override
-      ? `（${r.source_name} が ${r.target_name} を呼ぶときは「${r.address_override}」）`
-      : ''
-    const desc = r.description ? ` — ${r.description}` : ''
-    return `- ${r.source_name} → ${r.target_name}: ${r.relation}${addr}${desc}`
-  })
-  return `【キャラクター間の関係】\n${lines.join('\n')}`
-}
-
-function buildWritingRules(cast: CastMember[] | undefined): string {
-  if (!cast || cast.length === 0) return ''
-  return [
-    '【執筆ルール】',
-    '- 各キャラクターのセリフは「口調の例」の語尾・一人称・口癖・性格を必ず踏襲すること。',
-    '- 一人称代名詞は各キャラの設定値を厳守する (例えば「僕」キャラに「俺」と言わせない)。',
-    '- 他キャラへの呼びかけは「他者の呼び方」と関係ごとの上書きを優先すること。',
-    '- 各キャラの背景・性格に反する行動や発言を避け、辞典の人物像に沿って描写すること。'
-  ].join('\n')
-}
-
-function buildStyleInstruction(style: StyleParams, includeEnding = true): string {
-  const { pov, tone, ending, age_rating, viewpointChar: vc } = style
-
-  let povLine: string
-  if (pov === '一人称') {
-    if (vc && vc.first_person === FIRST_PERSON_AS_NAME) {
-      povLine = `『${vc.name}』の一人称視点で、地の文の主語は『${vc.name}』を用いる(一人称代名詞は使わず、自分自身を「${vc.name}」と名前で呼ぶ独特な語り口)`
-    } else if (vc) {
-      povLine = `『${vc.name}』(一人称「${vc.first_person}」)の一人称視点で、地の文は語り手の主観で執筆`
-    } else {
-      povLine = '主人公の一人称視点で執筆'
-    }
-  } else if (pov === '三人称一元視点') {
-    povLine = vc ? `『${vc.name}』に寄り添う三人称一元視点で執筆` : '三人称一元視点で執筆'
-  } else if (pov === '三人称多元視点') {
-    povLine = '複数キャラの視点を切り替える三人称多元視点'
-  } else {
-    povLine = '全知の三人称(神視点)'
-  }
-
-  const toneMap: Record<string, string> = {
-    ライトノベル調: '口語的で軽快なライトノベル調の文体',
-    一般文芸: '標準的な一般文芸の文体',
-    文学的: '硬質で描写を重視した文学的な文体',
-    やさしい文体: '平易でやさしい童話風の文体'
-  }
-  const toneLine = toneMap[tone] ?? '標準的な一般文芸の文体'
-
-  // age_rating で描写の踏み込み度合いを制御する (tone とは独立)。
-  const ratingMap: Record<string, string> = {
-    全年齢: '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること',
-    R15: '物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
-    R18: '成人向け。物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
-  }
-  const ratingLine = age_rating ? ratingMap[age_rating] : undefined
-
-  const endingMap: Record<string, string> = {
-    ハッピーエンド: '主要な葛藤が解決し、登場人物が報われる前向きな結末へ向けて構成すること',
-    バッドエンド: '救いの少ない悲劇的な結末へ向けて構成し、終章で喪失や敗北を直視すること',
-    ビターエンド: '喜びと喪失が混在する苦味のある結末。完全な勝利でも敗北でもなく、余韻を残すこと',
-    メリーバッドエンド:
-      '表面的にはハッピーエンドに見えるが、実際には何かが歪んでいる/失われていることが読み取れる結末にすること',
-    オープンエンド: '物語の結末を断定せず、複数の解釈の余地を残して幕を引くこと'
-  }
-  const endingLine = ending && ending !== '未指定' ? endingMap[ending] : undefined
-
-  const lines = [`視点: ${povLine}`, `文体: ${toneLine}`]
-  if (ratingLine) lines.push(`年齢指定: ${ratingLine}`)
-  // 結末は章立て時にだけ渡す。本文は章立て(概要)経由で結末に沿うので再注入しない。
-  if (includeEnding && endingLine) lines.push(`結末: ${endingLine}`)
-  return lines.join('\n')
-}
-
-// 章立て (bulk) 生成プロンプトの本文だけ組み立てる。プレビュー用にも使う。
-export function buildOutlinePrompt(
-  novel: GeminiNovelParams,
-  style: StyleParams,
-  cast?: CastMember[],
-  relations?: CastRelation[]
-): string {
-  const styleInstruction = buildStyleInstruction(style)
-  const castSection = buildCastSection(cast)
-  const relationsSection = buildRelationsSection(relations)
-  const notesSection = buildNotesSection(novel.notes)
-  const extraSections = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
-
-  const castNames = cast && cast.length > 0 ? cast.map((c) => c.name) : []
-  const charactersInstruction =
-    castNames.length > 0
-      ? `各章には、その章に実際に登場するキャラクターを characters 配列で指定してください。名前は次の表記と完全に一致させること: ${castNames.join('、')}。関係性に記載があるだけで、その章に登場しないキャラクターは含めないでください。`
-      : ''
-  const exampleEntry =
-    castNames.length > 0
-      ? '{ "chapter_number": 1, "title": "章のタイトル", "summary": "章の概要", "characters": ["登場キャラ名"] }'
-      : '{ "chapter_number": 1, "title": "章のタイトル", "summary": "章の概要" }'
-
-  return `あなたはプロの小説家です。以下のあらすじに基づいて、小説の章立てを作成してください。
-
-ジャンル: ${novel.genre}
-世界観・設定: ${novel.setting}
-章数: ${novel.num_chapters}
-${styleInstruction}
-${extraSections ? `\n${extraSections}\n` : ''}
-必ず ${novel.num_chapters} 章分の章立てを JSON 形式で出力してください。
-各章には chapter_number（1 から始まる整数）、title（章のタイトル）、summary（章の概要。${novel.outline_summary_chars}字程度）を含めてください。
-登場キャラクター詳細を与えた場合は、各キャラの性格・背景・関係を踏まえた章立てにしてください。
-${charactersInstruction ? `${charactersInstruction}\n` : ''}
-出力形式:
-{
-  "chapters": [
-    ${exampleEntry},
-    ...
-  ]
-}`
-}
-
-// モデルが返した各章の characters を、実在するキャスト名だけに絞り込む。
-// 名前ドリフトや幻覚 (関係性にしか居ないキャラ・架空名) を除去し、重複も排除する。
-// キャスト未指定なら characters は意味を持たないので空にする。
-function normalizeChapterCharacters(characters: string[], cast: CastMember[] | undefined): string[] {
-  if (!cast || cast.length === 0) return []
-  const known = new Set(cast.map((c) => c.name))
-  return [...new Set(characters.filter((name) => known.has(name)))]
-}
-
-export async function generateOutline(
+// Gemini の非ストリーム呼び出し。本文テキストを返し、空なら理由つきで throw する。
+// ref は保存値の形のモデル参照 (usage.model に入れる)、id は URL に入れる上流のモデル名。
+async function geminiGenerateJson(
   env: Env,
-  novel: GeminiNovelParams,
-  style: StyleParams,
-  modelOverride?: ModelRef,
-  cast?: CastMember[],
-  relations?: CastRelation[]
-): Promise<Outline> {
-  const model = resolveModel(env, modelOverride)
-  const prompt = buildOutlinePrompt(novel, style, cast, relations)
-  const text = await generateJsonText(env, model, prompt, 'generateOutline')
-
-  let parsed: unknown
+  id: string,
+  ref: ModelRef,
+  prompt: Prompt,
+  options: GenerateJsonOptions
+): Promise<JsonTextResult> {
+  const { op, schema, timeoutMs } = options
+  const url = `${GEMINI_BASE}/${id}:generateContent?key=${env.GEMINI_API_KEY}`
+  // やり直しも含めて 1 つの上限で打ち切る。
+  const signal = timeoutSignal(timeoutMs)
   try {
-    parsed = JSON.parse(text)
-  } catch {
-    throw new Error(`Outline response is not valid JSON: ${text}`)
-  }
+    const first = await postGemini(url, buildGeminiBody({ kind: 'json', prompt, schema }), signal)
+    const res =
+      first.status === 400 && schema !== undefined ? await retryWithoutSchema(first, url, prompt, signal, op) : first
+    if (!res.ok) {
+      const err = await res.text()
+      throw new Error(`Gemini ${op} failed: ${res.status} ${err}`)
+    }
 
-  // モデルがトップレベルに { chapters: [...] } ではなく配列を直接返すことがあるので吸収する。
-  const candidate = Array.isArray(parsed) ? { chapters: parsed } : parsed
-  const validated = OutlineSchema.safeParse(candidate)
-  if (!validated.success) {
-    throw new Error(`Outline response failed validation: ${JSON.stringify(validated.error.issues)}`)
-  }
-
-  return {
-    chapters: validated.data.chapters.map((c) => ({
-      ...c,
-      characters: normalizeChapterCharacters(c.characters, cast)
-    }))
+    const data: GeminiResponse = GeminiResponseSchema.parse(await res.json())
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+    if (!text) {
+      const finishReason = data.candidates?.[0]?.finishReason ?? 'unknown'
+      const promptBlock = data.promptFeedback?.blockReason
+      const blockedSafety = data.candidates?.[0]?.safetyRatings?.filter((r) => r.blocked) ?? []
+      const detail = [
+        `finishReason=${finishReason}`,
+        promptBlock ? `promptBlockReason=${promptBlock}` : '',
+        blockedSafety.length > 0 ? `blockedCategories=${blockedSafety.map((r) => r.category).join(',')}` : ''
+      ]
+        .filter((x) => x.length > 0)
+        .join(' / ')
+      throw new Error(`Gemini returned empty ${op} response (${detail})`)
+    }
+    return { text, usage: usageFromMetadata(data.usageMetadata, ref) }
+  } catch (e) {
+    if (signal?.aborted === true && timeoutMs !== undefined) throw new Error(timeoutMessage(`Gemini ${op}`, timeoutMs))
+    throw e
   }
 }
 
-// 既存 outline の中の特定章だけを書き直す。他の章 (title/summary) はそのまま維持。
-// 既存章本文との整合 (タイトル変更で本文が浮く) を避けたい場合は呼び出し側で UI 確認する。
-export async function regenerateOutlineChapter(
+// JSON を 1 回で受け取る呼び出し (章立てなど)。モデルの接頭辞で Gemini / OpenAI 互換を切り替える。
+// ref が undefined なら既定のモデル。通信エラー、空の応答、ブロックは throw する。
+export async function generateJson(
   env: Env,
-  novel: GeminiNovelParams,
-  style: StyleParams,
-  existing: Outline,
-  chapterNumber: number,
-  modelOverride?: ModelRef,
-  cast?: CastMember[],
-  relations?: CastRelation[]
-): Promise<OutlineChapter> {
-  // 既存に当該章が無い場合 (= 後から num_chapters を増やした) も生成できるよう、無ければ空のテンプレを充てる。
-  const target = existing.chapters.find((c) => c.chapter_number === chapterNumber) ?? {
-    chapter_number: chapterNumber,
-    title: '',
-    summary: '',
-    characters: []
+  ref: ModelRef | undefined,
+  prompt: Prompt,
+  options: GenerateJsonOptions
+): Promise<JsonTextResult> {
+  const model = resolveModel(env, ref)
+  const target = parseModelRef(model)
+  if (target.provider === 'openai') {
+    return openaiCompleteJsonText(env, model, target.id, prompt, { op: options.op, timeoutMs: options.timeoutMs })
   }
-
-  const model = resolveModel(env, modelOverride)
-
-  const styleInstruction = buildStyleInstruction(style)
-  const castSection = buildCastSection(cast)
-  const relationsSection = buildRelationsSection(relations)
-  const notesSection = buildNotesSection(novel.notes)
-  const extra = [castSection, relationsSection, notesSection].filter((s) => s.length > 0).join('\n\n')
-
-  const castNames = cast && cast.length > 0 ? cast.map((c) => c.name) : []
-  const charactersInstruction =
-    castNames.length > 0
-      ? `\n- characters には、この章に実際に登場するキャラクターを次の表記と完全一致で指定する: ${castNames.join('、')}。関係性に記載があるだけで登場しないキャラクターは含めない。`
-      : ''
-  const exampleEntry =
-    castNames.length > 0
-      ? `{ "chapter_number": ${chapterNumber}, "title": "...", "summary": "...", "characters": ["登場キャラ名"] }`
-      : `{ "chapter_number": ${chapterNumber}, "title": "...", "summary": "..." }`
-
-  const otherChapters = existing.chapters
-    .filter((c) => c.chapter_number !== chapterNumber)
-    .map((c) => `第${c.chapter_number}章「${c.title}」: ${c.summary}`)
-    .join('\n')
-
-  const prompt = `あなたはプロの小説家です。既存の章立てのうち、指定された 1 章だけを書き直してください。
-
-【作品情報】
-ジャンル: ${novel.genre}
-世界観・設定: ${novel.setting}
-章数: ${novel.num_chapters}
-
-【文体・視点】
-${styleInstruction}
-${extra ? `\n${extra}\n` : ''}
-【他の章 (固定。これらと整合する内容にする)】
-${otherChapters || '(なし — 全体が 1 章のみ)'}
-
-【書き直す章】
-第${chapterNumber}章「${target.title}」: ${target.summary}
-
-書き直し方針:
-- 章番号は ${chapterNumber} のまま。
-- 物語全体の流れを壊さないように、前後の章と矛盾しない内容にする。
-- 元のタイトルや要約に固執せず、異なる切り口・展開を提案して構わない。
-- summary は ${novel.outline_summary_chars} 字程度。${charactersInstruction}
-
-出力は以下の JSON 形式のみ:
-${exampleEntry}`
-
-  const text = await generateJsonText(env, model, prompt, 'regenerateOutlineChapter')
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    throw new Error(`regenerateOutlineChapter response is not valid JSON: ${text}`)
-  }
-  const validated = OutlineSchema.shape.chapters.element.safeParse(parsed)
-  if (!validated.success) {
-    throw new Error(`Outline-chapter response failed validation: ${JSON.stringify(validated.error.issues)}`)
-  }
-  // chapter_number はモデルが取り違える可能性があるので強制的に target に揃える。
-  // characters は実在キャスト名のみに正規化する。
-  return {
-    ...validated.data,
-    chapter_number: chapterNumber,
-    characters: normalizeChapterCharacters(validated.data.characters, cast)
-  }
+  return geminiGenerateJson(env, target.id, model, prompt, options)
 }
 
-export type StreamChapterUsage = {
-  model: string
-  promptTokens: number
-  outputTokens: number
-  totalTokens: number
+// ---------------------- ストリーム (本文) ----------------------
+
+export type StreamChapterUsage = UsageCounts & {
   // Gemini が報告する finishReason。'STOP' = 自然完了、それ以外 (MAX_TOKENS/SAFETY/RECITATION/OTHER) は
   // 途中で打ち切られたサインなので DO 側で警告として通知する。chunk が finishReason を送ってこなかった
   // 場合は 'STOP' として扱う (= 正常終了とみなす)。
   finishReason: string
 }
 
+// 送ったプロンプトは呼び出し側が持っている (保存用の文字列は renderPromptForStorage で作る) ので、ここでは返さない。
 export type StreamChapterResult = {
   stream: ReadableStream<Uint8Array>
   usage: Promise<StreamChapterUsage>
@@ -495,21 +238,14 @@ export type StreamChapterResult = {
   // stream 終了時に resolve される。拒否がなければ undefined。
   // 空出力時に DO 側がユーザーへ原因を提示するために使う。
   blockReason: Promise<string | undefined>
-  // Gemini に実際に送ったプロンプト全文 (同期的に確定済み)。
-  // DO が章本文と一緒に D1 へ保存し、フロントで確認できるようにする。
-  prompt: string
 }
 
 // Gemini のストリーム呼び出しの宛先と読み方。受信ループは OpenAI 互換と共通。
-function geminiStreamTarget(env: Env, id: string, ref: ModelRef, prompt: string): StreamTarget {
+function geminiStreamTarget(env: Env, id: string, ref: ModelRef, prompt: Prompt): StreamTarget {
   return {
     url: `${GEMINI_BASE}/${id}:streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`,
     headers: { 'Content-Type': 'application/json' },
-    body: {
-      contents: [{ parts: [{ text: prompt }] }],
-      safetySettings: SAFETY_SETTINGS_OFF,
-      generationConfig: { temperature: 0.9 }
-    },
+    body: buildGeminiBody({ kind: 'stream', prompt }),
     label: 'Gemini',
     parse: (chunk): ParsedChunk => ({
       text: extractText(chunk),
@@ -520,77 +256,14 @@ function geminiStreamTarget(env: Env, id: string, ref: ModelRef, prompt: string)
   }
 }
 
+// 組み立て済みのプロンプトで本文をストリーム生成する。
 export function streamChapter(env: Env, params: StreamChapterParams): StreamChapterResult {
   const model = resolveModel(env, params.model)
-
-  const { novel, outline, chapterNumber, previousChapters, targetChars, style, cast, relations } = params
-
-  const targetEntry: OutlineChapter | undefined = outline.chapters.find((c) => c.chapter_number === chapterNumber)
-  if (!targetEntry) {
-    throw new Error(`Chapter ${chapterNumber} not found in outline`)
-  }
-
-  const allChapterSummaries = outline.chapters
-    .map((c) => `第${c.chapter_number}章「${c.title}」: ${c.summary}`)
-    .join('\n')
-
-  const prevChaptersText =
-    previousChapters.length === 0
-      ? ''
-      : previousChapters
-          .slice(-2)
-          .map((c) => `【第${c.chapter_number}章 本文】\n${c.content}`)
-          .join('\n\n')
-
-  // 本文では結末指示を渡さない (章立て側に結末が織り込まれているため)。
-  const styleInstruction = buildStyleInstruction(style, false)
-
-  // 章立てに characters があれば、その章のキャストだけにキャスト詳細・関係を絞り込む。
-  // 関係は両端ともこの章に登場するペアだけ残す。characters が空 (旧 outline) なら全キャストを使う。
-  const allowed = targetEntry.characters.length > 0 ? new Set(targetEntry.characters) : undefined
-  const scopedCast = allowed && cast ? cast.filter((c) => allowed.has(c.name)) : cast
-  const scopedRelations =
-    allowed && relations ? relations.filter((r) => allowed.has(r.source_name) && allowed.has(r.target_name)) : relations
-
-  const castSection = buildCastSection(scopedCast)
-  const relationsSection = buildRelationsSection(scopedRelations)
-  const writingRules = buildWritingRules(scopedCast)
-  // notes は章立て生成時にのみ使う (outline.summary に既に振り分けが乗っているため、
-  // 本文生成では全体リストを再注入しない)。
-
-  // 結末への寄せ方は章の現在位置から自然に決まるはず (序盤=展開、終盤=収束、最終章=結末到達)。
-  // 過剰に「結末を温存せよ/直接示せ」と指示せず、進行度だけ渡してモデルに任せる。
-  const totalChapters = Math.max(...outline.chapters.map((c) => c.chapter_number))
-  const positionLine = `現在執筆中: 第${chapterNumber}章 / 全${totalChapters}章`
-
-  const sections: string[] = [
-    `【作品情報】\nジャンル: ${novel.genre}\n世界観・設定: ${novel.setting}`,
-    `【文体・視点】\n${styleInstruction}`,
-    castSection,
-    relationsSection,
-    writingRules,
-    `【全体の章立て（概要）】\n${allChapterSummaries}`,
-    prevChaptersText ? `【直前の章の本文（参考）】\n${prevChaptersText}` : '',
-    `【執筆位置】\n${positionLine}`,
-    `【執筆対象】\n第${chapterNumber}章「${targetEntry.title}」\n概要: ${targetEntry.summary}`
-  ].filter((s) => s.length > 0)
-
-  const prompt = `あなたはプロの小説家です。以下の設定と章立てに基づいて、指定された章の本文を執筆してください。
-
-${sections.join('\n\n')}
-
-上記の概要に沿って、第${chapterNumber}章の本文を執筆してください。
-本文は日本語で約${targetChars}文字を目安に執筆してください。
-登場キャラクター詳細を与えた場合は、各キャラの「口調の例」と「他者の呼び方」「関係」を必ずセリフに反映してください。
-ただし、キャラクター間の関係に記載があっても、章立て（全体の章立て・本章の概要）に登場しないキャラクターは本章に登場させないでください。
-文章は読者を引き込む描写を心がけ、登場人物の心情や情景を丁寧に描いてください。
-本文のみを出力し、章番号やタイトルは含めないでください。`
-
   const modelTarget = parseModelRef(model)
   const target =
     modelTarget.provider === 'openai'
-      ? openaiStreamTarget(env, model, modelTarget.id, prompt)
-      : geminiStreamTarget(env, modelTarget.id, model, prompt)
+      ? openaiStreamTarget(env, model, modelTarget.id, params.prompt)
+      : geminiStreamTarget(env, modelTarget.id, model, params.prompt)
 
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
   const writer = writable.getWriter()
@@ -610,7 +283,8 @@ ${sections.join('\n\n')}
 
   // 上流が無応答でハングすると DO が永久に「生成中」のままになるので、接続〜チャンク間の
   // 無応答に上限を設ける。チャンク受信ごとにタイマーを張り直し、超過したら fetch を abort する。
-  const STALL_TIMEOUT_MS = 90_000
+  // 既出の章を全文で渡すので入力が大きく、思考するモデルでは最初のチャンクまでが長い。それを打ち切らない長さにする。
+  const STALL_TIMEOUT_MS = 180_000
   // 一時的な過負荷 (429/5xx) や接続失敗は数回までバックオフして再接続を試みる (本文受信前のみ)。
   const MAX_CONNECT_ATTEMPTS = 3
   const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])
@@ -755,17 +429,26 @@ ${sections.join('\n\n')}
     }
   })
 
-  return { stream: readable, usage, blockReason, prompt }
+  return { stream: readable, usage, blockReason }
 }
 
-function extractUsage(chunk: unknown, model: ModelRef): Omit<StreamChapterUsage, 'finishReason'> | undefined {
+// 応答 (ストリームの 1 チャンク、または非ストリームの応答全体) から usage を取り出す。
+// 出力トークンは本文と思考の合計 (どちらも出力単価で課金される)。
+export function extractUsage(chunk: unknown, model: ModelRef): UsageCounts | undefined {
   const parsed = GeminiResponseSchema.safeParse(chunk)
   if (!parsed.success) return undefined
-  const meta = parsed.data.usageMetadata
-  if (!meta) return undefined
-  const promptTokens = meta.promptTokenCount ?? 0
-  const outputTokens = meta.candidatesTokenCount ?? 0
-  const totalTokens = meta.totalTokenCount ?? promptTokens + outputTokens
+  return usageFromMetadata(parsed.data.usageMetadata, model)
+}
+
+function tokenCount(value: number | undefined): number {
+  return value === undefined ? 0 : value
+}
+
+function usageFromMetadata(meta: GeminiUsageMetadata | undefined, model: ModelRef): UsageCounts | undefined {
+  if (meta === undefined) return undefined
+  const promptTokens = tokenCount(meta.promptTokenCount)
+  const outputTokens = tokenCount(meta.candidatesTokenCount) + tokenCount(meta.thoughtsTokenCount)
+  const totalTokens = meta.totalTokenCount === undefined ? promptTokens + outputTokens : meta.totalTokenCount
   return { model, promptTokens, outputTokens, totalTokens }
 }
 

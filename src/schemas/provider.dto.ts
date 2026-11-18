@@ -47,7 +47,11 @@ export type ModelCatalog = z.infer<typeof ModelCatalogSchema>
 export const UpstreamModelSchema = z.object({
   id: z.string().nonempty(),
   owned_by: z.string().nonempty().optional(),
-  context_window: z.number().int().positive().optional(),
+  // 入力の上限 (トークン)。項目名はサーバーごとに違う (多くは context_window、OpenRouter は context_length、vLLM は max_model_len)。
+  // null や小数が入っていてもモデルごと捨てないよう、型は問わずに受ける。使う値は openai/models.ts の contextWindowOf が選ぶ。
+  context_window: z.unknown().optional(),
+  context_length: z.unknown().optional(),
+  max_model_len: z.unknown().optional(),
   pricing: z
     .object({
       input: z.number().nonnegative(),

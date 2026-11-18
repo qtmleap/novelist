@@ -1,5 +1,12 @@
 import { z } from 'zod'
 import type { AvailableModel, Provider } from '@/schemas/provider.dto'
+import {
+  ChapterRecordSchema,
+  ChapterReviewSchema,
+  ChapterStalenessSchema,
+  StoryBibleSchema,
+  StoryThreadSchema
+} from '@/schemas/story.dto'
 
 // 1 章あたりの目標文字数 (新規作成フォームのプリセット)。Novel ごとに保持し、
 // 本文生成時にサーバーがプロンプトと maxOutputTokens に反映する。
@@ -20,6 +27,19 @@ export const DEFAULT_TONE = '一般文芸'
 // 想定年齢 (= 年齢指定)。生成プロンプトの表現強度に反映する。
 export const AGE_RATING_OPTIONS = ['全年齢', 'R15', 'R18'] as const
 export const DEFAULT_AGE_RATING = '全年齢'
+// 書き込み側 (CreateNovelSchema) は選択肢の 3 値だけを受ける。成人指定 (R15/R18) の検証と、プロンプトの年齢指定の行は
+// この 3 値を前提にしているので、'R18G' や 'r18' のような知らない値を保存させると、どちらも外れてしまう。
+export const AgeRatingSchema = z.enum(AGE_RATING_OPTIONS)
+export type AgeRating = z.infer<typeof AgeRatingSchema>
+
+// 既に保存されている値 (API の応答の age_rating は string) を、書き込み側の型に寄せる。
+// 知らない値は、内容の制限がいちばん強い全年齢として扱う。前後の空白や大文字・小文字は寄せない:
+// 寄せると「R18 として扱う」範囲が広がり、意図しない値が成人向けの扱いになるため。
+export function normalizeAgeRating(value: string): AgeRating {
+  const parsed = AgeRatingSchema.safeParse(value)
+  // 既定値 (DEFAULT_AGE_RATING) ではなく全年齢を直接書く。既定値を変えても、知らない値が成人向けの扱いにならないように。
+  return parsed.success ? parsed.data : '全年齢'
+}
 // 語り手(視点キャラ)を指定できる POV。一人称 / 三人称一元視点 のとき pov_character_id が有効。
 export const FOCAL_POVS: readonly string[] = ['一人称', '三人称一元視点']
 
@@ -225,10 +245,12 @@ export const CreateNovelSchema = z.object({
   outline_summary_chars: z.number().int().min(100).max(2000).default(DEFAULT_OUTLINE_SUMMARY_CHARS),
   pov: z.string().max(30).default(DEFAULT_POV),
   tone: z.string().max(30).default(DEFAULT_TONE),
-  age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
+  age_rating: AgeRatingSchema.default(DEFAULT_AGE_RATING),
   ending: z.string().max(30).default(DEFAULT_ENDING),
   // プロンプトに追加で混ぜる自由記述 (口調の傾向、固有名詞表記、避けたい展開など)
   notes: z.string().max(2000).default(''),
+  // 執筆上の指示 (表記の決まり、避けたい展開など)。notes と違い、章立てと本文の両方に渡す。
+  writing_notes: z.string().max(2000).default(''),
   // novel 単位の AI モデル。新規作成時は端末の設定 (localStorage) からコピー、編集時は既存値。
   // DB も NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値が入っている前提。
   editor_model: ModelRefSchema,
@@ -287,7 +309,19 @@ export const OutlineChapterSchema = z.object({
   title: z.string(),
   summary: z.string(),
   // その章に登場するキャラクター名 (正規のキャスト名と一致)。未生成の旧 outline は空配列。
-  characters: z.array(z.string()).default([])
+  characters: z.array(z.string()).default([]),
+  // ここから下は章の計画。この項目より前に作られた章立てには無いので、すべて既定値つき。
+  // 上限は保存してよい大きさ。モデルの出力は検証の前にコードで切り詰める。
+  // その章で起きる出来事 (起きる順に 3〜6 個)
+  events: z.array(z.string().nonempty().max(1000)).max(20).default([]),
+  // 時と場所
+  time_place: z.string().max(1000).default(''),
+  // 章末の状況 (誰がどこでどういう状態か)
+  end_state: z.string().max(2000).default(''),
+  // この章で張る伏線 (id は章立ての中で一意)
+  setups: z.array(StoryThreadSchema).max(30).default([]),
+  // この章で回収する伏線の id (それより前の章の setups にあるもの)
+  payoffs: z.array(z.string().nonempty().max(40)).max(30).default([])
 })
 export type OutlineChapter = z.infer<typeof OutlineChapterSchema>
 
@@ -306,7 +340,13 @@ export const ChapterSchema = z.object({
   chapter_number: z.number().int().min(1),
   title: z.string().nullable(),
   content: z.string(),
-  created_at: z.string()
+  created_at: z.string(),
+  // 本文から抽出した記録。抽出の失敗や、この機能より前の章は null。
+  record: ChapterRecordSchema.nullable().default(null),
+  // 上流 (章立て、前の章) が変わって「要再生成」か。
+  staleness: ChapterStalenessSchema.default({ stale: false, reasons: [] }),
+  // 検査の結果。未検査は null。
+  review: ChapterReviewSchema.nullable().default(null)
 })
 export type Chapter = z.infer<typeof ChapterSchema>
 
@@ -318,7 +358,9 @@ export const ChapterVersionSchema = z.object({
   content: z.string(),
   // プロンプト保存機能より前に生成された version は null。
   prompt: z.string().nullable(),
-  created_at: z.string()
+  created_at: z.string(),
+  record: ChapterRecordSchema.nullable().default(null),
+  review: ChapterReviewSchema.nullable().default(null)
 })
 export type ChapterVersion = z.infer<typeof ChapterVersionSchema>
 
@@ -336,6 +378,7 @@ export const NovelSchema = z.object({
   pov_character_id: z.string(),
   ending: z.string(),
   notes: z.string(),
+  writing_notes: z.string().max(2000).default(''),
   // DB は NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値だが、
   // 既知の enum 以外も将来に向けて受けられるよう output schema は string で持つ。
   // フォーム入力 (CreateNovelSchema) 側は厳密に ModelRefSchema を要求している。
@@ -398,8 +441,15 @@ export const NovelWithChaptersSchema = NovelSchema.extend({
   cast: z.array(NovelCastMemberSchema).default([]),
   relations: z.array(NovelRelationSchema).default([]),
   generation_costs: z.array(ChapterCostSchema).default([]),
+  // 本文の合計 (各章の最新の生成だけ)
   total_cost_usd: z.number().default(0),
-  gen_job: NovelGenerationJobSchema.nullable().default(null)
+  // 本文以外 (章立て、作品設計、記録の抽出、検査) の合計。作り直した分も含めた全回数ぶん
+  aux_cost_usd: z.number().default(0),
+  gen_job: NovelGenerationJobSchema.nullable().default(null),
+  // 作品設計。未作成は null。
+  bible: StoryBibleSchema.nullable().default(null),
+  // 作品設計を作った後に、その入力 (あらすじ、登場人物、関係など) が変わったか。
+  bible_outdated: z.boolean().default(false)
 })
 export type NovelWithChapters = z.infer<typeof NovelWithChaptersSchema>
 
@@ -412,12 +462,23 @@ export type NovelSummary = Novel
 //   { delta: string }                                  生成テキストの増分
 //   { done: true, chapterId: string, title: string }   完了 (この時点で D1 保存済み)
 //   { error: string }                                  生成失敗
+//   { stage: ChapterStage }                            段階の切り替わり (接続の直後にも現在の段階を 1 回送る)
 // フロントの src/lib/stream.ts がこれをパースする。
+
+// 章の生成の段階。本文が流れてくるのは writing の間だけなので、その前後に何をしているかを画面に出すために送る。
+//   context    資料の準備 (既出の章の読み込み、古い章の記録の抽出)
+//   writing    本文の執筆
+//   recording  書いた章の記録の抽出
+//   reviewing  検査 (done の後に走る。購読を続けている画面だけが受け取る)
+export const CHAPTER_STAGES = ['context', 'writing', 'recording', 'reviewing'] as const
+export const ChapterStageSchema = z.enum(CHAPTER_STAGES)
+export type ChapterStage = z.infer<typeof ChapterStageSchema>
 
 export const ChapterStreamEventSchema = z.union([
   z.object({ delta: z.string() }),
   z.object({ done: z.literal(true), chapterId: z.string(), title: z.string() }),
-  z.object({ error: z.string() })
+  z.object({ error: z.string() }),
+  z.object({ stage: ChapterStageSchema })
 ])
 export type ChapterStreamEvent = z.infer<typeof ChapterStreamEventSchema>
 
@@ -426,6 +487,20 @@ export const GenerateOptionsSchema = z.object({
   model: ModelRefSchema.optional()
 })
 export type GenerateOptions = z.infer<typeof GenerateOptionsSchema>
+
+// 本文の生成の body。instruction が空でなければ「指示つきの書き直し」:
+// base_version_id の版 (空なら最新の版) を元に、指示された箇所だけを直した全文を新しい version として作る。
+export const GenerateChapterOptionsSchema = GenerateOptionsSchema.extend({
+  instruction: z.string().max(2000).default(''),
+  base_version_id: z.string().max(64).default('')
+})
+export type GenerateChapterOptions = z.infer<typeof GenerateChapterOptionsSchema>
+
+// Novel.bible に保存する形。source_hash は作った時点の入力のハッシュ (API には出さず、bible_outdated の判定に使う)。
+export const StoredBibleSchema = StoryBibleSchema.extend({
+  source_hash: z.string().max(64).default('')
+})
+export type StoredBible = z.infer<typeof StoredBibleSchema>
 
 // outline 生成時のみ使える追加オプション: 章の指定セットだけ (既存 outline ありの場合のみ意味を持つ)。
 export const GenerateOutlineOptionsSchema = GenerateOptionsSchema.extend({

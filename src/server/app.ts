@@ -1,6 +1,7 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
+import type { PrismaClient } from '@/generated/prisma/client'
 import {
   createCharacter,
   createVariant,
@@ -11,16 +12,38 @@ import {
   updateCharacter,
   updateVariant
 } from '@/lib/character/repository'
-import { getEnv, getPrisma } from '@/lib/db'
-import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
+import { type Env, getEnv, getPrisma } from '@/lib/db'
+import {
+  adultBibleIssues,
+  type BibleEffects,
+  bibleBlocker,
+  bibleOutdated,
+  createBibleFlow,
+  currentBibleHash,
+  generateOutlineFlow,
+  normalizeBible,
+  notesBlocker,
+  type OutlineFlowInput,
+  outlinePromptInput,
+  prepareBibleFlow,
+  regenerateOutlineChapters,
+  toStoryBible
+} from '@/lib/novel/assist'
 import {
   buildCastForGemini,
-  buildChapterPayload,
   buildRelationsForGemini,
+  type GenerationStart,
+  jsonCaller,
+  prepareGenerationStart,
+  recordCostsBestEffort,
+  revisionInstruction,
   viewpointCharFor
-} from '@/lib/novel/chapter-payload'
+} from '@/lib/novel/chapter-context'
+import { normalizeOutlineCharacters, sortOutline, validateThreads } from '@/lib/novel/outline'
+import { buildOutlinePrompt, renderPromptForStorage } from '@/lib/novel/prompts'
 import {
   arrangeNovels,
+  chapterStaleness,
   createCategory,
   createNovel,
   deleteCategory,
@@ -30,10 +53,12 @@ import {
   listCategories,
   listChapterVersions,
   listNovels,
+  outlineStamps,
   renameCategory,
   reorderCategories,
+  saveBible,
   saveNovelCast,
-  saveOutline,
+  saveOutlineWithStamps,
   stopGenerationJob,
   updateNovel,
   upsertGenerationJob
@@ -44,6 +69,8 @@ import {
   ArrangeNovelsSchema,
   CreateCategorySchema,
   CreateNovelSchema,
+  FOCAL_POVS,
+  GenerateChapterOptionsSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   type ModelRef,
@@ -52,10 +79,60 @@ import {
   ReorderSchema,
   SaveCastSchema
 } from '@/schemas/novel.dto'
+import { StoryBibleSchema } from '@/schemas/story.dto'
 import { readAuthEmail, requireAuth } from '@/server/auth'
 
 // 本文生成でモデル指定が無かったときの既定。
 const DEFAULT_CHAPTER_MODEL: ModelRef = 'gemini-2.5-flash'
+
+type NovelWithChapters = NonNullable<Awaited<ReturnType<typeof getNovelWithChapters>>>
+
+// 章立ての生成・書き直し・プレビューに渡す資料。
+// alwaysInclude は語り手: 視点人物を指定できる視点 (一人称 / 三人称一元視点) で、視点人物が居るときだけ。
+function outlineFlowInput(novel: NovelWithChapters): OutlineFlowInput {
+  const viewpointChar = viewpointCharFor(novel.character_links, novel.pov_character_id)
+  return {
+    novel: {
+      title: novel.title,
+      genre: novel.genre,
+      setting: novel.setting,
+      num_chapters: novel.num_chapters,
+      outline_summary_chars: novel.outline_summary_chars,
+      notes: novel.notes
+    },
+    style: {
+      pov: novel.pov,
+      tone: novel.tone,
+      age_rating: novel.age_rating,
+      ending: novel.ending,
+      viewpointChar
+    },
+    cast: buildCastForGemini(novel.character_links),
+    relations: buildRelationsForGemini(novel.relations),
+    alwaysInclude: viewpointChar !== undefined && FOCAL_POVS.includes(novel.pov) ? [viewpointChar.name] : [],
+    bible: novel.bible === null ? null : toStoryBible(novel.bible),
+    bibleUnreadable: novel.bible_unreadable
+  }
+}
+
+// 章立ての生成とプレビューで、利用者の指示の欄 (執筆上の指示、備考) を理由に止める文。止めなければ null。
+// 成人指定で、指示の欄に未成年を指す語があるとき (作品設計の有無に関係なく検査する)。
+function outlineNotesBlocker(novel: NovelWithChapters, input: OutlineFlowInput): string | null {
+  return notesBlocker({ style: input.style, writingNotes: novel.writing_notes, notes: novel.notes })
+}
+
+// 生成の開始を止めるときの応答の本文。
+function startErrorBody(start: Exclude<GenerationStart, { ok: true }>): { error: string; detail?: string } {
+  return start.status === 404 ? { error: start.error } : { error: start.error, detail: start.detail }
+}
+
+// 作品設計の保存先とコストの記録先 (kind: 'bible'、chapter_number 0)。
+function bibleEffects(prisma: PrismaClient, env: Env, novelId: string): BibleEffects {
+  return {
+    save: (stored) => saveBible(prisma, novelId, stored),
+    recordUsages: (usages) => recordCostsBestEffort(prisma, env, { novelId, chapterNumber: 0, kind: 'bible' }, usages)
+  }
+}
 
 // 章番号を含むルートの param。z.coerce で文字列 → 数値に変換・検証するので
 // ハンドラ側で Number.parseInt や NaN チェックを書かなくてよい (不正なら zValidator が 400)。
@@ -78,6 +155,7 @@ function serializeNovel(n: {
   pov_character_id: string
   ending: string
   notes: string
+  writing_notes: string
   editor_model: string
   writer_model: string
   outline: string | null
@@ -100,6 +178,7 @@ function serializeNovel(n: {
     pov_character_id: n.pov_character_id,
     ending: n.ending,
     notes: n.notes,
+    writing_notes: n.writing_notes,
     editor_model: n.editor_model,
     writer_model: n.writer_model,
     // DB の JSON 文字列をパース・検証してオブジェクトで返す。未生成 (null) や壊れた JSON は null。
@@ -263,6 +342,8 @@ export const app = new Hono()
     try {
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
+      // 各章の鮮度 (章立てが変わった、前の章が作り直された)。判定できない章 (この機能より前の章) は stale にならない。
+      const staleness = chapterStaleness(novel.chapters, parseStoredOutline(novel.outline))
       return c.json({
         ...serializeNovel(novel),
         written_chars: novel.chapters.reduce((sum, ch) => sum + ch.content.length, 0),
@@ -272,12 +353,20 @@ export const app = new Hono()
           chapter_number: ch.chapter_number,
           title: ch.title,
           content: ch.content,
-          created_at: ch.created_at.toISOString()
+          created_at: ch.created_at.toISOString(),
+          record: ch.record,
+          staleness: staleness.get(ch.chapter_number),
+          review: ch.review
         })),
         cast: novel.cast,
         relations: novel.relations,
         generation_costs: novel.generation_costs,
         total_cost_usd: novel.total_cost_usd,
+        aux_cost_usd: novel.aux_cost_usd,
+        // 作品設計 (source_hash は出さない) と、作成後に入力が変わったか
+        bible: novel.bible === null ? null : toStoryBible(novel.bible),
+        // 保存値が読めない作品設計も、作り直すか確かめてもらうために true にする (bible は null のまま返す)
+        bible_outdated: novel.bible_unreadable || bibleOutdated(novel.bible, outlineFlowInput(novel)),
         gen_job: novel.generation_job
           ? (() => {
               const parsed: unknown = JSON.parse(novel.generation_job.pending)
@@ -339,6 +428,50 @@ export const app = new Hono()
     }
   })
 
+  // 作品設計を作り直して保存する。章立てや本文は作り直さない (消しもしない)。
+  // 失敗 (成人指定の条件を満たさない場合を含む) は 502。detail に理由。
+  .post('/novels/:id/bible', requireAuth, zValidator('json', GenerateOptionsSchema), async (c) => {
+    const id = c.req.param('id')
+    const options = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      const novel = await getNovelWithChapters(prisma, id)
+      if (!novel) return c.json({ error: 'not_found' }, 404)
+      const env = getEnv()
+      const model = options.model !== undefined ? options.model : novel.editor_model
+      const result = await createBibleFlow(
+        jsonCaller(env, model),
+        outlineFlowInput(novel),
+        bibleEffects(prisma, env, id)
+      )
+      if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
+      return c.json({ bible: result.bible })
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+
+  // 作品設計の手動の保存。呼称表は名簿と関係に照らして整え、全年齢では人物設定を持たない (生成と同じ整え方)。
+  // 成人指定で人物設定が条件を満たさなければ 400 invalid_bible (detail に理由)。
+  // 保存時のハッシュは今の入力のもの (手で直した時点の入力に合わせた、とみなす)。
+  .put('/novels/:id/bible', requireAuth, zValidator('json', z.object({ bible: StoryBibleSchema })), async (c) => {
+    const id = c.req.param('id')
+    const body = c.req.valid('json')
+    const prisma = getPrisma()
+    try {
+      const novel = await getNovelWithChapters(prisma, id)
+      if (!novel) return c.json({ error: 'not_found' }, 404)
+      const input = outlineFlowInput(novel)
+      const bible = normalizeBible(body.bible, input)
+      const issues = adultBibleIssues(bible, input)
+      if (issues.length > 0) return c.json({ error: 'invalid_bible', detail: issues.join('、') }, 400)
+      await saveBible(prisma, id, { ...bible, source_hash: currentBibleHash(input) })
+      return c.json({ bible })
+    } finally {
+      await prisma.$disconnect()
+    }
+  })
+
   .post('/novels/:id/outline', requireAuth, zValidator('json', GenerateOutlineOptionsSchema), async (c) => {
     const id = c.req.param('id')
     const options = c.req.valid('json')
@@ -348,108 +481,106 @@ export const app = new Hono()
       if (!novel) return c.json({ error: 'not_found' }, 404)
 
       const env = getEnv()
-      const style = {
-        pov: novel.pov,
-        tone: novel.tone,
-        age_rating: novel.age_rating,
-        ending: novel.ending,
-        viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-      }
-      const cast = buildCastForGemini(novel.character_links)
-      const relations = buildRelationsForGemini(novel.relations)
-
-      const params = {
-        title: novel.title,
-        genre: novel.genre,
-        setting: novel.setting,
-        num_chapters: novel.num_chapters,
-        outline_summary_chars: novel.outline_summary_chars,
-        notes: novel.notes
-      }
+      const input = outlineFlowInput(novel)
+      const call = jsonCaller(env, options.model)
 
       // 既存 outline がある + chapters[] 指定 (かつ全章ではない) → 部分再生成。
       // それ以外 (= 初回 / 指定なし / 全章指定) → 全章まとめて生成 (Worker のタイムアウト回避)。
-      const existing = novel.outline ? OutlineSchema.safeParse(JSON.parse(novel.outline)) : null
-      const targets = options.chapters?.filter((n) => n >= 1 && n <= novel.num_chapters)
-      const canPartial =
-        existing?.success === true && targets !== undefined && targets.length > 0 && targets.length < novel.num_chapters
+      // 同じ章を 2 回書き直さないよう、重複を除いて番号順にする。
+      const existing = parseStoredOutline(novel.outline)
+      const targets = [...new Set(options.chapters.filter((n) => n >= 1 && n <= novel.num_chapters))].sort(
+        (a, b) => a - b
+      )
+      const partial = targets.length > 0 && targets.length < novel.num_chapters
+      const generated = novel.outline !== null && novel.outline.length > 0
 
-      try {
-        if (canPartial && existing.success) {
-          // 既存の outline を保持しつつ、選択された章だけ生成し直してマージする。
-          // 各章本文も整合性のため削除する (per-chapter outline regen と同じルール)。
-          let merged = existing.data
-          for (const n of targets) {
-            const next = await regenerateOutlineChapter(env, params, style, merged, n, options.model, cast, relations)
-            merged = {
-              chapters: merged.chapters.map((ch) => (ch.chapter_number === n ? next : ch))
-            }
-            // 章番号が outline に存在しなかった場合は末尾に追加。
-            if (!merged.chapters.some((ch) => ch.chapter_number === n)) {
-              merged = { chapters: [...merged.chapters, next].sort((a, b) => a.chapter_number - b.chapter_number) }
-            }
-            await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: n } })
-          }
-          await saveOutline(prisma, id, JSON.stringify(merged))
-          return c.json({ outline: merged })
-        }
+      // 章を選んだ書き直しなのに、保存済みの章立てが解釈できない。全章の生成に切り替えると
+      // 選んでいない章まで作り直し、全本文を消してしまうので、何もせずエラーにする (POST /outline/:number と同じ扱い)。
+      if (partial && generated && existing === null) return c.json({ error: 'invalid_outline' }, 500)
 
-        // 全章まとめて生成。既存本文は無効化されるので全削除。
-        const outline = await generateOutline(env, params, style, options.model, cast, relations)
-        await saveOutline(prisma, id, JSON.stringify(outline))
-        await prisma.chapter.deleteMany({ where: { novel_id: id } })
-        return c.json({ outline })
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        return c.json({ error: 'generation_failed', detail: msg }, 502)
+      // 指示の欄で止めるなら、作品設計を作る (費用がかかる) より前に止める。
+      const notes = outlineNotesBlocker(novel, input)
+      if (notes !== null) return c.json({ error: 'invalid_notes', detail: notes }, 400)
+
+      // 作品設計が無ければ先に作る (章立ては作品設計を入力に取る)。モデルは章立てと同じ (指定が無ければ editor_model)。
+      const bible = await prepareBibleFlow(
+        jsonCaller(env, options.model !== undefined ? options.model : novel.editor_model),
+        input,
+        bibleEffects(prisma, env, id)
+      )
+      if (!bible.ok) return c.json({ error: bible.error, detail: bible.detail }, bible.status)
+      const planned: OutlineFlowInput = { ...input, bible: bible.bible }
+
+      if (partial && existing !== null) {
+        // 既存の outline を保持しつつ、選択された章だけ生成し直してマージする。
+        // 後の章で失敗しても、それまでに払った分は残るよう章ごとにすぐ記録する。
+        const result = await regenerateOutlineChapters(call, planned, existing, targets, (n, usages) =>
+          recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: n, kind: 'outline' }, usages)
+        )
+        if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
+        // 本文は消さない。章立てが変わった章は鮮度の判定で「要再生成」になる。
+        await saveOutlineWithStamps(prisma, id, JSON.stringify(result.outline), outlineStamps(novel.chapters, existing))
+        return c.json({ outline: result.outline, warnings: result.warnings })
       }
+
+      // 全章まとめて生成。本文は消さない (章立てが変わった章は「要再生成」になる)。
+      // 失敗した回もトークンは課金されているので、成否にかかわらず記録する。
+      const result = await generateOutlineFlow(call, planned)
+      await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: 0, kind: 'outline' }, result.usages)
+      if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
+      const outline = sortOutline(result.outline)
+      await saveOutlineWithStamps(prisma, id, JSON.stringify(outline), outlineStamps(novel.chapters, existing))
+      return c.json({ outline, warnings: result.warnings })
     } finally {
       await prisma.$disconnect()
     }
   })
 
-  // 章立ての手動編集。AI 生成ではなくユーザーが直接 title/summary を書き換える経路。
+  // 章立ての手動編集。AI 生成ではなくユーザーが直接 title/summary/characters を書き換える経路。
   // 既存章本文には触らない (本文と outline がズレた場合は別途章本文を再生成する想定)。
+  // 登場人物は名簿の正式名に揃え、照合できない名前は外して警告で返す。
+  // 語り手は足さない (利用者が外した人物を勝手に戻さないため)。
   .put('/novels/:id/outline', requireAuth, zValidator('json', z.object({ outline: OutlineSchema })), async (c) => {
     const id = c.req.param('id')
     const { outline } = c.req.valid('json')
     const prisma = getPrisma()
     try {
-      const existing = await prisma.novel.findUnique({ where: { id }, select: { id: true } })
-      if (!existing) return c.json({ error: 'not_found' }, 404)
-      await saveOutline(prisma, id, JSON.stringify(outline))
-      return c.json({ outline })
+      const novel = await getNovelWithChapters(prisma, id)
+      if (!novel) return c.json({ error: 'not_found' }, 404)
+      const castNames = buildCastForGemini(novel.character_links).map((member) => member.name)
+      // 名簿が無い作品では characters をそのまま残す (normalizeOutlineCharacters は全章で空にするため)。
+      const normalized =
+        castNames.length > 0 ? normalizeOutlineCharacters(outline, castNames) : { outline, warnings: [] }
+      // 伏線は検証・修復して保存する (回収の id が前の章の伏線に無ければ外す、など)。
+      const threads = validateThreads(sortOutline(normalized.outline))
+      // 手で直した章も、生成と同じく鮮度の判定に乗せる (この機能より前の章に、変更前の章立てのハッシュを書く)。
+      await saveOutlineWithStamps(
+        prisma,
+        id,
+        JSON.stringify(threads.outline),
+        outlineStamps(novel.chapters, parseStoredOutline(novel.outline))
+      )
+      return c.json({ outline: threads.outline, warnings: [...normalized.warnings, ...threads.warnings] })
     } finally {
       await prisma.$disconnect()
     }
   })
 
-  // 章立て生成プロンプトのプレビュー (Gemini に投げる前の文字列を返す。デバッグ用)
+  // 章立て生成プロンプトのプレビュー (LLM に投げる前の文字列を返す。デバッグ用)
   .get('/novels/:id/outline/preview', async (c) => {
     const id = c.req.param('id')
     const prisma = getPrisma()
     try {
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
-
-      const style = {
-        pov: novel.pov,
-        tone: novel.tone,
-        age_rating: novel.age_rating,
-        ending: novel.ending,
-        viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-      }
-      const cast = buildCastForGemini(novel.character_links)
-      const relations = buildRelationsForGemini(novel.relations)
-      const params = {
-        title: novel.title,
-        genre: novel.genre,
-        setting: novel.setting,
-        num_chapters: novel.num_chapters,
-        outline_summary_chars: novel.outline_summary_chars,
-        notes: novel.notes
-      }
-      const prompt = buildOutlinePrompt(params, style, cast, relations)
+      // 保存済みの作品設計があれば入れる (無ければ、生成時に先に作られる)。
+      // 成人指定で作品設計が検証に落ちる・読めないときは、その人物設定を含むプロンプトを組み立てて返さない。
+      const input = outlineFlowInput(novel)
+      const blocked = bibleBlocker(input)
+      if (blocked !== null) return c.json({ error: 'invalid_bible', detail: blocked }, 400)
+      const notes = outlineNotesBlocker(novel, input)
+      if (notes !== null) return c.json({ error: 'invalid_notes', detail: notes }, 400)
+      const prompt = renderPromptForStorage(buildOutlinePrompt(outlinePromptInput(input)))
       return c.json({ prompt })
     } finally {
       await prisma.$disconnect()
@@ -486,7 +617,9 @@ export const app = new Hono()
           title: v.title,
           content: v.content,
           prompt: v.prompt,
-          created_at: v.created_at.toISOString()
+          created_at: v.created_at.toISOString(),
+          record: v.record,
+          review: v.review
         }))
       )
     } finally {
@@ -507,51 +640,38 @@ export const app = new Hono()
         const novel = await getNovelWithChapters(prisma, id)
         if (!novel) return c.json({ error: 'not_found' }, 404)
         if (!novel.outline) return c.json({ error: 'outline_not_generated' }, 400)
+        // 章数を超える章を足すと、章立ての章数が作品の章数と合わなくなる。
+        if (chapterNumber > novel.num_chapters) return c.json({ error: 'chapter_out_of_range' }, 400)
 
         const parsedOutline = OutlineSchema.safeParse(JSON.parse(novel.outline))
         if (!parsedOutline.success) return c.json({ error: 'invalid_outline' }, 500)
 
         const env = getEnv()
-        const style = {
-          pov: novel.pov,
-          tone: novel.tone,
-          age_rating: novel.age_rating,
-          ending: novel.ending,
-          viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-        }
-        const cast = buildCastForGemini(novel.character_links)
-        const relations = buildRelationsForGemini(novel.relations)
-
-        try {
-          const next = await regenerateOutlineChapter(
-            env,
-            {
-              title: novel.title,
-              genre: novel.genre,
-              setting: novel.setting,
-              num_chapters: novel.num_chapters,
-              outline_summary_chars: novel.outline_summary_chars,
-              notes: novel.notes
-            },
-            style,
-            parsedOutline.data,
-            chapterNumber,
-            options.model,
-            cast,
-            relations
-          )
-          const merged = {
-            chapters: parsedOutline.data.chapters.map((ch) => (ch.chapter_number === chapterNumber ? next : ch))
-          }
-          await saveOutline(prisma, id, JSON.stringify(merged))
-          // 章立て (タイトル・要約) と本文がずれた状態は混乱の元なので、
-          // 章立てを上書きしたらこの章の本文も全 version 削除する。
-          await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
-          return c.json({ outline: merged })
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          return c.json({ error: 'generation_failed', detail: msg }, 502)
-        }
+        const input = outlineFlowInput(novel)
+        const notes = outlineNotesBlocker(novel, input)
+        if (notes !== null) return c.json({ error: 'invalid_notes', detail: notes }, 400)
+        const bible = await prepareBibleFlow(
+          jsonCaller(env, options.model !== undefined ? options.model : novel.editor_model),
+          input,
+          bibleEffects(prisma, env, id)
+        )
+        if (!bible.ok) return c.json({ error: bible.error, detail: bible.detail }, bible.status)
+        const result = await regenerateOutlineChapters(
+          jsonCaller(env, options.model),
+          { ...input, bible: bible.bible },
+          parsedOutline.data,
+          [chapterNumber],
+          (n, usages) => recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: n, kind: 'outline' }, usages)
+        )
+        if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
+        // 本文は消さない。章立てが変わった章は鮮度の判定で「要再生成」になる。
+        await saveOutlineWithStamps(
+          prisma,
+          id,
+          JSON.stringify(result.outline),
+          outlineStamps(novel.chapters, parsedOutline.data)
+        )
+        return c.json({ outline: result.outline, warnings: result.warnings })
       } finally {
         await prisma.$disconnect()
       }
@@ -565,23 +685,27 @@ export const app = new Hono()
     '/novels/:id/chapters/:number/generate',
     requireAuth,
     zValidator('param', ChapterParamSchema),
-    zValidator('json', GenerateOptionsSchema),
+    zValidator('json', GenerateChapterOptionsSchema),
     async (c) => {
       const { id, number: chapterNumber } = c.req.valid('param')
       const options = c.req.valid('json')
       const prisma = getPrisma()
-      let payload: import('@/lib/chapter-gen-do').StartChapterGenPayload | null
-      try {
-        payload = await buildChapterPayload(
-          prisma,
-          id,
-          chapterNumber,
-          options.model !== undefined ? options.model : DEFAULT_CHAPTER_MODEL
-        )
-      } finally {
-        await prisma.$disconnect()
-      }
-      if (!payload) return c.json({ error: 'not_found' }, 404)
+      // instruction が空でなければ、指示つきの書き直し (base_version_id の版、空ならその章の最新の版を元にする)。
+      // 書き直しでも、通常の生成と同じ検証を通す。元の版の確認は DO の文脈の段階で行う。
+      // 小説と章立ての該当章があること、作品設計が成人指定の条件を満たすこと、前の章が欠けていないことを確かめる。
+      // 文脈 (既出の章、確定事項) は DO が組み立てる (DO も同じ作品設計の判定をする)。
+      const model = options.model !== undefined ? options.model : DEFAULT_CHAPTER_MODEL
+      // 書き直しの指示も、成人指定なら開始の時点で検査する (400 invalid_instruction)。
+      // 書き直しなら、元の版がこの小説のこの章のもので本文があることも確かめる (400 invalid_base_version)。
+      const start = await prepareGenerationStart(prisma, id, [chapterNumber], model, {
+        instruction: options.instruction,
+        baseVersionId: options.base_version_id
+      }).finally(() => prisma.$disconnect())
+      if (!start.ok) return c.json(startErrorBody(start), start.status)
+      const payload =
+        revisionInstruction(options.instruction).length > 0
+          ? { ...start.payload, instruction: options.instruction, baseVersionId: options.base_version_id }
+          : start.payload
 
       const env = getEnv()
       const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
@@ -610,16 +734,20 @@ export const app = new Hono()
       const { chapters, model } = c.req.valid('json')
       const prisma = getPrisma()
       try {
+        // 前から順に書く。対象は重複を除いて昇順にする。小説と章立ての最初の章 (404)、作品設計 (400 invalid_bible)、
+        // 前の章の欠け (409) を確かめてからジョブを running にする (止めたときに running のジョブを残さない)。
+        const start = await prepareGenerationStart(prisma, id, chapters, model)
+        if (!start.ok) return c.json(startErrorBody(start), start.status)
+        const first = start.payload.chapterNumber
         await upsertGenerationJob(prisma, id, {
           status: 'running',
-          pending: JSON.stringify(chapters),
-          current: chapters[0],
+          pending: JSON.stringify(start.targets),
+          current: first,
           model
         })
-        const payload = await buildChapterPayload(prisma, id, chapters[0], model)
-        if (!payload) return c.json({ error: 'not_found' }, 404)
+        const payload = start.payload
         const env = getEnv()
-        const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapters[0]}`)
+        const doId = env.CHAPTER_GEN.idFromName(`${id}:${first}`)
         const stub = env.CHAPTER_GEN.get(doId)
         await stub.start(payload)
         return c.json({ status: 'started' }, 202)

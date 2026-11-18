@@ -1,9 +1,52 @@
 import type { Prisma, PrismaClient } from '@/generated/prisma/client'
-import type { CreateNovelInput, SaveCastInput } from '@/schemas/novel.dto'
+import { computeStaleness, outlineEntryHash } from '@/lib/novel/staleness'
+import {
+  type CreateNovelInput,
+  normalizeAgeRating,
+  type Outline,
+  type SaveCastInput,
+  type StoredBible,
+  StoredBibleSchema
+} from '@/schemas/novel.dto'
+import {
+  type ChapterRecord,
+  ChapterRecordSchema,
+  type ChapterReview,
+  ChapterReviewSchema,
+  type ChapterStaleness
+} from '@/schemas/story.dto'
+
+// Novel.writing_notes は null 許容の列 (理由は schema.prisma の注記)。読むときはここで '' にそろえる。
+function withWritingNotes<T extends { writing_notes: string | null }>(row: T): T & { writing_notes: string } {
+  return { ...row, writing_notes: row.writing_notes === null ? '' : row.writing_notes }
+}
+
+// Novel.bible (JSON 文字列 | null) を検証して返す。未作成 (null) や壊れた値は null。
+export function parseStoredBible(raw: string | null): StoredBible | null {
+  if (raw === null || raw.length === 0) return null
+  try {
+    const result = StoredBibleSchema.safeParse(JSON.parse(raw))
+    return result.success ? result.data : null
+  } catch {
+    return null
+  }
+}
+
+// Chapter.record (JSON 文字列 | null) を検証して返す。未抽出 (null) や壊れた値は null。
+// 壊れた記録を後の章の【確定事項】に混ぜないため、ここで弾く。
+export function parseStoredRecord(raw: string | null): ChapterRecord | null {
+  if (raw === null || raw.length === 0) return null
+  try {
+    const result = ChapterRecordSchema.safeParse(JSON.parse(raw))
+    return result.success ? result.data : null
+  } catch {
+    return null
+  }
+}
 
 // キャスト・関係・語り手は専用ページ (saveNovelCast) で管理するので本体作成では触らない。
 export async function createNovel(prisma: PrismaClient, input: CreateNovelInput) {
-  return prisma.novel.create({
+  const created = await prisma.novel.create({
     data: {
       title: input.title,
       genre: input.genre,
@@ -16,12 +59,14 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
       age_rating: input.age_rating,
       ending: input.ending,
       notes: input.notes,
+      writing_notes: input.writing_notes,
       editor_model: input.editor_model,
       writer_model: input.writer_model,
       category_id: input.category_id
     },
     include: { category: { select: { name: true } } }
   })
+  return withWritingNotes(created)
 }
 
 // 小説のキャスト (character_links) + 関係 + 語り手をまとめて置き換える。
@@ -63,6 +108,19 @@ export async function saveOutline(prisma: PrismaClient, id: string, outlineJson:
   })
 }
 
+// 作品設計を保存する (作り直しも手動の編集も上書き)。章立てや本文には触れない。
+export async function saveBible(prisma: PrismaClient, id: string, stored: StoredBible) {
+  await prisma.novel.update({ where: { id }, data: { bible: JSON.stringify(stored) } })
+}
+
+// 章をどの章立てと、どの前章の版から作ったか。鮮度の判定 (staleness.ts) に使う。
+export type ChapterLineage = {
+  // 生成に使った章立ての、この章の項目のハッシュ
+  outlineHash: string | null
+  // 直前の章として使った version の id。第 1 章と、直前の章の本文が無かったときは null
+  prevChapterId: string | null
+}
+
 // Chapter は append-only。再生成のたびに version をインクリメントして INSERT する。
 // 表示は getNovelWithChapters で最新 version のみ抜き出すが、過去 version も DB には残る。
 export async function saveChapter(
@@ -71,7 +129,8 @@ export async function saveChapter(
   chapterNumber: number,
   content: string,
   title: string | null,
-  prompt: string
+  prompt: string,
+  lineage: ChapterLineage
 ) {
   const latest = await prisma.chapter.findFirst({
     where: { novel_id: novelId, chapter_number: chapterNumber },
@@ -86,26 +145,180 @@ export async function saveChapter(
       version: (latest?.version ?? 0) + 1,
       content,
       title,
-      prompt
+      prompt,
+      outline_hash: lineage.outlineHash,
+      prev_chapter_id: lineage.prevChapterId
     }
   })
 }
 
+export type OutlineHashStamp = { id: string; outlineHash: string }
+
+// outline_hash が null の章に変更前のハッシュを書き (outlineStamps)、それから章立てを保存する。
+// D1 の $transaction([...]) は順に実行するだけで、途中で失敗すると前の書き込みは残る。そのため順序で安全側に倒す:
+// ハッシュだけ書けて章立てが保存されなかった場合は、変更前の章立てとハッシュが一致するので「新しい」のまま (正しい)。
+// 先に章立てを書くと、ハッシュを書けなかった古い本文が、書き換えた後も「新しい」に見えてしまう。
+export async function saveOutlineWithStamps(
+  prisma: PrismaClient,
+  novelId: string,
+  outlineJson: string,
+  stamps: OutlineHashStamp[]
+) {
+  await prisma.$transaction([
+    ...stamps.map((stamp) =>
+      prisma.chapter.update({ where: { id: stamp.id }, data: { outline_hash: stamp.outlineHash } })
+    ),
+    prisma.novel.update({ where: { id: novelId }, data: { outline: outlineJson } })
+  ])
+}
+
+// ---------------------- 鮮度 (純粋) ----------------------
+
+export type LineageChapter = {
+  id: string
+  chapter_number: number
+  outline_hash: string | null
+  prev_chapter_id: string | null
+}
+
+// 章立ての 1 章ぶんの項目のハッシュ。章立てに無い章は、空の項目のハッシュ。
+function entryHash(outline: Outline | null, chapterNumber: number): string {
+  const entry = outline === null ? undefined : outline.chapters.find((ch) => ch.chapter_number === chapterNumber)
+  return outlineEntryHash(entry === undefined ? { title: '', summary: '', characters: [] } : entry)
+}
+
+// 各章の最新 version の鮮度 (章番号 → 判定)。outline は今の章立て。
+// 章立てが無い・壊れている (null) ときは章立ての比較を飛ばし、前の章の作り直しだけを見る
+// (読めない章立てを理由に全章を「要再生成」にしない)。
+export function chapterStaleness(chapters: LineageChapter[], outline: Outline | null): Map<number, ChapterStaleness> {
+  const current = new Map(
+    outline === null
+      ? []
+      : outline.chapters.map((entry): [number, string] => [entry.chapter_number, outlineEntryHash(entry)])
+  )
+  return computeStaleness(
+    chapters.map((chapter) => ({
+      number: chapter.chapter_number,
+      id: chapter.id,
+      outlineHash: outline === null ? null : chapter.outline_hash,
+      prevChapterId: chapter.prev_chapter_id
+    })),
+    current
+  )
+}
+
+// 章立てを書き換える前に、outline_hash が null の章 (この機能より前に生成された章) へ書き込むハッシュ。
+// 変更前の章立てのその章の項目のハッシュ (項目が無ければ空の項目のハッシュ) を入れておくと、
+// 書き換えた後の章立てと食い違った章だけが outline_changed になる (変わっていない章は一致して「新しい」のまま)。
+// 対象は渡した章の最新 version 全部 (書き換えた章だけでなく、伏線の検証で直された章も拾うため)。
+export function outlineStamps(chapters: LineageChapter[], previous: Outline | null): OutlineHashStamp[] {
+  return chapters
+    .filter((chapter) => chapter.outline_hash === null)
+    .map((chapter) => ({ id: chapter.id, outlineHash: entryHash(previous, chapter.chapter_number) }))
+}
+
+// Chapter.review (JSON 文字列 | null) を検証して返す。未検査 (null) や壊れた値は null。
+export function parseStoredReview(raw: string | null): ChapterReview | null {
+  if (raw === null || raw.length === 0) return null
+  try {
+    const result = ChapterReviewSchema.safeParse(JSON.parse(raw))
+    return result.success ? result.data : null
+  } catch {
+    return null
+  }
+}
+
+// 検査の結果を保存する (version ごとに 1:1。同じ version を検査し直したら上書き)。
+export async function saveChapterReview(prisma: PrismaClient, chapterId: string, review: ChapterReview) {
+  await prisma.chapter.update({ where: { id: chapterId }, data: { review: JSON.stringify(review) } })
+}
+
+// 章の記録を保存する (version ごとに 1:1。同じ version に抽出し直したら上書き)。
+export async function saveChapterRecord(prisma: PrismaClient, chapterId: string, record: ChapterRecord) {
+  await prisma.chapter.update({ where: { id: chapterId }, data: { record: JSON.stringify(record) } })
+}
+
+// 保存済みの 1 version (生成の再開で、記録の抽出に使う)。無ければ null。
+export async function findChapterVersion(prisma: PrismaClient, chapterId: string) {
+  const row = await prisma.chapter.findUnique({
+    where: { id: chapterId },
+    select: {
+      id: true,
+      novel_id: true,
+      chapter_number: true,
+      title: true,
+      content: true,
+      record: true,
+      outline_hash: true,
+      prev_chapter_id: true
+    }
+  })
+  return row === null ? null : { ...row, record: parseStoredRecord(row.record) }
+}
+
 // 指定章の全 version を新しい順で返す (生成履歴の閲覧用)。
 export async function listChapterVersions(prisma: PrismaClient, novelId: string, chapterNumber: number) {
-  return prisma.chapter.findMany({
+  const rows = await prisma.chapter.findMany({
     where: { novel_id: novelId, chapter_number: chapterNumber },
     orderBy: { version: 'desc' },
-    select: { id: true, version: true, title: true, content: true, prompt: true, created_at: true }
+    select: {
+      id: true,
+      version: true,
+      title: true,
+      content: true,
+      prompt: true,
+      record: true,
+      review: true,
+      created_at: true
+    }
   })
+  return rows.map((row) => ({ ...row, record: parseStoredRecord(row.record), review: parseStoredReview(row.review) }))
+}
+
+// 各章の最新 version の id。rows は chapter_number 昇順・version 降順で並んでいる前提 (同じ章の先頭が最新)。
+function latestVersionIds(rows: Array<{ id: string; chapter_number: number }>): string[] {
+  const latest = new Map<number, string>()
+  for (const row of rows) {
+    if (!latest.has(row.chapter_number)) latest.set(row.chapter_number, row.id)
+  }
+  return [...latest.values()]
+}
+
+// 各章の最新 version を本文と記録つきで読む。prompt 列は読まない (1 version あたり数十 KB あり、一覧には要らない)。
+async function latestChapters(prisma: PrismaClient, rows: Array<{ id: string; chapter_number: number }>) {
+  const ids = latestVersionIds(rows)
+  if (ids.length === 0) return []
+  const chapters = await prisma.chapter.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      novel_id: true,
+      chapter_number: true,
+      version: true,
+      title: true,
+      content: true,
+      record: true,
+      outline_hash: true,
+      prev_chapter_id: true,
+      review: true,
+      created_at: true
+    }
+  })
+  return chapters
+    .map((ch) => ({ ...ch, record: parseStoredRecord(ch.record), review: parseStoredReview(ch.review) }))
+    .sort((a, b) => a.chapter_number - b.chapter_number)
 }
 
 export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
   const novel = await prisma.novel.findUnique({
     where: { id },
     include: {
-      // 章は append-only なので全 version 読んでアプリ側で最新だけ残す。
-      chapters: { orderBy: [{ chapter_number: 'asc' }, { version: 'desc' }] },
+      // 章は append-only。まず全 version の id と番号だけを読み、各章の最新の行だけを後で本文つきで読む
+      // (全 version の本文と prompt を毎回読むと、章を作り直すたびに読む量が増えるため)。
+      chapters: {
+        select: { id: true, chapter_number: true, version: true },
+        orderBy: [{ chapter_number: 'asc' }, { version: 'desc' }]
+      },
       // Gemini プロンプト用に口調・呼び方等もまとめて読む (server 側でしか使わないので API レスポンスには載せない)。
       character_links: {
         include: {
@@ -152,18 +365,14 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
 
   if (!novel) return null
 
-  // chapter_number ごとに最新 version の章だけ残す。
-  const latestChapterByNumber = new Map<number, (typeof novel.chapters)[0]>()
-  for (const ch of novel.chapters) {
-    if (!latestChapterByNumber.has(ch.chapter_number)) {
-      latestChapterByNumber.set(ch.chapter_number, ch)
-    }
-  }
-  const chapters = Array.from(latestChapterByNumber.values()).sort((a, b) => a.chapter_number - b.chapter_number)
+  // chapter_number ごとに最新 version の章だけ (番号の昇順)。
+  const chapters = await latestChapters(prisma, novel.chapters)
 
-  // chapter_number ごとに最新コスト行のみ表示。古い世代も DB には残る。
+  // 本文 (kind = chapter) は chapter_number ごとに最新コスト行のみ表示。古い世代も DB には残る。
+  // 章立てなどの行は同じ chapter_number を持ちうるので、最新を選ぶ前に本文だけに絞る。
+  const chapterCostRows = novel.generation_costs.filter((row) => row.kind === 'chapter')
   const latestCostByChapter = new Map<number, (typeof novel.generation_costs)[0]>()
-  for (const row of novel.generation_costs) {
+  for (const row of chapterCostRows) {
     if (!latestCostByChapter.has(row.chapter_number)) {
       latestCostByChapter.set(row.chapter_number, row)
     }
@@ -176,9 +385,23 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
     cost_usd: r.cost_usd
   }))
   const total_cost_usd = generation_costs.reduce((sum, r) => sum + r.cost_usd, 0)
+  // 本文以外 (章立て、作品設計、記録の抽出、検査) は作り直した分も実際に払っているので、全行を合計する。
+  const aux_cost_usd = novel.generation_costs
+    .filter((row) => row.kind !== 'chapter')
+    .reduce((sum, row) => sum + row.cost_usd, 0)
 
+  const bible = parseStoredBible(novel.bible)
   return {
-    ...novel,
+    ...withWritingNotes(novel),
+    // 生成 (章立て、作品設計、本文、検査) と作品設計の入力のハッシュは、すべてここで読んだ値を使う。
+    // 保存済みの値が知らないもの ('R18G'、空白つきなど) なら、成人指定の検証が外れないよう、
+    // 内容の制限がいちばん強い全年齢として扱う (書き込み側は 3 つの値しか受けない)。
+    age_rating: normalizeAgeRating(novel.age_rating),
+    // 作品設計 (検証済み。source_hash を含む)。未作成や壊れた値は null
+    bible,
+    // 列に値があるのに読めない (壊れている)。未作成 (null や空) とは区別する: 成人指定では、未作成と同じ扱い
+    // (辞典の原文と読み替えの指示で書く) にせず生成を止めるため。
+    bible_unreadable: novel.bible !== null && novel.bible.length > 0 && bible === null,
     chapters,
     cast: novel.character_links.map((l) => ({
       character_id: l.character_id,
@@ -197,6 +420,7 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
     })),
     generation_costs,
     total_cost_usd,
+    aux_cost_usd,
     generation_job: novel.generation_job
   }
 }
@@ -223,7 +447,7 @@ export async function stopGenerationJob(prisma: PrismaClient, novelId: string) {
 export async function listNovels(prisma: PrismaClient) {
   // position 昇順 (ユーザー手動並び)。未設定はすべて 0 なので created_at 新しい順でタイブレーク。
   // 一覧はカテゴリでグループ化して表示するが、グループ化はこの順序を各カテゴリ内で保つ。
-  return prisma.novel.findMany({
+  const novels = await prisma.novel.findMany({
     orderBy: [{ position: 'asc' }, { created_at: 'desc' }],
     select: {
       id: true,
@@ -239,6 +463,7 @@ export async function listNovels(prisma: PrismaClient) {
       pov_character_id: true,
       ending: true,
       notes: true,
+      writing_notes: true,
       editor_model: true,
       writer_model: true,
       outline: true,
@@ -248,6 +473,7 @@ export async function listNovels(prisma: PrismaClient) {
       updated_at: true
     }
   })
+  return novels.map(withWritingNotes)
 }
 
 // 小説ごとの生成済み本文の合計文字数 (各 chapter_number の最新 version のみ集計)。
@@ -336,7 +562,7 @@ export async function deleteCategory(prisma: PrismaClient, id: string) {
 
 // キャスト・関係・語り手は saveNovelCast で管理するので本体更新では触らない。
 export async function updateNovel(prisma: PrismaClient, id: string, input: CreateNovelInput) {
-  return prisma.novel.update({
+  const updated = await prisma.novel.update({
     where: { id },
     data: {
       title: input.title,
@@ -350,12 +576,14 @@ export async function updateNovel(prisma: PrismaClient, id: string, input: Creat
       age_rating: input.age_rating,
       ending: input.ending,
       notes: input.notes,
+      writing_notes: input.writing_notes,
       editor_model: input.editor_model,
       writer_model: input.writer_model,
       category_id: input.category_id
     },
     include: { category: { select: { name: true } } }
   })
+  return withWritingNotes(updated)
 }
 
 export async function deleteNovel(prisma: PrismaClient, id: string) {

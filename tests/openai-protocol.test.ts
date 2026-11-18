@@ -7,7 +7,9 @@ import {
   parseResult,
   parseStreamChunk,
   resolveFormat,
-  stripCodeFence
+  stripCodeFence,
+  timeoutMessage,
+  timeoutSignal
 } from '@/lib/openai/protocol'
 
 describe('format selection', () => {
@@ -27,7 +29,7 @@ describe('format selection', () => {
 
 describe('buildRequestBody', () => {
   test('chat streaming asks for usage and sends no temperature', () => {
-    const body = buildRequestBody('chat', { model: 'm', prompt: 'p', stream: true, json: false })
+    const body = buildRequestBody('chat', { model: 'm', system: '', user: 'p', stream: true, json: false })
     expect(body).toEqual({
       model: 'm',
       messages: [{ role: 'user', content: 'p' }],
@@ -36,7 +38,7 @@ describe('buildRequestBody', () => {
     })
   })
   test('chat json mode', () => {
-    const body = buildRequestBody('chat', { model: 'm', prompt: 'p', stream: false, json: true })
+    const body = buildRequestBody('chat', { model: 'm', system: '', user: 'p', stream: false, json: true })
     expect(body).toEqual({
       model: 'm',
       messages: [{ role: 'user', content: 'p' }],
@@ -44,13 +46,73 @@ describe('buildRequestBody', () => {
       response_format: { type: 'json_object' }
     })
   })
+  test('chat sends system as a system message before the user message', () => {
+    const body = buildRequestBody('chat', { model: 'm', system: 's', user: 'p', stream: true, json: false })
+    expect(body).toEqual({
+      model: 'm',
+      messages: [
+        { role: 'system', content: 's' },
+        { role: 'user', content: 'p' }
+      ],
+      stream: true,
+      stream_options: { include_usage: true }
+    })
+  })
+  test('chat json mode with system keeps json_object', () => {
+    const body = buildRequestBody('chat', { model: 'm', system: 's', user: 'p', stream: false, json: true })
+    expect(body).toEqual({
+      model: 'm',
+      messages: [
+        { role: 'system', content: 's' },
+        { role: 'user', content: 'p' }
+      ],
+      stream: false,
+      response_format: { type: 'json_object' }
+    })
+  })
   test('responses streaming', () => {
-    const body = buildRequestBody('responses', { model: 'm', prompt: 'p', stream: true, json: false })
+    const body = buildRequestBody('responses', { model: 'm', system: '', user: 'p', stream: true, json: false })
     expect(body).toEqual({ model: 'm', input: 'p', stream: true })
   })
   test('responses json mode', () => {
-    const body = buildRequestBody('responses', { model: 'm', prompt: 'p', stream: false, json: true })
+    const body = buildRequestBody('responses', { model: 'm', system: '', user: 'p', stream: false, json: true })
     expect(body).toEqual({ model: 'm', input: 'p', stream: false, text: { format: { type: 'json_object' } } })
+  })
+  test('responses sends system as instructions', () => {
+    const body = buildRequestBody('responses', { model: 'm', system: 's', user: 'p', stream: true, json: false })
+    expect(body).toEqual({ model: 'm', instructions: 's', input: 'p', stream: true })
+  })
+  test('responses json mode with system', () => {
+    const body = buildRequestBody('responses', { model: 'm', system: 's', user: 'p', stream: false, json: true })
+    expect(body).toEqual({
+      model: 'm',
+      instructions: 's',
+      input: 'p',
+      stream: false,
+      text: { format: { type: 'json_object' } }
+    })
+  })
+  test('an empty system adds neither a system message nor instructions', () => {
+    const chat = buildRequestBody('chat', { model: 'm', system: '', user: 'p', stream: false, json: false })
+    const responses = buildRequestBody('responses', { model: 'm', system: '', user: 'p', stream: false, json: false })
+    expect(chat.messages).toEqual([{ role: 'user', content: 'p' }])
+    expect('instructions' in responses).toBe(false)
+  })
+})
+
+describe('timeoutSignal', () => {
+  test('no timeout gives no signal', () => {
+    expect(timeoutSignal(undefined)).toBeUndefined()
+  })
+  test('a timeout gives a signal that is not aborted yet', () => {
+    const signal = timeoutSignal(60_000)
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(signal?.aborted).toBe(false)
+  })
+  test('the message names the call and the seconds', () => {
+    expect(timeoutMessage('Gemini generateOutline', 180_000)).toBe(
+      'Gemini generateOutline の応答が 180 秒以内に終わらなかったため中断しました'
+    )
   })
 })
 

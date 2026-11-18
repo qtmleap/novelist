@@ -4,6 +4,7 @@ import {
   type AvailableModel,
   type ModelCatalog,
   type ModelPrice,
+  type UpstreamModel,
   UpstreamModelListSchema,
   UpstreamModelSchema
 } from '@/schemas/provider.dto'
@@ -20,6 +21,19 @@ export function openaiConfig(env: Env): OpenAIConfig | null {
   const trimmedKey = apiKey.trim()
   if (trimmedUrl.length === 0 || trimmedKey.length === 0) return null
   return { baseUrl: trimmedUrl, apiKey: trimmedKey, format: resolveFormat(env.OPENAI_API_FORMAT) }
+}
+
+// 入力の上限の項目名。上から順に見て、正の整数の最初のものを採る。
+const CONTEXT_WINDOW_FIELDS = ['context_window', 'context_length', 'max_model_len'] as const
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
+// /models の 1 件から入力の上限 (トークン) を読む。どの項目にも正の整数が無ければ null (既定の予算を使う)。
+export function contextWindowOf(model: UpstreamModel): number | null {
+  const found = CONTEXT_WINDOW_FIELDS.map((key) => model[key]).find(isPositiveInteger)
+  return found === undefined ? null : found
 }
 
 const CACHE_TTL_MS = 5 * 60 * 1000
@@ -61,7 +75,7 @@ export async function fetchOpenAIModels(env: Env): Promise<UpstreamResult> {
           name: m.id,
           provider: 'openai',
           owner: m.owned_by === undefined ? null : m.owned_by,
-          contextWindow: m.context_window === undefined ? null : m.context_window,
+          contextWindow: contextWindowOf(m),
           price:
             m.pricing === undefined
               ? null
@@ -101,6 +115,16 @@ export async function findPrice(env: Env, ref: string): Promise<ModelPrice | nul
   const upstream = await fetchOpenAIModels(env)
   const entry = upstream.models.find((m) => m.ref === ref)
   return entry === undefined ? null : entry.price
+}
+
+// モデルの入力の上限 (トークン)。既出の章を本文プロンプトに入れる予算に使う。
+// OpenAI 互換は /models の context_window、Gemini は持たない (null = 既定の予算)。分からなければ null。
+export async function findContextWindow(env: Env, ref: string): Promise<number | null> {
+  const parsed = parseModelRef(ref)
+  if (parsed.provider === 'gemini') return null
+  const upstream = await fetchOpenAIModels(env)
+  const entry = upstream.models.find((m) => m.ref === ref)
+  return entry === undefined ? null : entry.contextWindow
 }
 
 // 1 回分のコスト (USD)。単価が分からないモデルは 0 を記録し、警告を残す。
