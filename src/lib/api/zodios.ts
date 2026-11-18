@@ -22,6 +22,7 @@ import {
   SaveCastSchema
 } from '@/schemas/novel.dto'
 import { ModelCatalogSchema } from '@/schemas/provider.dto'
+import { OutlineWarningSchema } from '@/schemas/story.dto'
 
 // API レスポンスのラッパースキーマ。サーバー側は Hono のままで、
 // ここで Zod の parse を噛ませてランタイム保証も得る。
@@ -30,7 +31,8 @@ const ErrorBodySchema = z.object({
   detail: z.string().optional()
 })
 
-const OutlineWrapperSchema = z.object({ outline: OutlineSchema })
+// warnings は章立ての正規化・検証で出た警告 (名簿に無い登場人物を外した、など)。無ければ空配列。
+const OutlineWrapperSchema = z.object({ outline: OutlineSchema, warnings: z.array(OutlineWarningSchema).default([]) })
 const PromptPreviewSchema = z.object({ prompt: z.string() })
 // 章本文プロンプトは保存済みのものを返すため、この機能より前に生成された章では null になる。
 const ChapterPromptSchema = z.object({ prompt: z.string().nullable() })

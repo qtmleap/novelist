@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@/generated/prisma/client'
 import type { StartChapterGenPayload } from '@/lib/chapter-gen-do'
-import type { CastMember, CastRelation } from '@/lib/gemini/client'
+import type { CastMember, CastRelation } from '@/lib/novel/prompts'
 import { getNovelWithChapters } from '@/lib/novel/repository'
 import type { ModelRef } from '@/schemas/novel.dto'
 import { OutlineSchema } from '@/schemas/novel.dto'
@@ -152,7 +152,7 @@ export async function buildChapterPayload(
     .filter((ch) => ch.chapter_number < chapterNumber)
     .sort((a, b) => a.chapter_number - b.chapter_number)
     .slice(-2)
-    .map((ch) => ({ chapter_number: ch.chapter_number, content: ch.content }))
+    .map((ch) => ({ chapter_number: ch.chapter_number, title: ch.title, content: ch.content }))
 
   const viewpointChar = viewpointCharFor(novel.character_links, novel.pov_character_id)
 

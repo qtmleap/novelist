@@ -61,7 +61,10 @@ export function endpointPath(format: OpenAIFormat): string {
 
 type RequestOptions = {
   model: string
-  prompt: string
+  // system 指示 (作品を通して変わらない規則)。空文字なら送らない。
+  system: string
+  // 資料と今回の指示。
+  user: string
   stream: boolean
   // true なら JSON オブジェクトだけを返すよう要求する (章立て用)。
   json: boolean
@@ -69,23 +72,36 @@ type RequestOptions = {
 
 // temperature は送らない。推論系のモデルは指定を拒否して 400 を返すことがあり、
 // 小説生成ではサーバー既定の値でも困らないため。
+// system は chat では system ロールのメッセージ、responses では instructions で送る。
 export function buildRequestBody(format: OpenAIFormat, options: RequestOptions): Json {
-  const { model, prompt, stream, json } = options
+  const { model, system, user, stream, json } = options
+  const hasSystem = system.length > 0
   if (format === 'responses') {
     return {
       model,
-      input: prompt,
+      ...(hasSystem ? { instructions: system } : {}),
+      input: user,
       stream,
       ...(json ? { text: { format: { type: 'json_object' } } } : {})
     }
   }
   return {
     model,
-    messages: [{ role: 'user', content: prompt }],
+    messages: [...(hasSystem ? [{ role: 'system', content: system }] : []), { role: 'user', content: user }],
     stream,
     ...(stream ? { stream_options: { include_usage: true } } : {}),
     ...(json ? { response_format: { type: 'json_object' } } : {})
   }
+}
+
+// 非ストリームの呼び出しの待ち時間の上限。timeoutMs が無ければ打ち切らない。
+export function timeoutSignal(timeoutMs: number | undefined): AbortSignal | undefined {
+  return timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs)
+}
+
+// timeoutSignal で打ち切ったときのエラー文。fetch の例外 (TimeoutError) だけでは、何を何秒で打ち切ったかが分からないため。
+export function timeoutMessage(what: string, timeoutMs: number): string {
+  return `${what} の応答が ${Math.round(timeoutMs / 1000)} 秒以内に終わらなかったため中断しました`
 }
 
 function errorMessage(error: unknown): string {

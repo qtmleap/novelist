@@ -12,6 +12,7 @@ import { GenerationStatus } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
 import { OutlineSelectionDialog } from '@/components/novel/OutlineSelectionDialog'
 import { OutlineView } from '@/components/novel/OutlineView'
+import { OutlineWarnings } from '@/components/novel/OutlineWarnings'
 import { PageHeader } from '@/components/PageHeader'
 import { QueryBoundary } from '@/components/QueryBoundary'
 import { Button } from '@/components/ui/button'
@@ -21,6 +22,7 @@ import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
 import { asModelRef, type Chapter, type ChapterCost, type ModelRef, type Outline } from '@/schemas/novel.dto'
+import type { OutlineWarning } from '@/schemas/story.dto'
 
 function chaptersFromApi(apiChapters: Chapter[]): ChapterData[] {
   return apiChapters.map((c) => ({
@@ -35,6 +37,8 @@ type GenStatus = 'idle' | 'generatingOutline' | 'generatingChapter' | 'cancelled
 
 type GenState = {
   outline: Outline | null
+  // 直近の章立て操作 (生成・再生成・手動保存) で返った警告。次の操作が成功したら置き換える。
+  outlineWarnings: OutlineWarning[]
   chapters: ChapterData[]
   streamingIndex: number | null
   buffer: string
@@ -44,7 +48,8 @@ type GenState = {
 
 type GenAction =
   | { type: 'OUTLINE_START' }
-  | { type: 'OUTLINE_OK'; outline: Outline }
+  | { type: 'OUTLINE_OK'; outline: Outline; warnings: OutlineWarning[] }
+  | { type: 'OUTLINE_WARNINGS_DISMISS' }
   | { type: 'OUTLINE_ERR'; error: string }
   | { type: 'CHAPTERS_REFRESHED'; chapters: ChapterData[] }
   | { type: 'CHAPTER_START'; chapterNumber: number }
@@ -58,7 +63,9 @@ function genReducer(state: GenState, action: GenAction): GenState {
     case 'OUTLINE_START':
       return { ...state, genStatus: 'generatingOutline', genError: null }
     case 'OUTLINE_OK':
-      return { ...state, genStatus: 'idle', outline: action.outline }
+      return { ...state, genStatus: 'idle', outline: action.outline, outlineWarnings: action.warnings }
+    case 'OUTLINE_WARNINGS_DISMISS':
+      return { ...state, outlineWarnings: [] }
     case 'OUTLINE_ERR':
       return { ...state, genStatus: 'error', genError: action.error }
     case 'CHAPTERS_REFRESHED':
@@ -123,24 +130,37 @@ function GenerateChaptersButton({
 function NovelTotals({
   chapters,
   costs,
-  totalCostUsd
+  totalCostUsd,
+  auxCostUsd
 }: {
   chapters: ChapterData[]
   costs: ChapterCost[]
   totalCostUsd: number
+  // 本文以外 (章立てなど) の生成コスト。本文がまだ無い段階でも出すため、本文の有無とは別に扱う。
+  auxCostUsd: number
 }) {
   const totalChars = chapters.reduce((sum, c) => sum + (c.done ? c.content.length : 0), 0)
-  if (totalChars === 0 && costs.length === 0) return null
+  const hasBody = totalChars > 0 || costs.length > 0
+  const hasAux = auxCostUsd > 0
+  if (!hasBody && !hasAux) return null
   return (
     <p className='mt-0.5 flex flex-wrap items-baseline gap-x-4 gap-y-0.5 text-sm text-muted-foreground'>
-      <span>
-        {'文字数 '}
-        <span className='tabular-nums'>{totalChars.toLocaleString()}</span>
-      </span>
+      {hasBody && (
+        <span>
+          {'文字数 '}
+          <span className='tabular-nums'>{totalChars.toLocaleString()}</span>
+        </span>
+      )}
       {costs.length > 0 && (
         <span>
           {'コスト '}
           <span className='tabular-nums'>${totalCostUsd.toFixed(4)} USD</span>
+        </span>
+      )}
+      {hasAux && (
+        <span>
+          {'章立てなど '}
+          <span className='tabular-nums'>${auxCostUsd.toFixed(4)} USD</span>
         </span>
       )}
     </p>
@@ -163,6 +183,7 @@ function NovelDetailContent({ id }: { id: string }) {
     novel,
     (n): GenState => ({
       outline: n.outline,
+      outlineWarnings: [],
       chapters: chaptersFromApi(n.chapters),
       streamingIndex: null,
       buffer: '',
@@ -262,7 +283,7 @@ function NovelDetailContent({ id }: { id: string }) {
           { model: editorModel, chapters: chapters !== undefined ? chapters : [] },
           { params: { id } }
         )
-        dispatch({ type: 'OUTLINE_OK', outline: body.outline })
+        dispatch({ type: 'OUTLINE_OK', outline: body.outline, warnings: body.warnings })
         // chapters[] 指定の部分再生成では対象章の本文も server 側で消えるので novel を取り直す。
         const { data: freshNovel } = await refetch()
         if (freshNovel) {
@@ -304,7 +325,7 @@ function NovelDetailContent({ id }: { id: string }) {
     await handleStartGeneration([num], asModelRef(novel.writer_model))
   }
 
-  const { outline, chapters, streamingIndex, genStatus, genError } = state
+  const { outline, outlineWarnings, chapters, streamingIndex, genStatus, genError } = state
   const isGenerating = genStatus === 'generatingOutline' || genStatus === 'generatingChapter'
   const totalChapters = outline !== null ? outline.chapters.length : novel.num_chapters
   const currentChapter = streamingIndex !== null ? streamingIndex : chapters.filter((c) => c.done).length + 1
@@ -330,7 +351,12 @@ function NovelDetailContent({ id }: { id: string }) {
             {' 章 生成済み'}
           </p>
           {!isGenerating && (
-            <NovelTotals chapters={chapters} costs={novel.generation_costs} totalCostUsd={novel.total_cost_usd} />
+            <NovelTotals
+              chapters={chapters}
+              costs={novel.generation_costs}
+              totalCostUsd={novel.total_cost_usd}
+              auxCostUsd={novel.aux_cost_usd}
+            />
           )}
         </div>
         <div className='flex flex-wrap items-center justify-end gap-2'>
@@ -420,6 +446,8 @@ function NovelDetailContent({ id }: { id: string }) {
         <GenerationStatus currentChapter={currentChapter} totalChapters={totalChapters} onCancel={handleStop} />
       )}
 
+      <OutlineWarnings warnings={outlineWarnings} onDismiss={() => dispatch({ type: 'OUTLINE_WARNINGS_DISMISS' })} />
+
       <OutlineView
         outline={outline}
         isGenerating={genStatus === 'generatingOutline'}
@@ -430,10 +458,11 @@ function NovelDetailContent({ id }: { id: string }) {
         novelId={novel.id}
         expectedTotal={novel.num_chapters}
         canEdit={editAllowed}
+        castNames={novel.cast.map((c) => c.name)}
         onSaveOutline={async (next) => {
           try {
             const res = await api.updateOutline({ outline: next }, { params: { id } })
-            dispatch({ type: 'OUTLINE_OK', outline: res.outline })
+            dispatch({ type: 'OUTLINE_OK', outline: res.outline, warnings: res.warnings })
           } catch (e) {
             dispatch({ type: 'OUTLINE_ERR', error: readApiError(e, '章立ての保存に失敗しました') })
             throw e

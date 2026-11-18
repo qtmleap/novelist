@@ -3,6 +3,7 @@
 import { BookMarked, Check, ChevronRight, Loader2, Pencil, Users, X } from 'lucide-react'
 import Link from 'next/link'
 import { type ReactNode, useEffect, useState } from 'react'
+import { MultiSelect } from '@/components/MultiSelect'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -26,10 +27,12 @@ type Props = {
   // 全章ぶんの枠を表示するため、明示で渡してもらう。
   expectedTotal?: number
   // 手動編集のセーブ。未指定なら編集ボタンは出さない。
-  // 既存 chapter_number の集合は維持し、title/summary だけ変更される。
+  // 既存 chapter_number の集合は維持し、title/summary/characters だけ変更される。
   onSaveOutline?: (outline: Outline) => Promise<void>
   // 編集を許可するか (= 認証済かつ生成中でない)。
   canEdit?: boolean
+  // 小説の名簿の名前。編集モードで各章の登場人物を選ぶ候補になる。空なら登場人物の欄は出さない。
+  castNames?: string[]
 }
 
 function fmtTokens(n: number): string {
@@ -46,7 +49,8 @@ export function OutlineView({
   novelId,
   expectedTotal = 0,
   onSaveOutline,
-  canEdit = false
+  canEdit = false,
+  castNames = []
 }: Props) {
   // 編集モード中だけ使う一時 outline。読み取り専用ビューと、保存中の loading 状態を別途持つ。
   const [editing, setEditing] = useState(false)
@@ -98,6 +102,15 @@ export function OutlineView({
   }
   const updateDraft = (number: number, patch: Partial<Outline['chapters'][number]>) => {
     setDraft((prev) => prev.map((c) => (c.chapter_number === number ? { ...c, ...patch } : c)))
+  }
+  // 登場人物の選択肢は名簿の順。名簿に無い名前が章に残っている場合 (人物名を後から変えたときなど) も、
+  // 利用者が外せるよう末尾に足す。
+  const characterOptionsFor = (characters: string[]): string[] =>
+    Array.from(new Set([...castNames, ...characters.filter((name) => !castNames.includes(name))]))
+  // 本文生成はこの名前で人物設定を絞るので、選択結果は選択肢の並び (= 名簿順) に揃えて保存する。
+  const toggleCharacter = (number: number, current: string[], options: string[], name: string) => {
+    const next = current.includes(name) ? current.filter((c) => c !== name) : [...current, name]
+    updateDraft(number, { characters: options.filter((o) => next.includes(o)) })
   }
 
   return (
@@ -156,6 +169,7 @@ export function OutlineView({
           // 編集モードでは draft のエントリだけを並べる (outline.chapters の中身を直接いじる)。
           // outline 未生成の slot は編集対象に含めない (= 章立て生成側で増やす流れ)。
           if (editing && draftChapter !== undefined) {
+            const characterOptions = characterOptionsFor(draftChapter.characters)
             return (
               <li key={n} className='flex items-start gap-3 px-4 py-3'>
                 <span className='mt-1 flex size-6 shrink-0 items-center justify-center rounded bg-muted text-xs font-semibold tabular-nums text-muted-foreground'>
@@ -175,6 +189,28 @@ export function OutlineView({
                     rows={3}
                     className='resize-none text-xs leading-relaxed'
                   />
+                  {castNames.length > 0 && (
+                    <div className='space-y-1'>
+                      <p className='flex items-center gap-1.5 text-xs font-medium text-muted-foreground'>
+                        <Users className='size-3.5 shrink-0' aria-hidden='true' />
+                        登場人物
+                      </p>
+                      <MultiSelect
+                        options={characterOptions}
+                        selected={draftChapter.characters}
+                        onToggle={(name) => toggleCharacter(n, draftChapter.characters, characterOptions, name)}
+                        placeholder='登場人物を選択'
+                        ariaLabel={`第 ${n} 章の登場人物`}
+                        className='text-sm'
+                      />
+                      {/* 章の登場人物が空だと旧データと同じ扱いになり、本文の生成で名簿の全員の設定が載る。 */}
+                      {draftChapter.characters.length === 0 && (
+                        <p className='text-xs text-muted-foreground'>
+                          未選択のままにすると、本文の生成では名簿の全員が登場する扱いになります
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               </li>
             )

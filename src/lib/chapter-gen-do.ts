@@ -3,9 +3,16 @@ import { PrismaD1 } from '@prisma/adapter-d1'
 import { z } from 'zod'
 import { PrismaClient } from '@/generated/prisma/client'
 import type { Env } from '@/lib/db'
-import { type CastMember, type CastRelation, type StreamChapterUsage, streamChapter } from '@/lib/gemini/client'
+import { type StreamChapterUsage, streamChapter } from '@/lib/gemini/client'
 import { buildChapterPayload } from '@/lib/novel/chapter-payload'
 import { recordGenerationCost } from '@/lib/novel/cost'
+import {
+  buildChapterPrompt,
+  type CastMember,
+  type CastRelation,
+  type Prompt,
+  renderPromptForStorage
+} from '@/lib/novel/prompts'
 import { saveChapter } from '@/lib/novel/repository'
 import type { ModelRef, Outline } from '@/schemas/novel.dto'
 
@@ -62,7 +69,8 @@ export type StartChapterGenPayload = {
     notes: string
   }
   outline: Outline
-  previousChapters: Array<{ chapter_number: number; content: string }>
+  // 直前 2 章の本文。title はこの項目を足す前に DO ストレージへ保存された payload には無い。
+  previousChapters: Array<{ chapter_number: number; title?: string | null; content: string }>
   style: {
     pov: string
     tone: string
@@ -72,6 +80,25 @@ export type StartChapterGenPayload = {
   }
   cast?: CastMember[]
   relations?: CastRelation[]
+}
+
+// payload から本文のプロンプトを組み立てる。章立てに対象の章が無ければ throw する (呼び出し側で error に遷移する)。
+// DO ストレージに残っている古い payload は、章の title、cast、relations を持たないことがある。
+function chapterPrompt(payload: StartChapterGenPayload): Prompt {
+  return buildChapterPrompt({
+    novel: payload.novel,
+    outline: payload.outline,
+    chapterNumber: payload.chapterNumber,
+    priorChapters: payload.previousChapters.map((ch) => ({
+      chapter_number: ch.chapter_number,
+      title: ch.title === undefined ? null : ch.title,
+      content: ch.content
+    })),
+    targetChars: payload.targetChars,
+    style: payload.style,
+    cast: payload.cast === undefined ? [] : payload.cast,
+    relations: payload.relations === undefined ? [] : payload.relations
+  })
 }
 
 // DO に永続化する状態の schema。storage が空 (初回) のキーは .default() で初期値を当てる。
@@ -307,15 +334,9 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       return
     }
     try {
+      const prompt = chapterPrompt(payload)
       const result = streamChapter(this.env, {
-        novel: payload.novel,
-        outline: payload.outline,
-        chapterNumber: payload.chapterNumber,
-        previousChapters: payload.previousChapters,
-        targetChars: payload.targetChars,
-        style: payload.style,
-        cast: payload.cast,
-        relations: payload.relations,
+        prompt,
         model: payload.model,
         // thinking チャンクを含む全 Gemini チャンク受信時に lastProgressAt を更新する。
         // thinking フェーズ中はテキスト出力がないため result.stream に何も流れず、
@@ -390,7 +411,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
           payload.chapterNumber,
           this.buffer,
           payload.chapterTitle,
-          result.prompt
+          renderPromptForStorage(prompt)
         )
       } catch (e) {
         await prisma.$disconnect()

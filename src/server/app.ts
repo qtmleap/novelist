@@ -13,7 +13,13 @@ import {
   updateVariant
 } from '@/lib/character/repository'
 import { type Env, getEnv, getPrisma } from '@/lib/db'
-import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
+import { generateJson } from '@/lib/gemini/client'
+import {
+  generateOutlineFlow,
+  type JsonCaller,
+  type OutlineFlowInput,
+  regenerateOutlineChapters
+} from '@/lib/novel/assist'
 import {
   buildCastForGemini,
   buildChapterPayload,
@@ -21,6 +27,8 @@ import {
   viewpointCharFor
 } from '@/lib/novel/chapter-payload'
 import { type GenerationCostInput, recordGenerationCost } from '@/lib/novel/cost'
+import { normalizeOutlineCharacters, sortOutline } from '@/lib/novel/outline'
+import { buildOutlinePrompt, renderPromptForStorage } from '@/lib/novel/prompts'
 import {
   arrangeNovels,
   createCategory,
@@ -47,6 +55,7 @@ import {
   ArrangeNovelsSchema,
   CreateCategorySchema,
   CreateNovelSchema,
+  FOCAL_POVS,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   type ModelRef,
@@ -75,6 +84,39 @@ async function recordCostsBestEffort(
       console.warn(`${target.kind} cost record failed`, e)
     }
   }
+}
+
+type NovelWithChapters = NonNullable<Awaited<ReturnType<typeof getNovelWithChapters>>>
+
+// 章立ての生成・書き直し・プレビューに渡す資料。
+// alwaysInclude は語り手: 視点人物を指定できる視点 (一人称 / 三人称一元視点) で、視点人物が居るときだけ。
+function outlineFlowInput(novel: NovelWithChapters): OutlineFlowInput {
+  const viewpointChar = viewpointCharFor(novel.character_links, novel.pov_character_id)
+  return {
+    novel: {
+      title: novel.title,
+      genre: novel.genre,
+      setting: novel.setting,
+      num_chapters: novel.num_chapters,
+      outline_summary_chars: novel.outline_summary_chars,
+      notes: novel.notes
+    },
+    style: {
+      pov: novel.pov,
+      tone: novel.tone,
+      age_rating: novel.age_rating,
+      ending: novel.ending,
+      viewpointChar
+    },
+    cast: buildCastForGemini(novel.character_links),
+    relations: buildRelationsForGemini(novel.relations),
+    alwaysInclude: viewpointChar !== undefined && FOCAL_POVS.includes(novel.pov) ? [viewpointChar.name] : []
+  }
+}
+
+// assist.ts の流れに渡す LLM の呼び出し。model が undefined なら既定のモデル。
+function jsonCaller(env: Env, model: ModelRef | undefined): JsonCaller {
+  return (prompt, options) => generateJson(env, model, prompt, options)
 }
 
 // 章番号を含むルートの param。z.coerce で文字列 → 数値に変換・検証するので
@@ -369,120 +411,82 @@ export const app = new Hono()
       if (!novel) return c.json({ error: 'not_found' }, 404)
 
       const env = getEnv()
-      const style = {
-        pov: novel.pov,
-        tone: novel.tone,
-        age_rating: novel.age_rating,
-        ending: novel.ending,
-        viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-      }
-      const cast = buildCastForGemini(novel.character_links)
-      const relations = buildRelationsForGemini(novel.relations)
-
-      const params = {
-        title: novel.title,
-        genre: novel.genre,
-        setting: novel.setting,
-        num_chapters: novel.num_chapters,
-        outline_summary_chars: novel.outline_summary_chars,
-        notes: novel.notes
-      }
+      const input = outlineFlowInput(novel)
+      const call = jsonCaller(env, options.model)
 
       // 既存 outline がある + chapters[] 指定 (かつ全章ではない) → 部分再生成。
       // それ以外 (= 初回 / 指定なし / 全章指定) → 全章まとめて生成 (Worker のタイムアウト回避)。
-      const existing = novel.outline ? OutlineSchema.safeParse(JSON.parse(novel.outline)) : null
-      const targets = options.chapters?.filter((n) => n >= 1 && n <= novel.num_chapters)
-      const canPartial =
-        existing?.success === true && targets !== undefined && targets.length > 0 && targets.length < novel.num_chapters
+      // 同じ章を 2 回書き直さないよう、重複を除いて番号順にする。
+      const existing = parseStoredOutline(novel.outline)
+      const targets = [...new Set(options.chapters.filter((n) => n >= 1 && n <= novel.num_chapters))].sort(
+        (a, b) => a - b
+      )
+      const partial = targets.length > 0 && targets.length < novel.num_chapters
+      const generated = novel.outline !== null && novel.outline.length > 0
 
-      try {
-        if (canPartial && existing.success) {
-          // 既存の outline を保持しつつ、選択された章だけ生成し直してマージする。
-          // 各章本文も整合性のため削除する (per-chapter outline regen と同じルール)。
-          let merged = existing.data
-          for (const n of targets) {
-            const { chapter: next, usages } = await regenerateOutlineChapter(
-              env,
-              params,
-              style,
-              merged,
-              n,
-              options.model,
-              cast,
-              relations
-            )
-            // 後の章で失敗しても、それまでに払った分は残るよう章ごとにすぐ記録する。
-            await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: n, kind: 'outline' }, usages)
-            merged = {
-              chapters: merged.chapters.map((ch) => (ch.chapter_number === n ? next : ch))
-            }
-            // 章番号が outline に存在しなかった場合は末尾に追加。
-            if (!merged.chapters.some((ch) => ch.chapter_number === n)) {
-              merged = { chapters: [...merged.chapters, next].sort((a, b) => a.chapter_number - b.chapter_number) }
-            }
-            await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: n } })
-          }
-          await saveOutline(prisma, id, JSON.stringify(merged))
-          return c.json({ outline: merged })
-        }
+      // 章を選んだ書き直しなのに、保存済みの章立てが解釈できない。全章の生成に切り替えると
+      // 選んでいない章まで作り直し、全本文を消してしまうので、何もせずエラーにする (POST /outline/:number と同じ扱い)。
+      if (partial && generated && existing === null) return c.json({ error: 'invalid_outline' }, 500)
 
-        // 全章まとめて生成。既存本文は無効化されるので全削除。
-        const { outline, usages } = await generateOutline(env, params, style, options.model, cast, relations)
-        await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: 0, kind: 'outline' }, usages)
-        await saveOutline(prisma, id, JSON.stringify(outline))
-        await prisma.chapter.deleteMany({ where: { novel_id: id } })
-        return c.json({ outline })
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        return c.json({ error: 'generation_failed', detail: msg }, 502)
+      if (partial && existing !== null) {
+        // 既存の outline を保持しつつ、選択された章だけ生成し直してマージする。
+        // 後の章で失敗しても、それまでに払った分は残るよう章ごとにすぐ記録する。
+        const result = await regenerateOutlineChapters(call, input, existing, targets, (n, usages) =>
+          recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: n, kind: 'outline' }, usages)
+        )
+        if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
+        await saveOutline(prisma, id, JSON.stringify(result.outline))
+        // 各章本文も整合性のため削除する (per-chapter outline regen と同じルール)。
+        // 章立てを保存できたときだけ消す (途中の章で失敗したら、どの章の本文も残す)。
+        await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: { in: targets } } })
+        return c.json({ outline: result.outline, warnings: result.warnings })
       }
+
+      // 全章まとめて生成。既存本文は無効化されるので全削除。
+      // 失敗した回もトークンは課金されているので、成否にかかわらず記録する。
+      const result = await generateOutlineFlow(call, input)
+      await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: 0, kind: 'outline' }, result.usages)
+      if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
+      const outline = sortOutline(result.outline)
+      await saveOutline(prisma, id, JSON.stringify(outline))
+      await prisma.chapter.deleteMany({ where: { novel_id: id } })
+      return c.json({ outline, warnings: result.warnings })
     } finally {
       await prisma.$disconnect()
     }
   })
 
-  // 章立ての手動編集。AI 生成ではなくユーザーが直接 title/summary を書き換える経路。
+  // 章立ての手動編集。AI 生成ではなくユーザーが直接 title/summary/characters を書き換える経路。
   // 既存章本文には触らない (本文と outline がズレた場合は別途章本文を再生成する想定)。
+  // 登場人物は名簿の正式名に揃え、照合できない名前は外して警告で返す。
+  // 語り手は足さない (利用者が外した人物を勝手に戻さないため)。
   .put('/novels/:id/outline', requireAuth, zValidator('json', z.object({ outline: OutlineSchema })), async (c) => {
     const id = c.req.param('id')
     const { outline } = c.req.valid('json')
     const prisma = getPrisma()
     try {
-      const existing = await prisma.novel.findUnique({ where: { id }, select: { id: true } })
-      if (!existing) return c.json({ error: 'not_found' }, 404)
-      await saveOutline(prisma, id, JSON.stringify(outline))
-      return c.json({ outline })
+      const novel = await getNovelWithChapters(prisma, id)
+      if (!novel) return c.json({ error: 'not_found' }, 404)
+      const castNames = buildCastForGemini(novel.character_links).map((member) => member.name)
+      // 名簿が無い作品では characters をそのまま残す (normalizeOutlineCharacters は全章で空にするため)。
+      const normalized =
+        castNames.length > 0 ? normalizeOutlineCharacters(outline, castNames) : { outline, warnings: [] }
+      const saved = sortOutline(normalized.outline)
+      await saveOutline(prisma, id, JSON.stringify(saved))
+      return c.json({ outline: saved, warnings: normalized.warnings })
     } finally {
       await prisma.$disconnect()
     }
   })
 
-  // 章立て生成プロンプトのプレビュー (Gemini に投げる前の文字列を返す。デバッグ用)
+  // 章立て生成プロンプトのプレビュー (LLM に投げる前の文字列を返す。デバッグ用)
   .get('/novels/:id/outline/preview', async (c) => {
     const id = c.req.param('id')
     const prisma = getPrisma()
     try {
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
-
-      const style = {
-        pov: novel.pov,
-        tone: novel.tone,
-        age_rating: novel.age_rating,
-        ending: novel.ending,
-        viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-      }
-      const cast = buildCastForGemini(novel.character_links)
-      const relations = buildRelationsForGemini(novel.relations)
-      const params = {
-        title: novel.title,
-        genre: novel.genre,
-        setting: novel.setting,
-        num_chapters: novel.num_chapters,
-        outline_summary_chars: novel.outline_summary_chars,
-        notes: novel.notes
-      }
-      const prompt = buildOutlinePrompt(params, style, cast, relations)
+      const prompt = renderPromptForStorage(buildOutlinePrompt(outlineFlowInput(novel)))
       return c.json({ prompt })
     } finally {
       await prisma.$disconnect()
@@ -540,52 +544,26 @@ export const app = new Hono()
         const novel = await getNovelWithChapters(prisma, id)
         if (!novel) return c.json({ error: 'not_found' }, 404)
         if (!novel.outline) return c.json({ error: 'outline_not_generated' }, 400)
+        // 章数を超える章を足すと、章立ての章数が作品の章数と合わなくなる。
+        if (chapterNumber > novel.num_chapters) return c.json({ error: 'chapter_out_of_range' }, 400)
 
         const parsedOutline = OutlineSchema.safeParse(JSON.parse(novel.outline))
         if (!parsedOutline.success) return c.json({ error: 'invalid_outline' }, 500)
 
         const env = getEnv()
-        const style = {
-          pov: novel.pov,
-          tone: novel.tone,
-          age_rating: novel.age_rating,
-          ending: novel.ending,
-          viewpointChar: viewpointCharFor(novel.character_links, novel.pov_character_id)
-        }
-        const cast = buildCastForGemini(novel.character_links)
-        const relations = buildRelationsForGemini(novel.relations)
-
-        try {
-          const { chapter: next, usages } = await regenerateOutlineChapter(
-            env,
-            {
-              title: novel.title,
-              genre: novel.genre,
-              setting: novel.setting,
-              num_chapters: novel.num_chapters,
-              outline_summary_chars: novel.outline_summary_chars,
-              notes: novel.notes
-            },
-            style,
-            parsedOutline.data,
-            chapterNumber,
-            options.model,
-            cast,
-            relations
-          )
-          await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber, kind: 'outline' }, usages)
-          const merged = {
-            chapters: parsedOutline.data.chapters.map((ch) => (ch.chapter_number === chapterNumber ? next : ch))
-          }
-          await saveOutline(prisma, id, JSON.stringify(merged))
-          // 章立て (タイトル・要約) と本文がずれた状態は混乱の元なので、
-          // 章立てを上書きしたらこの章の本文も全 version 削除する。
-          await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
-          return c.json({ outline: merged })
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          return c.json({ error: 'generation_failed', detail: msg }, 502)
-        }
+        const result = await regenerateOutlineChapters(
+          jsonCaller(env, options.model),
+          outlineFlowInput(novel),
+          parsedOutline.data,
+          [chapterNumber],
+          (n, usages) => recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: n, kind: 'outline' }, usages)
+        )
+        if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
+        await saveOutline(prisma, id, JSON.stringify(result.outline))
+        // 章立て (タイトル・要約) と本文がずれた状態は混乱の元なので、
+        // 章立てを上書きしたらこの章の本文も全 version 削除する。
+        await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
+        return c.json({ outline: result.outline, warnings: result.warnings })
       } finally {
         await prisma.$disconnect()
       }
