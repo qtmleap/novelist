@@ -158,7 +158,11 @@ export default function ChapterDetailPage() {
     chapterId: '',
     indexes: new Set()
   })
+  // いま購読している再生成・書き直しを止める合図。生成の終わり (done、error、abort) で片付ける。
+  // 止めるのは画面側の購読と更新だけで、サーバー側の生成 (DO) は続く。
   const abortRef = useRef<AbortController | null>(null)
+  // その再生成が対象にしている「小説 id/章番号」。別の章へ移ったかの判定に使う。
+  const runRouteRef = useRef('')
   const auth = useAuth()
   const editAllowed = canEdit(auth)
 
@@ -193,6 +197,18 @@ export default function ChapterDetailPage() {
       stopReviewPollRef.current?.()
     }
   }, [])
+
+  // 別の章 (別の小説) へ移ったら、再生成の購読を止めて、この画面の生成中の表示を戻す。
+  // 止めた生成は画面を更新しない (runGeneration)。戻すのはここで行う。
+  useEffect(() => {
+    const running = abortRef.current
+    if (running === null || runRouteRef.current === `${novelId}/${chapterNumber}`) return
+    running.abort()
+    abortRef.current = null
+    setIsRegenerating(false)
+    setBuffer('')
+    setStage(null)
+  }, [novelId, chapterNumber])
 
   const chapter = novel?.chapters.find((c) => c.chapter_number === chapterNumber) ?? null
   const cost = novel?.generation_costs.find((c) => c.chapter_number === chapterNumber)
@@ -248,6 +264,12 @@ export default function ChapterDetailPage() {
     stopReviewPollRef.current?.()
     stopReviewPollRef.current = null
     setReviewPending(null)
+    // 前の購読が残っていれば止めて、この生成の合図に替える。止められた後は、画面の state を更新しない。
+    const abort = new AbortController()
+    abortRef.current?.abort()
+    abortRef.current = abort
+    runRouteRef.current = `${novelId}/${chapterNumber}`
+    const stopped = () => abort.signal.aborted
     setIsRegenerating(true)
     setBuffer('')
     setStage(null)
@@ -257,42 +279,61 @@ export default function ChapterDetailPage() {
         { model: asModelRef(novel.writer_model), instruction, base_version_id: baseVersionId },
         { params: { id: novelId, number: String(chapterNumber) } }
       )
+      if (stopped()) return
 
       const outcome = await new Promise<{ done: boolean; hasReview: boolean }>((resolve) => {
         const sub = subscribeChapterStream(`/api/novels/${novelId}/chapters/${chapterNumber}/stream`, {
-          onStage: (next) => setStage(next),
+          onStage: (next) => {
+            if (!stopped()) setStage(next)
+          },
           // 再接続でサーバーが本文を全文送り直してくるので、足し込む前に空にする。
-          onReset: () => setBuffer(''),
-          onDelta: (text) => setBuffer((b) => b + text),
+          onReset: () => {
+            if (!stopped()) setBuffer('')
+          },
+          onDelta: (text) => {
+            if (!stopped()) setBuffer((b) => b + text)
+          },
           onDone: async () => {
             try {
               const refreshed = await api.getNovel({ params: { id: novelId } })
+              // 取り直している間に止められたら、画面を更新せず、abort の側で終わらせる。
+              if (stopped()) return
               setNovel(refreshed)
               resolve({ done: true, hasReview: chapterHasReview(refreshed.chapters, chapterNumber) })
             } catch {
               // 再取得に失敗しても streaming buffer 自体は描画済み。結果は取り直しの側で拾う。
-              resolve({ done: true, hasReview: false })
+              if (!stopped()) resolve({ done: true, hasReview: false })
             }
           },
           onError: (msg) => {
+            if (stopped()) return
             setError(msg)
             resolve({ done: false, hasReview: false })
           }
         })
-        // 再生成中にコンポーネントが unmount されても DO 側は続行するが、ローカルの購読は止める。
-        abortRef.current?.signal.addEventListener('abort', () => {
-          sub.close()
-          resolve({ done: false, hasReview: false })
-        })
+        // ページを離れる・別の章へ移る・次の生成が始まるときは、ローカルの購読だけ止める (DO 側の生成は続く)。
+        abort.signal.addEventListener(
+          'abort',
+          () => {
+            sub.close()
+            resolve({ done: false, hasReview: false })
+          },
+          { once: true }
+        )
       })
+      if (stopped()) return
       // 検査は done の後に走るので、この時点ではまだ無いことが多い。入るまで取り直す。
       if (outcome.done && !outcome.hasReview) beginReviewPolling(novelId, chapterNumber)
     } catch (e) {
-      setError(readApiError(e, failureMessage))
+      if (!stopped()) setError(readApiError(e, failureMessage))
     } finally {
-      setIsRegenerating(false)
-      setBuffer('')
-      setStage(null)
+      // 自分の合図が最新のままなら片付ける。止められていたら、画面の state は触らない。
+      if (abortRef.current === abort) abortRef.current = null
+      if (!stopped()) {
+        setIsRegenerating(false)
+        setBuffer('')
+        setStage(null)
+      }
     }
   }
 

@@ -232,6 +232,8 @@ function NovelDetailContent({ id }: { id: string }) {
   const abortRef = useRef<AbortController | null>(null)
   // 完了した章の検査の結果を待つ取り直しを止める関数。
   const stopReviewPollRef = useRef<(() => void) | null>(null)
+  // ページを離れた後に、遅れて返った取り直しが新しい取り直しを始めないようにする。
+  const mountedRef = useRef(true)
 
   // 章の本文・章立てが変わると、別の章の「要再生成」も変わる。サーバーから取り直して章の一覧に反映する。
   // 取り直した novel を返す (取り直せなかったときは undefined)。
@@ -245,6 +247,7 @@ function NovelDetailContent({ id }: { id: string }) {
   // バッチの途中の章は、次の章が始まった時点で止める (次の章の完了時の取り直しで一緒に入る)。
   const waitForReview = useCallback(
     (chapterNumber: number) => {
+      if (!mountedRef.current) return
       stopReviewPollRef.current?.()
       stopReviewPollRef.current = startReviewPolling({
         check: async () => {
@@ -478,7 +481,9 @@ function NovelDetailContent({ id }: { id: string }) {
   const currentChapter = streamingIndex !== null ? streamingIndex : chapters.filter((c) => c.done).length + 1
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       abortRef.current?.abort()
       // ページを離れたら検査の結果の取り直しも止める。
       stopReviewPollRef.current?.()
