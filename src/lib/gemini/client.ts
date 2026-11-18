@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { Env } from '@/lib/db'
 import { openaiCompleteJsonText, openaiStreamTarget } from '@/lib/openai/client'
-import type { ParsedChunk, StreamTarget } from '@/lib/openai/protocol'
+import type { ParsedChunk, StreamTarget, UsageCounts } from '@/lib/openai/protocol'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
 import {
   MODEL_PRICING_USD_PER_M_TOKENS,
@@ -35,11 +35,15 @@ const GeminiCandidateSchema = z.object({
     .optional()
 })
 
+// thoughtsTokenCount は思考が有効なモデルだけが返す。思考トークンは出力として課金されるので、
+// 出力トークンは candidatesTokenCount との合計で数える。
 const GeminiUsageMetadataSchema = z.object({
   promptTokenCount: z.number().optional(),
   candidatesTokenCount: z.number().optional(),
+  thoughtsTokenCount: z.number().optional(),
   totalTokenCount: z.number().optional()
 })
+type GeminiUsageMetadata = z.infer<typeof GeminiUsageMetadataSchema>
 
 const GeminiResponseSchema = z.object({
   candidates: z.array(GeminiCandidateSchema).optional(),
@@ -155,8 +159,18 @@ function resolveModel(env: Env, model?: ModelRef): ModelRef {
   return model ?? env.GEMINI_MODEL ?? 'gemini-2.5-flash'
 }
 
+// 非ストリーム呼び出し 1 回分の結果。usage はコストの記録に使う (上流が返さなければ undefined)。
+export type JsonTextResult = { text: string; usage: UsageCounts | undefined }
+
 // Gemini の非ストリーム呼び出し (章立て用)。本文テキストを返し、空なら理由つきで throw する。
-async function geminiGenerateJsonText(env: Env, id: string, prompt: string, op: string): Promise<string> {
+// ref は保存値の形のモデル参照 (usage.model に入れる)、id は URL に入れる上流のモデル名。
+async function geminiGenerateJsonText(
+  env: Env,
+  id: string,
+  ref: ModelRef,
+  prompt: string,
+  op: string
+): Promise<JsonTextResult> {
   const url = `${GEMINI_BASE}/${id}:generateContent?key=${env.GEMINI_API_KEY}`
   const body = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -188,14 +202,19 @@ async function geminiGenerateJsonText(env: Env, id: string, prompt: string, op: 
       .join(' / ')
     throw new Error(`Gemini returned empty ${op} response (${detail})`)
   }
-  return text
+  return { text, usage: usageFromMetadata(data.usageMetadata, ref) }
 }
 
 // 章立て用の非ストリーム呼び出し。モデルの接頭辞で Gemini / OpenAI 互換を切り替える。
-async function generateJsonText(env: Env, ref: ModelRef, prompt: string, op: string): Promise<string> {
+async function generateJsonText(env: Env, ref: ModelRef, prompt: string, op: string): Promise<JsonTextResult> {
   const target = parseModelRef(ref)
-  if (target.provider === 'openai') return openaiCompleteJsonText(env, target.id, prompt, op)
-  return geminiGenerateJsonText(env, target.id, prompt, op)
+  if (target.provider === 'openai') return openaiCompleteJsonText(env, ref, target.id, prompt, op)
+  return geminiGenerateJsonText(env, target.id, ref, prompt, op)
+}
+
+// usage が取れた呼び出しだけを記録対象にする。
+function usageList(usage: UsageCounts | undefined): UsageCounts[] {
+  return usage === undefined ? [] : [usage]
 }
 
 // プロンプト用のキャラクター詳細セクションを組み立てる。speech_examples・address_others・
@@ -361,10 +380,10 @@ export async function generateOutline(
   modelOverride?: ModelRef,
   cast?: CastMember[],
   relations?: CastRelation[]
-): Promise<Outline> {
+): Promise<{ outline: Outline; usages: UsageCounts[] }> {
   const model = resolveModel(env, modelOverride)
   const prompt = buildOutlinePrompt(novel, style, cast, relations)
-  const text = await generateJsonText(env, model, prompt, 'generateOutline')
+  const { text, usage } = await generateJsonText(env, model, prompt, 'generateOutline')
 
   let parsed: unknown
   try {
@@ -381,10 +400,13 @@ export async function generateOutline(
   }
 
   return {
-    chapters: validated.data.chapters.map((c) => ({
-      ...c,
-      characters: normalizeChapterCharacters(c.characters, cast)
-    }))
+    outline: {
+      chapters: validated.data.chapters.map((c) => ({
+        ...c,
+        characters: normalizeChapterCharacters(c.characters, cast)
+      }))
+    },
+    usages: usageList(usage)
   }
 }
 
@@ -399,7 +421,7 @@ export async function regenerateOutlineChapter(
   modelOverride?: ModelRef,
   cast?: CastMember[],
   relations?: CastRelation[]
-): Promise<OutlineChapter> {
+): Promise<{ chapter: OutlineChapter; usages: UsageCounts[] }> {
   // 既存に当該章が無い場合 (= 後から num_chapters を増やした) も生成できるよう、無ければ空のテンプレを充てる。
   const target = existing.chapters.find((c) => c.chapter_number === chapterNumber) ?? {
     chapter_number: chapterNumber,
@@ -456,7 +478,7 @@ ${otherChapters || '(なし — 全体が 1 章のみ)'}
 出力は以下の JSON 形式のみ:
 ${exampleEntry}`
 
-  const text = await generateJsonText(env, model, prompt, 'regenerateOutlineChapter')
+  const { text, usage } = await generateJsonText(env, model, prompt, 'regenerateOutlineChapter')
 
   let parsed: unknown
   try {
@@ -471,17 +493,16 @@ ${exampleEntry}`
   // chapter_number はモデルが取り違える可能性があるので強制的に target に揃える。
   // characters は実在キャスト名のみに正規化する。
   return {
-    ...validated.data,
-    chapter_number: chapterNumber,
-    characters: normalizeChapterCharacters(validated.data.characters, cast)
+    chapter: {
+      ...validated.data,
+      chapter_number: chapterNumber,
+      characters: normalizeChapterCharacters(validated.data.characters, cast)
+    },
+    usages: usageList(usage)
   }
 }
 
-export type StreamChapterUsage = {
-  model: string
-  promptTokens: number
-  outputTokens: number
-  totalTokens: number
+export type StreamChapterUsage = UsageCounts & {
   // Gemini が報告する finishReason。'STOP' = 自然完了、それ以外 (MAX_TOKENS/SAFETY/RECITATION/OTHER) は
   // 途中で打ち切られたサインなので DO 側で警告として通知する。chunk が finishReason を送ってこなかった
   // 場合は 'STOP' として扱う (= 正常終了とみなす)。
@@ -758,14 +779,23 @@ ${sections.join('\n\n')}
   return { stream: readable, usage, blockReason, prompt }
 }
 
-function extractUsage(chunk: unknown, model: ModelRef): Omit<StreamChapterUsage, 'finishReason'> | undefined {
+// 応答 (ストリームの 1 チャンク、または非ストリームの応答全体) から usage を取り出す。
+// 出力トークンは本文と思考の合計 (どちらも出力単価で課金される)。
+export function extractUsage(chunk: unknown, model: ModelRef): UsageCounts | undefined {
   const parsed = GeminiResponseSchema.safeParse(chunk)
   if (!parsed.success) return undefined
-  const meta = parsed.data.usageMetadata
-  if (!meta) return undefined
-  const promptTokens = meta.promptTokenCount ?? 0
-  const outputTokens = meta.candidatesTokenCount ?? 0
-  const totalTokens = meta.totalTokenCount ?? promptTokens + outputTokens
+  return usageFromMetadata(parsed.data.usageMetadata, model)
+}
+
+function tokenCount(value: number | undefined): number {
+  return value === undefined ? 0 : value
+}
+
+function usageFromMetadata(meta: GeminiUsageMetadata | undefined, model: ModelRef): UsageCounts | undefined {
+  if (meta === undefined) return undefined
+  const promptTokens = tokenCount(meta.promptTokenCount)
+  const outputTokens = tokenCount(meta.candidatesTokenCount) + tokenCount(meta.thoughtsTokenCount)
+  const totalTokens = meta.totalTokenCount === undefined ? promptTokens + outputTokens : meta.totalTokenCount
   return { model, promptTokens, outputTokens, totalTokens }
 }
 

@@ -398,7 +398,10 @@ export const NovelWithChaptersSchema = NovelSchema.extend({
   cast: z.array(NovelCastMemberSchema).default([]),
   relations: z.array(NovelRelationSchema).default([]),
   generation_costs: z.array(ChapterCostSchema).default([]),
+  // 本文の合計 (各章の最新の生成だけ)
   total_cost_usd: z.number().default(0),
+  // 本文以外 (章立て、作品設計、記録の抽出、検査) の合計。作り直した分も含めた全回数ぶん
+  aux_cost_usd: z.number().default(0),
   gen_job: NovelGenerationJobSchema.nullable().default(null)
 })
 export type NovelWithChapters = z.infer<typeof NovelWithChaptersSchema>

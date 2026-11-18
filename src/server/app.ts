@@ -1,6 +1,7 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
+import type { PrismaClient } from '@/generated/prisma/client'
 import {
   createCharacter,
   createVariant,
@@ -11,7 +12,7 @@ import {
   updateCharacter,
   updateVariant
 } from '@/lib/character/repository'
-import { getEnv, getPrisma } from '@/lib/db'
+import { type Env, getEnv, getPrisma } from '@/lib/db'
 import { buildOutlinePrompt, generateOutline, regenerateOutlineChapter } from '@/lib/gemini/client'
 import {
   buildCastForGemini,
@@ -19,6 +20,7 @@ import {
   buildRelationsForGemini,
   viewpointCharFor
 } from '@/lib/novel/chapter-payload'
+import { type GenerationCostInput, recordGenerationCost } from '@/lib/novel/cost'
 import {
   arrangeNovels,
   createCategory,
@@ -39,6 +41,7 @@ import {
   upsertGenerationJob
 } from '@/lib/novel/repository'
 import { buildModelCatalog } from '@/lib/openai/models'
+import type { UsageCounts } from '@/lib/openai/protocol'
 import { type CharacterVariant, CharacterVariantInputSchema, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
   ArrangeNovelsSchema,
@@ -56,6 +59,23 @@ import { readAuthEmail, requireAuth } from '@/server/auth'
 
 // 本文生成でモデル指定が無かったときの既定。
 const DEFAULT_CHAPTER_MODEL: ModelRef = 'gemini-2.5-flash'
+
+// 章立てなど本文以外の呼び出しのコストを記録する。記録に失敗しても生成結果は返したいので、
+// 例外は警告に留める。
+async function recordCostsBestEffort(
+  prisma: PrismaClient,
+  env: Env,
+  target: Omit<GenerationCostInput, 'usage'>,
+  usages: UsageCounts[]
+): Promise<void> {
+  for (const usage of usages) {
+    try {
+      await recordGenerationCost(prisma, env, { ...target, usage })
+    } catch (e) {
+      console.warn(`${target.kind} cost record failed`, e)
+    }
+  }
+}
 
 // 章番号を含むルートの param。z.coerce で文字列 → 数値に変換・検証するので
 // ハンドラ側で Number.parseInt や NaN チェックを書かなくてよい (不正なら zValidator が 400)。
@@ -278,6 +298,7 @@ export const app = new Hono()
         relations: novel.relations,
         generation_costs: novel.generation_costs,
         total_cost_usd: novel.total_cost_usd,
+        aux_cost_usd: novel.aux_cost_usd,
         gen_job: novel.generation_job
           ? (() => {
               const parsed: unknown = JSON.parse(novel.generation_job.pending)
@@ -380,7 +401,18 @@ export const app = new Hono()
           // 各章本文も整合性のため削除する (per-chapter outline regen と同じルール)。
           let merged = existing.data
           for (const n of targets) {
-            const next = await regenerateOutlineChapter(env, params, style, merged, n, options.model, cast, relations)
+            const { chapter: next, usages } = await regenerateOutlineChapter(
+              env,
+              params,
+              style,
+              merged,
+              n,
+              options.model,
+              cast,
+              relations
+            )
+            // 後の章で失敗しても、それまでに払った分は残るよう章ごとにすぐ記録する。
+            await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: n, kind: 'outline' }, usages)
             merged = {
               chapters: merged.chapters.map((ch) => (ch.chapter_number === n ? next : ch))
             }
@@ -395,7 +427,8 @@ export const app = new Hono()
         }
 
         // 全章まとめて生成。既存本文は無効化されるので全削除。
-        const outline = await generateOutline(env, params, style, options.model, cast, relations)
+        const { outline, usages } = await generateOutline(env, params, style, options.model, cast, relations)
+        await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: 0, kind: 'outline' }, usages)
         await saveOutline(prisma, id, JSON.stringify(outline))
         await prisma.chapter.deleteMany({ where: { novel_id: id } })
         return c.json({ outline })
@@ -523,7 +556,7 @@ export const app = new Hono()
         const relations = buildRelationsForGemini(novel.relations)
 
         try {
-          const next = await regenerateOutlineChapter(
+          const { chapter: next, usages } = await regenerateOutlineChapter(
             env,
             {
               title: novel.title,
@@ -540,6 +573,7 @@ export const app = new Hono()
             cast,
             relations
           )
+          await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber, kind: 'outline' }, usages)
           const merged = {
             chapters: parsedOutline.data.chapters.map((ch) => (ch.chapter_number === chapterNumber ? next : ch))
           }

@@ -140,6 +140,9 @@ model ChapterGenerationCost {
   prompt_tokens  Int
   output_tokens  Int
   cost_usd       Float
+  // 何の生成か (src/schemas/story.dto.ts の COST_KINDS)。chapter = 本文、outline = 章立てなど。
+  // この列より前の行はすべて本文なので既定値は chapter。
+  kind           String   @default("chapter")
   created_at     DateTime @default(now())
   novel          Novel    @relation(fields: [novel_id], references: [id], onDelete: Cascade)
 

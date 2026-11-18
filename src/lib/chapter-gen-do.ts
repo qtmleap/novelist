@@ -3,18 +3,11 @@ import { PrismaD1 } from '@prisma/adapter-d1'
 import { z } from 'zod'
 import { PrismaClient } from '@/generated/prisma/client'
 import type { Env } from '@/lib/db'
-import {
-  type CastMember,
-  type CastRelation,
-  computeCostUsd as computeGeminiCostUsd,
-  type StreamChapterUsage,
-  streamChapter
-} from '@/lib/gemini/client'
+import { type CastMember, type CastRelation, type StreamChapterUsage, streamChapter } from '@/lib/gemini/client'
 import { buildChapterPayload } from '@/lib/novel/chapter-payload'
+import { recordGenerationCost } from '@/lib/novel/cost'
 import { saveChapter } from '@/lib/novel/repository'
-import { computeCostUsd as computePriceCostUsd, findPrice } from '@/lib/openai/models'
 import type { ModelRef, Outline } from '@/schemas/novel.dto'
-import { parseModelRef } from '@/schemas/novel.dto'
 
 // 続きの章を作るときに、ペイロードにモデルが無かった場合の最終フォールバック。
 const DEFAULT_FALLBACK_MODEL: ModelRef = 'gemini-2.5-flash'
@@ -406,30 +399,17 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         return
       }
 
-      // コスト記録 (best-effort)
+      // コスト記録 (best-effort。記録の失敗で保存済みの本文を error にしない)
       if (usage) {
         try {
-          const costUsd =
-            parseModelRef(usage.model).provider === 'gemini'
-              ? computeGeminiCostUsd(parseModelRef(usage.model).id, usage.promptTokens, usage.outputTokens)
-              : computePriceCostUsd(
-                  await findPrice(this.env, usage.model),
-                  usage.model,
-                  usage.promptTokens,
-                  usage.outputTokens
-                )
-          await prisma.chapterGenerationCost.create({
-            data: {
-              novel_id: payload.novelId,
-              chapter_number: payload.chapterNumber,
-              model: usage.model,
-              prompt_tokens: usage.promptTokens,
-              output_tokens: usage.outputTokens,
-              cost_usd: costUsd
-            }
+          await recordGenerationCost(prisma, this.env, {
+            novelId: payload.novelId,
+            chapterNumber: payload.chapterNumber,
+            kind: 'chapter',
+            usage
           })
-        } catch {
-          /* best-effort */
+        } catch (e) {
+          console.warn('chapter cost record failed', e)
         }
       }
       await prisma.$disconnect()

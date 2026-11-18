@@ -7,7 +7,8 @@ import {
   parseResult,
   parseStreamChunk,
   type StreamTarget,
-  stripCodeFence
+  stripCodeFence,
+  type UsageCounts
 } from './protocol'
 
 function requireConfig(env: Env) {
@@ -38,7 +39,14 @@ export function openaiStreamTarget(env: Env, ref: string, id: string, prompt: st
 }
 
 // 章立て用: JSON を 1 回で受け取る。コードフェンスで囲まれていても外して返す。
-export async function openaiCompleteJsonText(env: Env, id: string, prompt: string, op: string): Promise<string> {
+// ストリームと同じく ref は保存値の形 (`openai:<id>`、usage.model に入れる)、id は上流に送るモデル名。
+export async function openaiCompleteJsonText(
+  env: Env,
+  ref: string,
+  id: string,
+  prompt: string,
+  op: string
+): Promise<{ text: string; usage: UsageCounts | undefined }> {
   const config = requireConfig(env)
   const format: OpenAIFormat = config.format
   const res = await fetch(`${config.baseUrl}${endpointPath(format)}`, {
@@ -51,11 +59,11 @@ export async function openaiCompleteJsonText(env: Env, id: string, prompt: strin
     throw new Error(`OpenAI ${op} failed: ${res.status} ${err}`)
   }
 
-  const parsed = parseResult(format, await res.json(), id)
+  const parsed = parseResult(format, await res.json(), ref)
   if (parsed.error !== undefined) throw new Error(`OpenAI ${op} failed: ${parsed.error}`)
   if (parsed.text.length === 0) {
     const reason = parsed.finishReason === undefined ? 'unknown' : parsed.finishReason
     throw new Error(`OpenAI returned empty ${op} response (finishReason=${reason})`)
   }
-  return stripCodeFence(parsed.text)
+  return { text: stripCodeFence(parsed.text), usage: parsed.usage }
 }

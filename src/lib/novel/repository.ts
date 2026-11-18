@@ -161,9 +161,11 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
   }
   const chapters = Array.from(latestChapterByNumber.values()).sort((a, b) => a.chapter_number - b.chapter_number)
 
-  // chapter_number ごとに最新コスト行のみ表示。古い世代も DB には残る。
+  // 本文 (kind = chapter) は chapter_number ごとに最新コスト行のみ表示。古い世代も DB には残る。
+  // 章立てなどの行は同じ chapter_number を持ちうるので、最新を選ぶ前に本文だけに絞る。
+  const chapterCostRows = novel.generation_costs.filter((row) => row.kind === 'chapter')
   const latestCostByChapter = new Map<number, (typeof novel.generation_costs)[0]>()
-  for (const row of novel.generation_costs) {
+  for (const row of chapterCostRows) {
     if (!latestCostByChapter.has(row.chapter_number)) {
       latestCostByChapter.set(row.chapter_number, row)
     }
@@ -176,6 +178,10 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
     cost_usd: r.cost_usd
   }))
   const total_cost_usd = generation_costs.reduce((sum, r) => sum + r.cost_usd, 0)
+  // 本文以外 (章立て、作品設計、記録の抽出、検査) は作り直した分も実際に払っているので、全行を合計する。
+  const aux_cost_usd = novel.generation_costs
+    .filter((row) => row.kind !== 'chapter')
+    .reduce((sum, row) => sum + row.cost_usd, 0)
 
   return {
     ...novel,
@@ -197,6 +203,7 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
     })),
     generation_costs,
     total_cost_usd,
+    aux_cost_usd,
     generation_job: novel.generation_job
   }
 }
