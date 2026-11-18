@@ -102,6 +102,7 @@ export const EMPTY_DEFAULTS: CreateNovelInput = {
   age_rating: DEFAULT_AGE_RATING,
   ending: DEFAULT_ENDING,
   notes: '',
+  writing_notes: '',
   editor_model: DEFAULT_EDITOR_MODEL,
   writer_model: DEFAULT_WRITER_MODEL,
   category_id: null
@@ -331,6 +332,34 @@ export function PremiseForm({ onSubmit, isSubmitting, defaultValues, mode = 'cre
                 <p className='text-xs text-muted-foreground'>
                   章立ての (再)生成時に AI
                   が各章へ振り分けて反映します。本文生成時は章立て側に乗っているので再注入しません。
+                </p>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='writing_notes'
+            render={({ field }) => (
+              <FormItem className='space-y-2'>
+                <FormLabel>
+                  執筆上の指示
+                  <ScopeTag scope='both' />
+                </FormLabel>
+                <FormControl>
+                  <Textarea
+                    placeholder={
+                      '例:\n- 地名は実在のものを使わない\n- 「俺」ではなく「僕」で統一\n- 主人公が泣く場面は入れない'
+                    }
+                    rows={4}
+                    maxLength={2000}
+                    className='resize-none'
+                    {...field}
+                  />
+                </FormControl>
+                <p className='text-xs text-muted-foreground'>
+                  表記の決まりや避けたい展開など、全ての章で守ってほしいことを書きます。
                 </p>
                 <FormMessage />
               </FormItem>

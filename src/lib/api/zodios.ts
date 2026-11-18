@@ -22,7 +22,7 @@ import {
   SaveCastSchema
 } from '@/schemas/novel.dto'
 import { ModelCatalogSchema } from '@/schemas/provider.dto'
-import { OutlineWarningSchema } from '@/schemas/story.dto'
+import { OutlineWarningSchema, StoryBibleSchema } from '@/schemas/story.dto'
 
 // API レスポンスのラッパースキーマ。サーバー側は Hono のままで、
 // ここで Zod の parse を噛ませてランタイム保証も得る。
@@ -33,6 +33,8 @@ const ErrorBodySchema = z.object({
 
 // warnings は章立ての正規化・検証で出た警告 (名簿に無い登場人物を外した、など)。無ければ空配列。
 const OutlineWrapperSchema = z.object({ outline: OutlineSchema, warnings: z.array(OutlineWarningSchema).default([]) })
+// 作品設計 (章立てと全章の本文に同じものを渡す、作品全体の設計)。
+const BibleWrapperSchema = z.object({ bible: StoryBibleSchema })
 const PromptPreviewSchema = z.object({ prompt: z.string() })
 // 章本文プロンプトは保存済みのものを返すため、この機能より前に生成された章では null になる。
 const ChapterPromptSchema = z.object({ prompt: z.string().nullable() })
@@ -150,6 +152,24 @@ export const api = makeApi([
     description: '小説を削除',
     response: z.unknown(),
     status: 204,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'post',
+    path: '/api/novels/:id/bible',
+    alias: 'generateBible',
+    description: '作品設計を生成 (作り直し)',
+    parameters: [{ name: 'body', type: 'Body', schema: GenerateOptionsSchema }],
+    response: BibleWrapperSchema,
+    errors: [{ status: 'default', schema: ErrorBodySchema }]
+  },
+  {
+    method: 'put',
+    path: '/api/novels/:id/bible',
+    alias: 'updateBible',
+    description: '作品設計を手動で上書き保存',
+    parameters: [{ name: 'body', type: 'Body', schema: BibleWrapperSchema }],
+    response: BibleWrapperSchema,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
   },
   {

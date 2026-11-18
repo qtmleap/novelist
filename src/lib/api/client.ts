@@ -15,6 +15,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   num_chapters_cannot_decrease: '章数は減らせません',
   outline_not_generated: '章立てがまだ生成されていません',
   invalid_outline: '章立てのデータが壊れています',
+  invalid_bible: '作品設計の内容に問題があります',
   invalid_chapter_number: '章番号が不正です',
   chapter_not_in_outline: 'この章は章立てに含まれていません',
   not_latest_chapter: '最新の生成済み章でのみ操作できます',

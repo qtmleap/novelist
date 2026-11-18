@@ -1,6 +1,12 @@
 import { z } from 'zod'
 import type { AvailableModel, Provider } from '@/schemas/provider.dto'
-import { ChapterRecordSchema, ChapterReviewSchema, ChapterStalenessSchema, StoryBibleSchema } from '@/schemas/story.dto'
+import {
+  ChapterRecordSchema,
+  ChapterReviewSchema,
+  ChapterStalenessSchema,
+  StoryBibleSchema,
+  StoryThreadSchema
+} from '@/schemas/story.dto'
 
 // 1 章あたりの目標文字数 (新規作成フォームのプリセット)。Novel ごとに保持し、
 // 本文生成時にサーバーがプロンプトと maxOutputTokens に反映する。
@@ -230,6 +236,8 @@ export const CreateNovelSchema = z.object({
   ending: z.string().max(30).default(DEFAULT_ENDING),
   // プロンプトに追加で混ぜる自由記述 (口調の傾向、固有名詞表記、避けたい展開など)
   notes: z.string().max(2000).default(''),
+  // 執筆上の指示 (表記の決まり、避けたい展開など)。notes と違い、章立てと本文の両方に渡す。
+  writing_notes: z.string().max(2000).default(''),
   // novel 単位の AI モデル。新規作成時は端末の設定 (localStorage) からコピー、編集時は既存値。
   // DB も NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値が入っている前提。
   editor_model: ModelRefSchema,
@@ -288,7 +296,19 @@ export const OutlineChapterSchema = z.object({
   title: z.string(),
   summary: z.string(),
   // その章に登場するキャラクター名 (正規のキャスト名と一致)。未生成の旧 outline は空配列。
-  characters: z.array(z.string()).default([])
+  characters: z.array(z.string()).default([]),
+  // ここから下は章の計画。この項目より前に作られた章立てには無いので、すべて既定値つき。
+  // 上限は保存してよい大きさ。モデルの出力は検証の前にコードで切り詰める。
+  // その章で起きる出来事 (起きる順に 3〜6 個)
+  events: z.array(z.string().nonempty().max(1000)).max(20).default([]),
+  // 時と場所
+  time_place: z.string().max(1000).default(''),
+  // 章末の状況 (誰がどこでどういう状態か)
+  end_state: z.string().max(2000).default(''),
+  // この章で張る伏線 (id は章立ての中で一意)
+  setups: z.array(StoryThreadSchema).max(30).default([]),
+  // この章で回収する伏線の id (それより前の章の setups にあるもの)
+  payoffs: z.array(z.string().nonempty().max(40)).max(30).default([])
 })
 export type OutlineChapter = z.infer<typeof OutlineChapterSchema>
 
@@ -345,6 +365,7 @@ export const NovelSchema = z.object({
   pov_character_id: z.string(),
   ending: z.string(),
   notes: z.string(),
+  writing_notes: z.string().max(2000).default(''),
   // DB は NOT NULL default 'gemini-3.1-flash-lite' なので常に有効値だが、
   // 既知の enum 以外も将来に向けて受けられるよう output schema は string で持つ。
   // フォーム入力 (CreateNovelSchema) 側は厳密に ModelRefSchema を要求している。

@@ -2,19 +2,35 @@ import { describe, expect, test } from 'bun:test'
 import {
   matchCastName,
   normalizeOutlineCharacters,
+  OUTLINE_PLAN_LIMITS,
   outlineChapterJsonSchema,
   outlineJsonSchema,
   parseOutlineChapterResponse,
   parseOutlineResponse,
   sortOutline,
-  validateOutlineShape
+  validateOutlineShape,
+  validateThreads
 } from '@/lib/novel/outline'
-import type { Outline } from '@/schemas/novel.dto'
+import type { Outline, OutlineChapter } from '@/schemas/novel.dto'
 
 const CAST = ['酒寄彩葉', '月見ヤチヨ', '八千代']
 
-function chapter(chapterNumber: number, characters: string[] = [], title = `題${chapterNumber}`, summary = '概要') {
-  return { chapter_number: chapterNumber, title, summary, characters }
+// 計画の項目 (events など) の既定値。省いた入力を parse すると、これが入る。
+function planDefaults() {
+  return { time_place: '', events: [], end_state: '', setups: [], payoffs: [] }
+}
+function withPlanDefaults<T extends object>(chapterInput: T) {
+  return { ...planDefaults(), ...chapterInput }
+}
+
+function chapter(
+  chapterNumber: number,
+  characters: string[] = [],
+  title = `題${chapterNumber}`,
+  summary = '概要',
+  plan: Partial<OutlineChapter> = {}
+): OutlineChapter {
+  return { chapter_number: chapterNumber, title, summary, characters, ...planDefaults(), ...plan }
 }
 
 describe('matchCastName', () => {
@@ -180,15 +196,30 @@ describe('normalizeOutlineCharacters', () => {
     expect(result.warnings).toEqual([])
     expect(outline.chapters[0].characters).toEqual(['酒寄彩葉', '誰か'])
   })
-  test('章の題・概要・番号は変えない', () => {
-    const outline: Outline = { chapters: [chapter(3, ['彩葉'], '出会い', '二人が出会う')] }
+  test('章の題・概要・番号と、計画の項目は変えない', () => {
+    const plan = {
+      time_place: '春の朝、駅前',
+      events: ['出会う', '別れる'],
+      end_state: '彩葉は駅のホームに一人でいる',
+      setups: [{ id: 's1', description: '腕輪が熱を持つ' }],
+      payoffs: ['s0']
+    }
+    const outline: Outline = { chapters: [chapter(3, ['彩葉'], '出会い', '二人が出会う', plan)] }
     const result = normalizeOutlineCharacters(outline, CAST)
     expect(result.outline.chapters[0]).toEqual({
       chapter_number: 3,
       title: '出会い',
       summary: '二人が出会う',
-      characters: ['酒寄彩葉']
+      characters: ['酒寄彩葉'],
+      ...plan
     })
+  })
+  test('名簿が空のときも計画の項目は変えない', () => {
+    const outline: Outline = {
+      chapters: [chapter(1, ['誰か'], '題', '概要', { events: ['出来事'], end_state: '章末' })]
+    }
+    const result = normalizeOutlineCharacters(outline, [])
+    expect(result.outline.chapters[0]).toEqual(chapter(1, [], '題', '概要', { events: ['出来事'], end_state: '章末' }))
   })
 })
 
@@ -244,6 +275,42 @@ describe('validateOutlineShape', () => {
       '章番号 1、2 の章がありません'
     ])
   })
+  test('requirePlan が無ければ、出来事も章末の状況も検査しない', () => {
+    expect(validateOutlineShape({ chapters: [chapter(1), chapter(2)] }, 2)).toEqual([])
+    expect(validateOutlineShape({ chapters: [chapter(1), chapter(2)] }, 2, { requirePlan: false })).toEqual([])
+    expect(validateOutlineShape({ chapters: [chapter(1), chapter(2)] }, 2, {})).toEqual([])
+  })
+  test('requirePlan なら、出来事が無い・章末の状況が空の章を指摘する', () => {
+    const outline: Outline = {
+      chapters: [
+        chapter(1, [], '題1', '概要', { events: ['出来事'], end_state: '章末' }),
+        chapter(2, [], '題2', '概要', { events: ['出来事'] }),
+        chapter(3, [], '題3', '概要', { end_state: '章末' }),
+        chapter(4)
+      ]
+    }
+    expect(validateOutlineShape(outline, 4, { requirePlan: true })).toEqual([
+      '第 2 章の章末の状況が空です',
+      '第 3 章の出来事がありません',
+      '第 4 章の出来事がありません',
+      '第 4 章の章末の状況が空です'
+    ])
+  })
+  test('requirePlan で、空白だけの出来事・章末の状況は空とみなす', () => {
+    const outline: Outline = { chapters: [chapter(1, [], '題', '概要', { events: [' ', '　'], end_state: ' \n ' })] }
+    expect(validateOutlineShape(outline, 1, { requirePlan: true })).toEqual([
+      '第 1 章の出来事がありません',
+      '第 1 章の章末の状況が空です'
+    ])
+  })
+  test('requirePlan で計画が揃っていれば問題なし。形の問題は先に並ぶ', () => {
+    const planned = { events: ['出来事'], end_state: '章末' }
+    expect(
+      validateOutlineShape({ chapters: [chapter(1, [], '題', '概要', planned)] }, 1, { requirePlan: true })
+    ).toEqual([])
+    const issues = validateOutlineShape({ chapters: [chapter(1, [], '題', '概要', planned)] }, 2, { requirePlan: true })
+    expect(issues).toEqual(['章の数が 2 章であるべきところ 1 章です', '章番号 2 の章がありません'])
+  })
 })
 
 describe('parseOutlineResponse', () => {
@@ -252,14 +319,14 @@ describe('parseOutlineResponse', () => {
     { chapter_number: 2, title: '別れ', summary: '概要 2' }
   ]
 
-  test('{ chapters } をそのまま受ける (characters の既定値は空配列)', () => {
+  test('{ chapters } をそのまま受ける (characters と計画の項目の既定値が入る)', () => {
     const result = parseOutlineResponse(JSON.stringify({ chapters: body }))
     expect(result).toEqual({
       ok: true,
       outline: {
         chapters: [
-          { chapter_number: 1, title: '出会い', summary: '概要 1', characters: ['酒寄彩葉'] },
-          { chapter_number: 2, title: '別れ', summary: '概要 2', characters: [] }
+          withPlanDefaults({ chapter_number: 1, title: '出会い', summary: '概要 1', characters: ['酒寄彩葉'] }),
+          withPlanDefaults({ chapter_number: 2, title: '別れ', summary: '概要 2', characters: [] })
         ]
       }
     })
@@ -307,17 +374,29 @@ describe('parseOutlineChapterResponse', () => {
   const chapterEntry = (n: number) => ({ chapter_number: n, title: `題${n}`, summary: `概要${n}`, characters: [] })
 
   test('1 章のオブジェクトをそのまま受ける (番号が違っても受ける。呼び出し側が揃える)', () => {
-    expect(parseOutlineChapterResponse(JSON.stringify(entry))).toEqual({ ok: true, chapter: entry })
-    expect(parseOutlineChapterResponse(JSON.stringify(entry), 5)).toEqual({ ok: true, chapter: entry })
+    expect(parseOutlineChapterResponse(JSON.stringify(entry))).toEqual({ ok: true, chapter: withPlanDefaults(entry) })
+    expect(parseOutlineChapterResponse(JSON.stringify(entry), 5)).toEqual({
+      ok: true,
+      chapter: withPlanDefaults(entry)
+    })
   })
   test('{ chapters: [...] } に複数あれば、対象の番号の章を選ぶ', () => {
     const chapters = [chapterEntry(1), entry, chapterEntry(3)]
-    expect(parseOutlineChapterResponse(JSON.stringify({ chapters }), 2)).toEqual({ ok: true, chapter: entry })
-    expect(parseOutlineChapterResponse(JSON.stringify({ chapters }), 3)).toEqual({ ok: true, chapter: chapterEntry(3) })
+    expect(parseOutlineChapterResponse(JSON.stringify({ chapters }), 2)).toEqual({
+      ok: true,
+      chapter: withPlanDefaults(entry)
+    })
+    expect(parseOutlineChapterResponse(JSON.stringify({ chapters }), 3)).toEqual({
+      ok: true,
+      chapter: withPlanDefaults(chapterEntry(3))
+    })
   })
   test('配列でも同じ', () => {
     const chapters = [chapterEntry(1), entry, chapterEntry(3)]
-    expect(parseOutlineChapterResponse(JSON.stringify(chapters), 1)).toEqual({ ok: true, chapter: chapterEntry(1) })
+    expect(parseOutlineChapterResponse(JSON.stringify(chapters), 1)).toEqual({
+      ok: true,
+      chapter: withPlanDefaults(chapterEntry(1))
+    })
   })
   test('同じ番号が複数あれば最初の章を選ぶ', () => {
     const chapters = [chapterEntry(1), { ...entry, title: '最初' }, { ...entry, title: '二つ目' }]
@@ -337,11 +416,17 @@ describe('parseOutlineChapterResponse', () => {
     }
   })
   test('1 件だけなら、番号が違っても受ける', () => {
-    expect(parseOutlineChapterResponse(JSON.stringify({ chapters: [entry] }), 5)).toEqual({ ok: true, chapter: entry })
-    expect(parseOutlineChapterResponse(JSON.stringify([entry]), 5)).toEqual({ ok: true, chapter: entry })
+    expect(parseOutlineChapterResponse(JSON.stringify({ chapters: [entry] }), 5)).toEqual({
+      ok: true,
+      chapter: withPlanDefaults(entry)
+    })
+    expect(parseOutlineChapterResponse(JSON.stringify([entry]), 5)).toEqual({
+      ok: true,
+      chapter: withPlanDefaults(entry)
+    })
   })
   test('対象の番号を渡さず 1 件なら受け、複数なら失敗する', () => {
-    expect(parseOutlineChapterResponse(JSON.stringify([entry]))).toEqual({ ok: true, chapter: entry })
+    expect(parseOutlineChapterResponse(JSON.stringify([entry]))).toEqual({ ok: true, chapter: withPlanDefaults(entry) })
     const result = parseOutlineChapterResponse(JSON.stringify({ chapters: [chapterEntry(1), entry] }))
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error).toContain('2 件')
@@ -349,7 +434,10 @@ describe('parseOutlineChapterResponse', () => {
   test('chapter_number が数値でない要素は一致しないものとして扱う', () => {
     const chapters = [{ ...entry, chapter_number: '2' }, { ...entry, chapter_number: null }, chapterEntry(3)]
     expect(parseOutlineChapterResponse(JSON.stringify(chapters), 2).ok).toBe(false)
-    expect(parseOutlineChapterResponse(JSON.stringify(chapters), 3)).toEqual({ ok: true, chapter: chapterEntry(3) })
+    expect(parseOutlineChapterResponse(JSON.stringify(chapters), 3)).toEqual({
+      ok: true,
+      chapter: withPlanDefaults(chapterEntry(3))
+    })
   })
   test('選んだ要素が不正ならスキーマ違反として失敗する', () => {
     const chapters = [chapterEntry(1), { chapter_number: 2, title: '題' }]
@@ -370,7 +458,350 @@ describe('parseOutlineChapterResponse', () => {
   })
 })
 
+describe('検証の前の切り詰め', () => {
+  const L = OUTLINE_PLAN_LIMITS
+  const base = { chapter_number: 1, title: '題', summary: '概要' }
+  const parseOne = (extra: Record<string, unknown>) =>
+    parseOutlineResponse(JSON.stringify({ chapters: [{ ...base, ...extra }] }))
+  const parseChapter = (extra: Record<string, unknown>) =>
+    parseOutlineChapterResponse(JSON.stringify({ ...base, ...extra }))
+  const firstChapter = (result: ReturnType<typeof parseOne>) => {
+    if (!result.ok) throw new Error(result.error)
+    return result.outline.chapters[0]
+  }
+
+  test('上限は保存の上限より小さい', () => {
+    expect(L).toEqual({
+      eventsMax: 8,
+      eventChars: 300,
+      timePlaceChars: 200,
+      endStateChars: 400,
+      setupsMax: 6,
+      setupDescriptionChars: 300,
+      idChars: 40,
+      payoffsMax: 8
+    })
+  })
+  test('文字列は trim して上限で切る', () => {
+    const c = firstChapter(
+      parseOne({
+        time_place: `　${'あ'.repeat(500)} `,
+        end_state: `\n${'い'.repeat(900)}\n`,
+        events: [` ${'う'.repeat(1500)} `, '  短い出来事  ']
+      })
+    )
+    expect(c.time_place).toBe('あ'.repeat(L.timePlaceChars))
+    expect(c.end_state).toBe('い'.repeat(L.endStateChars))
+    expect(c.events).toEqual(['う'.repeat(L.eventChars), '短い出来事'])
+  })
+  test('配列は空の項目を捨ててから、個数の上限で切る', () => {
+    const events = ['', '  ', ...Array.from({ length: 12 }, (_, i) => `出来事${i + 1}`), '　']
+    const c = firstChapter(parseOne({ events }))
+    expect(c.events).toEqual(Array.from({ length: L.eventsMax }, (_, i) => `出来事${i + 1}`))
+  })
+  test('張る伏線: id・説明を切り、説明が空の項目は捨て、個数の上限で切る', () => {
+    const setups = [
+      { id: ' s1 ', description: ` ${'あ'.repeat(500)} ` },
+      { id: 'x'.repeat(100), description: '長い id' },
+      { id: 's3', description: '   ' },
+      ...Array.from({ length: 8 }, (_, i) => ({ id: `t${i}`, description: `説明${i}` }))
+    ]
+    const c = firstChapter(parseOne({ setups }))
+    expect(c.setups).toHaveLength(L.setupsMax)
+    expect(c.setups[0]).toEqual({ id: 's1', description: 'あ'.repeat(L.setupDescriptionChars) })
+    expect(c.setups[1]).toEqual({ id: 'x'.repeat(L.idChars), description: '長い id' })
+    expect(c.setups.map((setup) => setup.id)).toEqual(['s1', 'x'.repeat(L.idChars), 't0', 't1', 't2', 't3'])
+  })
+  test('id が無い・文字列でない・空の伏線には、仮の id を振って通す', () => {
+    const setups = [
+      { description: 'id が無い' },
+      { id: '', description: 'id が空' },
+      { id: '  ', description: 'id が空白だけ' },
+      { id: 3, description: 'id が数値' },
+      { id: null, description: 'id が null' },
+      { id: 'a', description: 'id がある' }
+    ]
+    const c = firstChapter(parseOne({ setups }))
+    expect(c.setups.map((setup) => setup.id)).toEqual(['s1', 's2', 's3', 's4', 's5', 'a'])
+    expect(c.setups.map((setup) => setup.description)).toEqual(setups.map((setup) => setup.description))
+  })
+  test('仮の id は、応答の全章の id (張る側も回収する側も) と衝突しない', () => {
+    const text = JSON.stringify({
+      chapters: [
+        { ...base, setups: [{ id: 's1', description: 'a' }, { description: '仮 1' }] },
+        { ...base, chapter_number: 2, setups: [{ id: 's2', description: 'b' }, { description: '仮 2' }] },
+        { ...base, chapter_number: 3, payoffs: ['s3', ' s4 '] }
+      ]
+    })
+    const result = parseOutlineResponse(text)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.outline.chapters.map((c) => c.setups.map((setup) => setup.id))).toEqual([
+        ['s1', 's5'],
+        ['s2', 's6'],
+        []
+      ])
+    }
+  })
+  test('説明が空で id も無い項目は捨て、仮の id を消費しない', () => {
+    const c = firstChapter(
+      parseOne({ setups: [{ description: ' ' }, { id: ' ', description: '' }, { description: '説明' }] })
+    )
+    expect(c.setups).toEqual([{ id: 's1', description: '説明' }])
+  })
+  test('章 1 件の応答では、その 1 章の中で衝突しない仮の id を振る', () => {
+    const result = parseChapter({ setups: [{ id: 's1', description: 'a' }, { description: '仮' }], payoffs: ['s2'] })
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.chapter.setups.map((setup) => setup.id)).toEqual(['s1', 's3'])
+    const wrapped = parseOutlineChapterResponse(JSON.stringify([{ ...base, setups: [{ description: '仮' }] }]), 1)
+    expect(wrapped.ok).toBe(true)
+    if (wrapped.ok) expect(wrapped.chapter.setups).toEqual([{ id: 's1', description: '仮' }])
+  })
+  test('他の章と重複した仮の id は、差し替えた後に validateThreads が振り直す', () => {
+    const result = parseChapter({ chapter_number: 2, setups: [{ description: '仮' }] })
+    if (!result.ok) throw new Error(result.error)
+    const existing = chapter(1, [], '題1', '概要', { setups: [{ id: 's1', description: '既存' }] })
+    const merged = validateThreads({ chapters: [existing, result.chapter] })
+    expect(merged.outline.chapters.map((c) => c.setups.map((setup) => setup.id))).toEqual([['s1'], ['s2']])
+  })
+  test('回収する伏線: 各項目を切り、空の項目を捨て、個数の上限で切る', () => {
+    const payoffs = ['', ' s1 ', 'y'.repeat(100), ...Array.from({ length: 10 }, (_, i) => `p${i}`)]
+    const c = firstChapter(parseOne({ payoffs }))
+    expect(c.payoffs).toHaveLength(L.payoffsMax)
+    expect(c.payoffs.slice(0, 2)).toEqual(['s1', 'y'.repeat(L.idChars)])
+  })
+  test('サロゲートペアを途中で切って、保存上限を超えたり壊れた文字を作ったりしない', () => {
+    const id = `${'あ'.repeat(L.idChars - 1)}😀😀`
+    const c = firstChapter(parseOne({ payoffs: [id], setups: [{ id, description: '説明' }] }))
+    expect(c.payoffs).toEqual(['あ'.repeat(L.idChars - 1)])
+    expect(c.setups[0].id).toBe('あ'.repeat(L.idChars - 1))
+  })
+  test('上限を超えていた応答も、整えれば通る (呼び直さない)', () => {
+    const events = Array.from({ length: 25 }, (_, i) => `出来事${i}`)
+    const setups = Array.from({ length: 40 }, (_, i) => ({ id: `s${i}`, description: '説明' }))
+    expect(parseOne({ events, setups, end_state: 'あ'.repeat(5000) }).ok).toBe(true)
+  })
+  test('項目が無ければ足さず、既定値のまま', () => {
+    const c = firstChapter(parseOne({}))
+    expect(c).toEqual(withPlanDefaults({ ...base, characters: [] }))
+  })
+  test('型が違う値は触らず、検証で落とす', () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ events: '出来事を並べた文字列' }, 'events'],
+      [{ events: ['出来事', 3] }, 'events'],
+      [{ time_place: 5 }, 'time_place'],
+      [{ end_state: ['章末'] }, 'end_state'],
+      [{ setups: 'なし' }, 'setups'],
+      [{ setups: ['s1: 説明'] }, 'setups'],
+      [{ setups: [{ id: 's1' }] }, 'description'],
+      [{ setups: [{ id: 's1', description: 5 }] }, 'description'],
+      [{ setups: [{ description: 5 }] }, 'description'],
+      [{ payoffs: 's1' }, 'payoffs'],
+      [{ payoffs: ['s1', 2] }, 'payoffs']
+    ]
+    for (const [extra, field] of cases) {
+      const result = parseOne(extra)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error).toContain(field)
+    }
+  })
+  test('章 1 件の応答 (オブジェクト・配列・{ chapters }) も同じように整える', () => {
+    const extra = { events: ['', ` ${'あ'.repeat(500)}`], time_place: ` ${'い'.repeat(500)}`, payoffs: ['', 's1'] }
+    const expectedEvents = ['あ'.repeat(L.eventChars)]
+    const single = parseChapter(extra)
+    expect(single.ok).toBe(true)
+    if (single.ok) {
+      expect(single.chapter.events).toEqual(expectedEvents)
+      expect(single.chapter.time_place).toBe('い'.repeat(L.timePlaceChars))
+      expect(single.chapter.payoffs).toEqual(['s1'])
+    }
+    for (const text of [
+      JSON.stringify([{ ...base, ...extra }]),
+      JSON.stringify({ chapters: [{ ...base, ...extra }] })
+    ]) {
+      const wrapped = parseOutlineChapterResponse(text, 1)
+      expect(wrapped.ok).toBe(true)
+      if (wrapped.ok) expect(wrapped.chapter.events).toEqual(expectedEvents)
+    }
+  })
+  test('章 1 件の応答でも、型が違う値は検証で落ちる', () => {
+    const result = parseChapter({ events: 'x' })
+    expect(result.ok).toBe(false)
+  })
+})
+
+describe('validateThreads', () => {
+  const thread = (id: string, description = `説明 ${id}`) => ({ id, description })
+  const planned = (
+    chapterNumber: number,
+    setups: { id: string; description: string }[] = [],
+    payoffs: string[] = []
+  ): OutlineChapter => chapter(chapterNumber, [], `題${chapterNumber}`, '概要', { setups, payoffs })
+
+  test('伏線が 1 つも無い章立てでは、警告も変更も無い', () => {
+    const outline: Outline = { chapters: [chapter(1), chapter(2), chapter(3)] }
+    const result = validateThreads(outline)
+    expect(result.warnings).toEqual([])
+    expect(result.outline).toEqual(outline)
+  })
+  test('前の章で張った伏線を回収していれば、警告なし', () => {
+    const outline: Outline = {
+      chapters: [planned(1, [thread('s1')]), planned(2, [thread('s2')], ['s1']), planned(3, [], ['s2', 's1'])]
+    }
+    const result = validateThreads(outline)
+    expect(result.warnings).toEqual([])
+    expect(result.outline).toEqual(outline)
+  })
+  test('存在しない id・同じ章や後の章の setups を指す id は外し、id ごとに警告にする', () => {
+    const outline: Outline = {
+      chapters: [
+        planned(1, [thread('s1')], ['s9', 's2']),
+        planned(2, [thread('s2')], ['s2', 's1']),
+        planned(3, [], ['s1'])
+      ]
+    }
+    const result = validateThreads(outline)
+    expect(result.outline.chapters.map((c) => c.payoffs)).toEqual([[], ['s1'], ['s1']])
+    expect(result.warnings.filter((w) => w.kind === 'dropped_payoff')).toEqual([
+      {
+        chapter_number: 1,
+        kind: 'dropped_payoff',
+        message: '第 1 章の回収する伏線「s9」は、前の章で張られていないため外しました'
+      },
+      {
+        chapter_number: 1,
+        kind: 'dropped_payoff',
+        message: '第 1 章の回収する伏線「s2」は、前の章で張られていないため外しました'
+      },
+      {
+        chapter_number: 2,
+        kind: 'dropped_payoff',
+        message: '第 2 章の回収する伏線「s2」は、前の章で張られていないため外しました'
+      }
+    ])
+  })
+  test('同じ章の payoffs の重複は、警告なしで除く', () => {
+    const outline: Outline = { chapters: [planned(1, [thread('s1')]), planned(2, [], ['s1', ' s1', 's1', ''])] }
+    const result = validateThreads(outline)
+    expect(result.outline.chapters[1].payoffs).toEqual(['s1'])
+    expect(result.warnings).toEqual([])
+  })
+  test('どの章でも回収されない setups は、張った章の番号で unresolved_setup の警告にする', () => {
+    const outline: Outline = {
+      chapters: [planned(1, [thread('s1')]), planned(2, [thread('s3', '腕輪が熱を持つ理由')]), planned(3, [], ['s1'])]
+    }
+    const result = validateThreads(outline)
+    expect(result.warnings).toEqual([
+      {
+        chapter_number: 2,
+        kind: 'unresolved_setup',
+        message: '第 2 章で張る伏線「s3: 腕輪が熱を持つ理由」は、どの章でも回収されません'
+      }
+    ])
+  })
+  test('回収を外された伏線は、回収されていないものとして警告にする', () => {
+    const outline: Outline = { chapters: [planned(1, [thread('s1')], ['s1'])] }
+    const result = validateThreads(outline)
+    expect(result.warnings.map((w) => w.kind)).toEqual(['dropped_payoff', 'unresolved_setup'])
+  })
+  test('警告の説明は 60 字で切り、message は 600 字以内', () => {
+    const outline: Outline = {
+      chapters: [planned(1, [thread('s1', 'あ'.repeat(300))], ['い'.repeat(40)]), planned(2, [], ['う'.repeat(5000)])]
+    }
+    const result = validateThreads(outline)
+    expect(result.warnings).toHaveLength(3)
+    expect(result.warnings.find((w) => w.kind === 'unresolved_setup')?.message).toContain(`${'あ'.repeat(60)}…`)
+    for (const warning of result.warnings) expect(warning.message.length).toBeLessThanOrEqual(600)
+  })
+  test('重複した id は、後に出てきたほうを s{連番} に振り直す (警告なし、既存の id と衝突しない)', () => {
+    const outline: Outline = {
+      chapters: [
+        planned(1, [thread('s1')]),
+        planned(2, [thread('s1', '重複'), thread('s2')]),
+        planned(3, [thread('s2', '重複その 2')]),
+        planned(4, [], ['s1', 's2', 's3', 's4'])
+      ]
+    }
+    const result = validateThreads(outline)
+    expect(result.outline.chapters.map((c) => c.setups.map((setup) => setup.id))).toEqual([
+      ['s1'],
+      ['s3', 's2'],
+      ['s4'],
+      []
+    ])
+    expect(result.outline.chapters[3].payoffs).toEqual(['s1', 's2', 's3', 's4'])
+    expect(result.outline.chapters[1].setups[0].description).toBe('重複')
+    expect(result.outline.chapters[2].setups[0].description).toBe('重複その 2')
+    expect(result.warnings).toEqual([])
+  })
+  test('同じ章の中の重複も振り直す', () => {
+    const outline: Outline = { chapters: [planned(1, [thread('a'), thread('a')]), planned(2, [], ['a'])] }
+    const result = validateThreads(outline)
+    expect(result.outline.chapters[0].setups.map((setup) => setup.id)).toEqual(['a', 's1'])
+    expect(result.warnings.map((w) => w.kind)).toEqual(['unresolved_setup'])
+  })
+  test('空の id も振り直す', () => {
+    const outline: Outline = {
+      chapters: [planned(1, [thread('', '空の id'), thread(' ', '空白の id')]), planned(2, [], ['s1', 's2'])]
+    }
+    const result = validateThreads(outline)
+    expect(result.outline.chapters[0].setups.map((setup) => setup.id)).toEqual(['s1', 's2'])
+    expect(result.warnings).toEqual([])
+  })
+  test('章が番号順に並んでいなくても、章番号の昇順で処理し、返す並びは入力のまま', () => {
+    const outline: Outline = {
+      chapters: [planned(3, [], ['s1', 's2']), planned(2, [thread('s1', '後ろで重複')]), planned(1, [thread('s1')])]
+    }
+    const result = validateThreads(outline)
+    expect(result.outline.chapters.map((c) => c.chapter_number)).toEqual([3, 2, 1])
+    // 第 1 章の s1 が元の id、第 2 章の s1 は振り直されて s2 になる。第 3 章の s1 は第 1 章を指す
+    expect(result.outline.chapters.map((c) => c.setups.map((setup) => setup.id))).toEqual([[], ['s2'], ['s1']])
+    expect(result.outline.chapters[0].payoffs).toEqual(['s1', 's2'])
+    expect(result.warnings).toEqual([])
+  })
+  test('入力を変更しない', () => {
+    const outline: Outline = {
+      chapters: [planned(1, [thread('s1'), thread('s1')], ['s9']), planned(2, [thread('s2')], ['s1', 's1', 's2'])]
+    }
+    const snapshot = structuredClone(outline)
+    const result = validateThreads(outline)
+    expect(outline).toEqual(snapshot)
+    expect(result.outline).not.toBe(outline)
+    expect(result.outline.chapters[0]).not.toBe(outline.chapters[0])
+    expect(result.outline.chapters[0].setups).not.toBe(outline.chapters[0].setups)
+  })
+  test('題・概要・登場人物・計画の他の項目は変えない', () => {
+    const outline: Outline = {
+      chapters: [
+        chapter(1, ['酒寄彩葉'], '出会い', '二人が出会う', {
+          time_place: '朝の駅前',
+          events: ['出会う'],
+          end_state: '別れた後',
+          setups: [thread('s1')]
+        })
+      ]
+    }
+    const result = validateThreads(outline)
+    expect(result.outline.chapters[0]).toEqual(outline.chapters[0])
+  })
+})
+
 describe('JSON Schema', () => {
+  const planProperties = {
+    time_place: { type: 'string' },
+    events: { type: 'array', items: { type: 'string' } },
+    end_state: { type: 'string' },
+    setups: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { id: { type: 'string' }, description: { type: 'string' } },
+        required: ['id', 'description']
+      }
+    },
+    payoffs: { type: 'array', items: { type: 'string' } }
+  }
+
   test('名簿があれば characters は enum つきで入り、required に含まれる', () => {
     const schema = outlineJsonSchema(['酒寄彩葉', '月見ヤチヨ'])
     expect(schema).toEqual({
@@ -383,22 +814,58 @@ describe('JSON Schema', () => {
             properties: {
               chapter_number: { type: 'integer' },
               title: { type: 'string' },
-              summary: { type: 'string' },
-              characters: { type: 'array', items: { type: 'string', enum: ['酒寄彩葉', '月見ヤチヨ'] } }
+              characters: { type: 'array', items: { type: 'string', enum: ['酒寄彩葉', '月見ヤチヨ'] } },
+              ...planProperties,
+              summary: { type: 'string' }
             },
-            required: ['chapter_number', 'title', 'summary', 'characters']
+            required: [
+              'chapter_number',
+              'title',
+              'characters',
+              'time_place',
+              'events',
+              'end_state',
+              'setups',
+              'payoffs',
+              'summary'
+            ]
           }
         }
       },
       required: ['chapters']
     })
   })
-  test('名簿が空なら characters の項目を入れない', () => {
-    const schema = outlineJsonSchema([])
-    const text = JSON.stringify(schema)
-    expect(text).not.toContain('characters')
-    expect(text).not.toContain('enum')
-    expect(text).toContain('chapter_number')
+  test('キーの順序は、出来事と章末の状況を先に決めて概要を最後に書かせる並び', () => {
+    const chapterSchema = outlineChapterJsonSchema(['酒寄彩葉'])
+    const expected = [
+      'chapter_number',
+      'title',
+      'characters',
+      'time_place',
+      'events',
+      'end_state',
+      'setups',
+      'payoffs',
+      'summary'
+    ]
+    expect(Object.keys(chapterSchema.properties as object)).toEqual(expected)
+    expect(chapterSchema.required).toEqual(expected)
+  })
+  test('名簿が空なら characters の項目を入れない (計画の項目は入る)', () => {
+    const schema = outlineChapterJsonSchema([])
+    expect(JSON.stringify(schema)).not.toContain('characters')
+    expect(JSON.stringify(schema)).not.toContain('enum')
+    expect(schema.required).toEqual([
+      'chapter_number',
+      'title',
+      'time_place',
+      'events',
+      'end_state',
+      'setups',
+      'payoffs',
+      'summary'
+    ])
+    expect(JSON.stringify(outlineJsonSchema([]))).toContain('chapter_number')
   })
   test('enum は重複と空の名前を除く', () => {
     const schema = outlineChapterJsonSchema(['酒寄彩葉', '', '酒寄彩葉'])
@@ -409,7 +876,6 @@ describe('JSON Schema', () => {
     const whole = outlineJsonSchema(['酒寄彩葉'])
     expect(JSON.stringify(whole)).toContain(JSON.stringify(chapterSchema))
     expect(chapterSchema.type).toBe('object')
-    expect(chapterSchema.required).toEqual(['chapter_number', 'title', 'summary', 'characters'])
   })
   test('長さの制約は入れない', () => {
     const text = JSON.stringify(outlineJsonSchema(['酒寄彩葉']))

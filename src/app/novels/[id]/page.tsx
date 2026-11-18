@@ -1,10 +1,12 @@
 'use client'
 
 import { useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
-import { Copy, Loader2, Pencil, RefreshCw, Sparkles, Users } from 'lucide-react'
+import { Copy, Loader2, Pencil, RefreshCw, ScrollText, Sparkles, Users } from 'lucide-react'
 import { useParams, useRouter } from 'next/navigation'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { BibleEditor } from '@/components/novel/BibleEditor'
+import { BibleOutdatedNotice, BibleView } from '@/components/novel/BibleView'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { ChapterSelectionDialog } from '@/components/novel/ChapterSelectionDialog'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
@@ -15,6 +17,17 @@ import { OutlineView } from '@/components/novel/OutlineView'
 import { OutlineWarnings } from '@/components/novel/OutlineWarnings'
 import { PageHeader } from '@/components/PageHeader'
 import { QueryBoundary } from '@/components/QueryBoundary'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { canEdit, useAuth } from '@/hooks/useAuth'
@@ -29,7 +42,7 @@ import {
   type ModelRef,
   type Outline
 } from '@/schemas/novel.dto'
-import type { OutlineWarning } from '@/schemas/story.dto'
+import type { OutlineWarning, StoryBible } from '@/schemas/story.dto'
 
 function chaptersFromApi(apiChapters: Chapter[]): ChapterData[] {
   return apiChapters.map((c) => ({
@@ -253,6 +266,49 @@ function NovelDetailContent({ id }: { id: string }) {
   const [promptPreview, setPromptPreview] = useState<string | null>(null)
   const [promptPreviewLoading, setPromptPreviewLoading] = useState(false)
   const [isCopying, setIsCopying] = useState(false)
+  // 作品設計のダイアログ。busy は生成中 / 保存中 (どちらの間もボタンを止めてスピナーを出す)。
+  const [bibleOpen, setBibleOpen] = useState(false)
+  const [bibleMode, setBibleMode] = useState<'view' | 'edit'>('view')
+  const [bibleBusy, setBibleBusy] = useState<'generating' | 'saving' | null>(null)
+  const [bibleError, setBibleError] = useState<string | null>(null)
+  const [bibleRegenOpen, setBibleRegenOpen] = useState(false)
+
+  const handleBibleOpenChange = (open: boolean) => {
+    setBibleOpen(open)
+    if (!open) {
+      setBibleMode('view')
+      setBibleError(null)
+    }
+  }
+
+  // 作品設計の生成 (未作成からの生成も、作り直しも同じ API)。成功したら novel を取り直して表示を更新する。
+  const handleGenerateBible = async () => {
+    setBibleBusy('generating')
+    setBibleError(null)
+    try {
+      await api.generateBible({ model: asModelRef(novel.editor_model) }, { params: { id } })
+      await refetch()
+    } catch (e) {
+      setBibleError(readApiError(e, '作品設計の生成に失敗しました'))
+    } finally {
+      setBibleBusy(null)
+    }
+  }
+
+  // 失敗したら編集モードのまま理由を出す (成人指定の検証で 400 invalid_bible が返ることがある)。
+  const handleSaveBible = async (bible: StoryBible) => {
+    setBibleBusy('saving')
+    setBibleError(null)
+    try {
+      await api.updateBible({ bible }, { params: { id } })
+      await refetch()
+      setBibleMode('view')
+    } catch (e) {
+      setBibleError(readApiError(e, '作品設計の保存に失敗しました'))
+    } finally {
+      setBibleBusy(null)
+    }
+  }
 
   const handleCopy = async () => {
     setIsCopying(true)
@@ -269,6 +325,7 @@ function NovelDetailContent({ id }: { id: string }) {
         age_rating: novel.age_rating,
         ending: novel.ending,
         notes: novel.notes,
+        writing_notes: novel.writing_notes,
         editor_model: asModelRef(novel.editor_model),
         writer_model: asModelRef(novel.writer_model),
         category_id: novel.category_id
@@ -403,6 +460,16 @@ function NovelDetailContent({ id }: { id: string }) {
           <Button
             type='button'
             size='sm'
+            variant='outline'
+            className='[&_svg]:size-5!'
+            onClick={() => setBibleOpen(true)}
+          >
+            <ScrollText />
+            作品設計
+          </Button>
+          <Button
+            type='button'
+            size='sm'
             variant={outline !== null && outline.chapters.length >= novel.num_chapters ? 'outline' : 'default'}
             disabled={isGenerating || !editAllowed}
             title={!editAllowed ? 'ログインが必要です' : undefined}
@@ -450,6 +517,7 @@ function NovelDetailContent({ id }: { id: string }) {
             </Button>
           )}
         </div>
+        {novel.bible !== null && novel.bible_outdated && <BibleOutdatedNotice onOpen={() => setBibleOpen(true)} />}
       </div>
 
       {genStatus === 'error' && genError && (
@@ -524,6 +592,105 @@ function NovelDetailContent({ id }: { id: string }) {
           if (targets.length > 0) doGenerateOutline(asModelRef(novel.editor_model), targets)
         }}
       />
+
+      <Dialog open={bibleOpen} onOpenChange={handleBibleOpenChange}>
+        <DialogContent className='sm:max-w-3xl'>
+          <DialogHeader>
+            <DialogTitle>作品設計</DialogTitle>
+            <DialogDescription>章立てと全章の本文に、同じ作品設計が渡されます。</DialogDescription>
+          </DialogHeader>
+          {bibleError !== null && <ErrorAlert message={bibleError} />}
+          {novel.bible !== null && novel.bible_outdated && <BibleOutdatedNotice />}
+          {novel.bible === null ? (
+            <div className='space-y-3'>
+              <p className='text-sm text-muted-foreground'>
+                作品設計はまだありません。章立てを生成すると自動で作られます。
+              </p>
+              <Button
+                type='button'
+                size='sm'
+                className='[&_svg]:size-5!'
+                disabled={bibleBusy !== null || isGenerating || !editAllowed}
+                title={!editAllowed ? 'ログインが必要です' : undefined}
+                onClick={handleGenerateBible}
+              >
+                {bibleBusy === 'generating' ? <Loader2 className='animate-spin' /> : <Sparkles />}
+                作品設計を生成
+              </Button>
+            </div>
+          ) : bibleMode === 'edit' ? (
+            <BibleEditor
+              bible={novel.bible}
+              saving={bibleBusy === 'saving'}
+              onSave={handleSaveBible}
+              onCancel={() => {
+                setBibleMode('view')
+                setBibleError(null)
+              }}
+            />
+          ) : (
+            <>
+              <div className='max-h-[60vh] overflow-auto pr-1'>
+                <BibleView bible={novel.bible} />
+              </div>
+              <div className='flex flex-wrap justify-end gap-2'>
+                <Button
+                  type='button'
+                  size='sm'
+                  variant='outline'
+                  className='[&_svg]:size-5!'
+                  disabled={bibleBusy !== null || isGenerating || !editAllowed}
+                  title={!editAllowed ? 'ログインが必要です' : undefined}
+                  onClick={() => {
+                    setBibleError(null)
+                    setBibleMode('edit')
+                  }}
+                >
+                  <Pencil />
+                  編集
+                </Button>
+                <AlertDialog open={bibleRegenOpen} onOpenChange={setBibleRegenOpen}>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      type='button'
+                      size='sm'
+                      variant='outline'
+                      className='[&_svg]:size-5!'
+                      disabled={bibleBusy !== null || isGenerating || !editAllowed}
+                      title={!editAllowed ? 'ログインが必要です' : undefined}
+                    >
+                      {bibleBusy === 'generating' ? <Loader2 className='animate-spin' /> : <RefreshCw />}
+                      作り直す
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>作品設計を作り直しますか？</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        今の作品設計を破棄して作り直します。章立てと本文は変わりません。
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                      <AlertDialogAction
+                        className='[&_svg]:size-5!'
+                        onClick={(e) => {
+                          e.preventDefault()
+                          setBibleRegenOpen(false)
+                          handleGenerateBible()
+                        }}
+                      >
+                        <RefreshCw />
+                        作り直す
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={promptPreviewOpen} onOpenChange={setPromptPreviewOpen}>
         <DialogContent className='sm:max-w-3xl'>

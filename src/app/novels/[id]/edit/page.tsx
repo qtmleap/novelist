@@ -38,6 +38,7 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
     age_rating: novel.age_rating,
     ending: novel.ending,
     notes: novel.notes,
+    writing_notes: novel.writing_notes,
     // DB は NOT NULL default で常に有効値だが、型としては string なので parse で narrow する。
     // 無効値が混入したら表示時点で気付かせるため throw する (Surface or throw)。
     editor_model: asModelRef(novel.editor_model),

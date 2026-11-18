@@ -4,14 +4,17 @@ import { BookMarked, Check, ChevronRight, Loader2, Pencil, Users, X } from 'luci
 import Link from 'next/link'
 import { type ReactNode, useEffect, useState } from 'react'
 import { MultiSelect } from '@/components/MultiSelect'
+import { withKeys } from '@/components/novel/BibleView'
 import type { ChapterData } from '@/components/novel/ChapterReader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { routes } from '@/lib/routes'
 import { cn } from '@/lib/utils'
-import type { ChapterCost, Outline } from '@/schemas/novel.dto'
+import { type ChapterCost, type Outline, type OutlineChapter, OutlineSchema } from '@/schemas/novel.dto'
+import type { StoryThread } from '@/schemas/story.dto'
 
 type Props = {
   outline: Outline | null
@@ -27,7 +30,8 @@ type Props = {
   // 全章ぶんの枠を表示するため、明示で渡してもらう。
   expectedTotal?: number
   // 手動編集のセーブ。未指定なら編集ボタンは出さない。
-  // 既存 chapter_number の集合は維持し、title/summary/characters だけ変更される。
+  // 既存 chapter_number の集合は維持し、title/summary/characters と章の計画 (時と場所、出来事、章末の状況) だけ
+  // 変更される。伏線 (setups/payoffs) は編集できず、値をそのまま保存する。
   onSaveOutline?: (outline: Outline) => Promise<void>
   // 編集を許可するか (= 認証済かつ生成中でない)。
   canEdit?: boolean
@@ -37,6 +41,95 @@ type Props = {
 
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+}
+
+const hasPlan = (ch: OutlineChapter): boolean =>
+  ch.events.length > 0 || ch.time_place !== '' || ch.end_state !== '' || ch.setups.length > 0 || ch.payoffs.length > 0
+
+// 1 行 1 項目の欄を保存用に整える。前後の空白を落として、空行を捨てる。
+const toLines = (text: string): string[] =>
+  text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+
+// 章ごとの計画 (出来事、時と場所、章末の状況、伏線)。情報が多く一覧が長くなるので、既定は閉じる。
+// 行全体が章ページへのリンクのことがあるため、リンクの外 (行の下) に置く。
+function ChapterPlan({ chapter, setupById }: { chapter: OutlineChapter; setupById: Map<string, StoryThread> }) {
+  if (!hasPlan(chapter)) return null
+  const counts = [
+    chapter.events.length > 0 ? `出来事 ${chapter.events.length}` : '',
+    chapter.setups.length > 0 ? `伏線 ${chapter.setups.length}` : '',
+    chapter.payoffs.length > 0 ? `回収 ${chapter.payoffs.length}` : ''
+  ].filter((c) => c !== '')
+  return (
+    <details className='-mt-1.5 pr-4 pb-3 pl-[3.25rem] text-xs'>
+      <summary className='w-fit cursor-pointer select-none text-muted-foreground hover:text-foreground'>
+        章の計画
+        {counts.length > 0 && <span className='ml-2 tabular-nums'>{counts.join('・')}</span>}
+      </summary>
+      <dl className='mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 leading-relaxed'>
+        {chapter.time_place !== '' && (
+          <>
+            <dt className='text-muted-foreground'>時と場所</dt>
+            <dd>{chapter.time_place}</dd>
+          </>
+        )}
+        {chapter.events.length > 0 && (
+          <>
+            <dt className='text-muted-foreground'>出来事</dt>
+            <dd>
+              <ol className='list-decimal space-y-0.5 pl-4'>
+                {withKeys(chapter.events, (e) => e).map(({ key, item }) => (
+                  <li key={key}>{item}</li>
+                ))}
+              </ol>
+            </dd>
+          </>
+        )}
+        {chapter.end_state !== '' && (
+          <>
+            <dt className='text-muted-foreground'>章末の状況</dt>
+            <dd>{chapter.end_state}</dd>
+          </>
+        )}
+        {chapter.setups.length > 0 && (
+          <>
+            <dt className='text-muted-foreground'>張る伏線</dt>
+            <dd>
+              <ul className='space-y-0.5'>
+                {withKeys(chapter.setups, (t) => t.id).map(({ key, item: t }) => (
+                  <li key={key}>
+                    {t.description}
+                    <span className='ml-1.5 font-mono text-muted-foreground'>{t.id}</span>
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </>
+        )}
+        {chapter.payoffs.length > 0 && (
+          <>
+            <dt className='text-muted-foreground'>回収する伏線</dt>
+            <dd>
+              <ul className='space-y-0.5'>
+                {withKeys(chapter.payoffs, (id) => id).map(({ key, item: id }) => {
+                  // 説明は章立て全体の setups から id で引く。引けなければ id だけ出す。
+                  const setup = setupById.get(id)
+                  return (
+                    <li key={key}>
+                      <span className='font-mono'>{id}</span>
+                      {setup !== undefined && <span className='ml-1.5 text-muted-foreground'>{setup.description}</span>}
+                    </li>
+                  )
+                })}
+              </ul>
+            </dd>
+          </>
+        )}
+      </dl>
+    </details>
+  )
 }
 
 export function OutlineView({
@@ -56,6 +149,8 @@ export function OutlineView({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<Outline['chapters']>([])
   const [saving, setSaving] = useState(false)
+  // 保存前の検査 (文字数の上限など) で止めたときの理由。
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   // outline (prop) が外から変わったら draft も追従させる (再生成後など)。
   // 編集中の差分は捨てる: 衝突するくらいなら最新を採用する方針。
@@ -69,6 +164,9 @@ export function OutlineView({
   for (const c of costs) costByNumber.set(c.chapter_number, c)
   const outlineByNumber = new Map<number, Outline['chapters'][number]>()
   for (const ch of outline !== null ? outline.chapters : []) outlineByNumber.set(ch.chapter_number, ch)
+  // 回収する伏線の説明を引くための、章立て全体の伏線 (id → 伏線)。
+  const setupById = new Map<string, StoryThread>()
+  for (const ch of outline !== null ? outline.chapters : []) for (const t of ch.setups) setupById.set(t.id, t)
 
   // 表示対象は outline の章番号 + novel.num_chapters まで。
   // どちらも 0 のときは何も出さない。
@@ -84,17 +182,34 @@ export function OutlineView({
 
   const handleStartEdit = () => {
     setDraft(outline !== null ? outline.chapters : [])
+    setSaveError(null)
     setEditing(true)
   }
   const handleCancelEdit = () => {
     setDraft(outline !== null ? outline.chapters : [])
+    setSaveError(null)
     setEditing(false)
   }
   const handleSave = async () => {
     if (onSaveOutline === undefined) return
+    setSaveError(null)
+    // 出来事の欄は入力中に空行を残したいので draft には行をそのまま持ち、保存のときに整える。
+    // 伏線 (setups/payoffs) は編集できないので、draft の値をそのまま渡す。
+    const parsed = OutlineSchema.safeParse({
+      chapters: draft.map((c) => ({
+        ...c,
+        time_place: c.time_place.trim(),
+        end_state: c.end_state.trim(),
+        events: toLines(c.events.join('\n'))
+      }))
+    })
+    if (!parsed.success) {
+      setSaveError('章の計画が長すぎます。出来事は 20 個まで、1 つ 1,000 字までにしてください')
+      return
+    }
     setSaving(true)
     try {
-      await onSaveOutline({ chapters: draft })
+      await onSaveOutline(parsed.data)
       setEditing(false)
     } finally {
       setSaving(false)
@@ -156,6 +271,11 @@ export function OutlineView({
           </div>
         )}
       </div>
+      {saveError !== null && (
+        <p role='alert' className='text-sm text-destructive'>
+          {saveError}
+        </p>
+      )}
       <ol className='divide-y border-y'>
         {slots.map((n) => {
           const ch = outlineByNumber.get(n)
@@ -211,6 +331,46 @@ export function OutlineView({
                       )}
                     </div>
                   )}
+                  <div className='space-y-1'>
+                    <Label htmlFor={`outline-${n}-time-place`} className='text-xs font-medium text-muted-foreground'>
+                      時と場所
+                    </Label>
+                    <Input
+                      id={`outline-${n}-time-place`}
+                      value={draftChapter.time_place}
+                      onChange={(e) => updateDraft(n, { time_place: e.target.value })}
+                      maxLength={1000}
+                      className='text-sm'
+                    />
+                  </div>
+                  <div className='space-y-1'>
+                    <Label htmlFor={`outline-${n}-events`} className='text-xs font-medium text-muted-foreground'>
+                      出来事
+                    </Label>
+                    <Textarea
+                      id={`outline-${n}-events`}
+                      value={draftChapter.events.join('\n')}
+                      // 入力中に空行を消すと改行できないので、行で分けるだけにして、整えるのは保存のとき。
+                      onChange={(e) => updateDraft(n, { events: e.target.value.split('\n') })}
+                      placeholder='1 行に 1 つずつ書きます'
+                      rows={4}
+                      className='resize-none text-xs leading-relaxed'
+                    />
+                  </div>
+                  <div className='space-y-1'>
+                    <Label htmlFor={`outline-${n}-end-state`} className='text-xs font-medium text-muted-foreground'>
+                      章末の状況
+                    </Label>
+                    <Textarea
+                      id={`outline-${n}-end-state`}
+                      value={draftChapter.end_state}
+                      onChange={(e) => updateDraft(n, { end_state: e.target.value })}
+                      placeholder='誰がどこでどういう状態か'
+                      rows={2}
+                      maxLength={2000}
+                      className='resize-none text-xs leading-relaxed'
+                    />
+                  </div>
                 </div>
               </li>
             )
@@ -286,6 +446,7 @@ export function OutlineView({
               ) : (
                 <div className={className}>{rowContent}</div>
               )}
+              {ch !== undefined && <ChapterPlan chapter={ch} setupById={setupById} />}
             </li>
           )
         })}
