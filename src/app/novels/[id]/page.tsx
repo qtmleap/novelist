@@ -334,6 +334,17 @@ function NovelDetailContent({ id }: { id: string }) {
   const [bibleError, setBibleError] = useState<string | null>(null)
   const [bibleRegenOpen, setBibleRegenOpen] = useState(false)
 
+  // 生成・保存の最中にダイアログを閉じられても失敗が見えるよう、閉じているときは toast でも知らせる。
+  // (開いているときは、ダイアログの中に出す。)
+  const bibleOpenRef = useRef(false)
+  useEffect(() => {
+    bibleOpenRef.current = bibleOpen
+  }, [bibleOpen])
+  const reportBibleError = (message: string) => {
+    setBibleError(message)
+    if (!bibleOpenRef.current) toast.error(message)
+  }
+
   const handleBibleOpenChange = (open: boolean) => {
     setBibleOpen(open)
     if (!open) {
@@ -350,7 +361,7 @@ function NovelDetailContent({ id }: { id: string }) {
       await api.generateBible({ model: asModelRef(novel.editor_model) }, { params: { id } })
       await refetch()
     } catch (e) {
-      setBibleError(readApiError(e, '作品設計の生成に失敗しました'))
+      reportBibleError(readApiError(e, '作品設計の生成に失敗しました'))
     } finally {
       setBibleBusy(null)
     }
@@ -365,7 +376,7 @@ function NovelDetailContent({ id }: { id: string }) {
       await refetch()
       setBibleMode('view')
     } catch (e) {
-      setBibleError(readApiError(e, '作品設計の保存に失敗しました'))
+      reportBibleError(readApiError(e, '作品設計の保存に失敗しました'))
     } finally {
       setBibleBusy(null)
     }

@@ -1,6 +1,6 @@
 'use client'
 
-import { PenLine } from 'lucide-react'
+import { Loader2, PenLine } from 'lucide-react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
@@ -28,12 +28,14 @@ type FormProps = {
   chapterNumber: number
   issues: ReviewIssue[]
   disabled: boolean
+  submitting: boolean
+  error: string | null
   onSubmit: (instruction: string) => void
 }
 
 // 入力欄。ダイアログが開くたびに作り直されるので (DialogContent は閉じると外れる)、
 // 下書きは useState の初期値で渡すだけで済む。開いている間の編集は、再描画で消えない。
-function ReviseForm({ chapterNumber, issues, disabled, onSubmit }: FormProps) {
+function ReviseForm({ chapterNumber, issues, disabled, submitting, error, onSubmit }: FormProps) {
   const [instruction, setInstruction] = useState(() => draftFromIssues(issues))
   // サーバーの上限は文字列の長さ (UTF-16) で数えるので、同じ数え方にする。
   const remaining = MAX_INSTRUCTION_CHARS - instruction.length
@@ -67,9 +69,18 @@ function ReviseForm({ chapterNumber, issues, disabled, onSubmit }: FormProps) {
           </span>
         </div>
       </div>
+      {/* live region は常に描画する (中身と同時に差し込むと読み上げられないことがあるため)。
+          開始が断られたときの理由 (サーバーの detail を含む) を、指示の下書きを残したまま出す。 */}
+      <div aria-live='assertive'>
+        {error !== null && (
+          <p role='alert' className='text-sm text-destructive'>
+            {error}
+          </p>
+        )}
+      </div>
       <DialogFooter>
         <DialogClose asChild>
-          <Button type='button' variant='ghost'>
+          <Button type='button' variant='ghost' disabled={submitting}>
             キャンセル
           </Button>
         </DialogClose>
@@ -80,7 +91,8 @@ function ReviseForm({ chapterNumber, issues, disabled, onSubmit }: FormProps) {
           title={trimmed === '' ? '指示を入力してください' : undefined}
           className='[&_svg]:size-5!'
         >
-          <PenLine />第 {chapterNumber} 章を書き直す
+          {submitting ? <Loader2 className='animate-spin' /> : <PenLine />}
+          {submitting ? '開始中…' : `第 ${chapterNumber} 章を書き直す`}
         </Button>
       </DialogFooter>
     </>
@@ -94,10 +106,23 @@ type Props = {
   // 検査の指摘のうち、書き直しに使うものとして選んだもの。指示の下書きになる。
   issues: ReviewIssue[]
   disabled: boolean
+  // 書き直しの開始を依頼している間。実行ボタンに進行を出す。
+  submitting: boolean
+  // 開始が断られた理由。ダイアログは開いたままで、指示の下書きは残る。
+  error: string | null
   onSubmit: (instruction: string) => void
 }
 
-export function ReviseDialog({ open, onOpenChange, chapterNumber, issues, disabled, onSubmit }: Props) {
+export function ReviseDialog({
+  open,
+  onOpenChange,
+  chapterNumber,
+  issues,
+  disabled,
+  submitting,
+  error,
+  onSubmit
+}: Props) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='sm:max-w-2xl'>
@@ -105,7 +130,14 @@ export function ReviseDialog({ open, onOpenChange, chapterNumber, issues, disabl
           <DialogTitle>第 {chapterNumber} 章を指示して書き直す</DialogTitle>
           <DialogDescription>指示した点だけを直した新しい版を作ります。元の版は履歴に残ります。</DialogDescription>
         </DialogHeader>
-        <ReviseForm chapterNumber={chapterNumber} issues={issues} disabled={disabled} onSubmit={onSubmit} />
+        <ReviseForm
+          chapterNumber={chapterNumber}
+          issues={issues}
+          disabled={disabled}
+          submitting={submitting}
+          error={error}
+          onSubmit={onSubmit}
+        />
       </DialogContent>
     </Dialog>
   )

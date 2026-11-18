@@ -64,7 +64,7 @@ describe('startReviewPolling', () => {
         calls.settled += 1
       }
     })
-    await sleep(150)
+    await sleep(400)
     expect(calls).toEqual({ check: REVIEW_POLL_MAX_ATTEMPTS, settled: 1 })
   })
 

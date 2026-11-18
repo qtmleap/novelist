@@ -61,6 +61,14 @@ function parseRoute(pathname: string): { novelId: string; chapterNumber: number 
   }
 }
 
+type GenerationRun = {
+  instruction: string
+  baseVersionId: string
+  failureMessage: string
+  onStarted?: () => void
+  onStartFailed?: (message: string) => void
+}
+
 function ChapterMeta({ chars, cost }: { chars: number; cost?: ChapterCost }) {
   return (
     <div className='flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground'>
@@ -126,6 +134,9 @@ export default function ChapterDetailPage() {
   const [novel, setNovel] = useState<NovelWithChapters | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // 生成の開始を依頼している間 (本文はまだ流れない)。始められなかったときに画面を元に戻せるよう、
+  // 本文の表示を切り替える isRegenerating とは分ける。
+  const [starting, setStarting] = useState(false)
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [buffer, setBuffer] = useState('')
   // 再生成中の今の段階。本文が流れるのは writing の間だけなので、他の段階で止まって見えないよう表示する。
@@ -151,6 +162,8 @@ export default function ChapterDetailPage() {
   // 指示つきの書き直し。選んだ検査の指摘 (review.issues の添字) は、どの版のものかを覚えておく。
   // 再生成で版が替わると chapterId が合わなくなり、添字が別の版の指摘を指さずに自然に空になる。
   const [reviseOpen, setReviseOpen] = useState(false)
+  // 書き直しの開始に失敗した理由。ダイアログを開いたまま、指示の下書きを残して出す。
+  const [reviseError, setReviseError] = useState<string | null>(null)
   // 完了した章の検査の結果を待っている間 (サーバーは done の後に検査を走らせる)。どの小説のどの章かを覚えておく。
   const [reviewPending, setReviewPending] = useState<{ novelId: string; chapterNumber: number } | null>(null)
   const stopReviewPollRef = useRef<(() => void) | null>(null)
@@ -205,6 +218,7 @@ export default function ChapterDetailPage() {
     if (running === null || runRouteRef.current === `${novelId}/${chapterNumber}`) return
     running.abort()
     abortRef.current = null
+    setStarting(false)
     setIsRegenerating(false)
     setBuffer('')
     setStage(null)
@@ -258,7 +272,9 @@ export default function ChapterDetailPage() {
   }
 
   // 本文の再生成。instruction が空なら同じ資料で書き直し、あれば base_version_id の版を元に指示した点だけを直す。
-  const runGeneration = async (instruction: string, baseVersionId: string, failureMessage: string) => {
+  // 開始の依頼が断られたとき (成人指定の検証の 400 など) は、onStartFailed があればそちらに理由を渡し、
+  // 無ければ画面のエラーとして出す。onStarted は開始の依頼が通った時点で呼ぶ。
+  const runGeneration = async (run: GenerationRun) => {
     if (!novelId || chapterNumber <= 0 || !novel) return
     // 前の版の検査の結果を待っていたら止める。新しい版が完了したら、そのとき改めて待つ。
     stopReviewPollRef.current?.()
@@ -270,17 +286,29 @@ export default function ChapterDetailPage() {
     abortRef.current = abort
     runRouteRef.current = `${novelId}/${chapterNumber}`
     const stopped = () => abort.signal.aborted
-    setIsRegenerating(true)
-    setBuffer('')
-    setStage(null)
+    setStarting(true)
     setError(null)
     try {
       await api.startChapterGeneration(
-        { model: asModelRef(novel.writer_model), instruction, base_version_id: baseVersionId },
+        { model: asModelRef(novel.writer_model), instruction: run.instruction, base_version_id: run.baseVersionId },
         { params: { id: novelId, number: String(chapterNumber) } }
       )
+    } catch (e) {
+      if (abortRef.current === abort) abortRef.current = null
       if (stopped()) return
-
+      setStarting(false)
+      const message = readApiError(e, run.failureMessage)
+      if (run.onStartFailed !== undefined) run.onStartFailed(message)
+      else setError(message)
+      return
+    }
+    if (stopped()) return
+    setStarting(false)
+    setIsRegenerating(true)
+    setBuffer('')
+    setStage(null)
+    run.onStarted?.()
+    try {
       const outcome = await new Promise<{ done: boolean; hasReview: boolean }>((resolve) => {
         const sub = subscribeChapterStream(`/api/novels/${novelId}/chapters/${chapterNumber}/stream`, {
           onStage: (next) => {
@@ -325,7 +353,7 @@ export default function ChapterDetailPage() {
       // 検査は done の後に走るので、この時点ではまだ無いことが多い。入るまで取り直す。
       if (outcome.done && !outcome.hasReview) beginReviewPolling(novelId, chapterNumber)
     } catch (e) {
-      if (!stopped()) setError(readApiError(e, failureMessage))
+      if (!stopped()) setError(readApiError(e, run.failureMessage))
     } finally {
       // 自分の合図が最新のままなら片付ける。止められていたら、画面の state は触らない。
       if (abortRef.current === abort) abortRef.current = null
@@ -337,13 +365,21 @@ export default function ChapterDetailPage() {
     }
   }
 
-  const handleRegenerate = () => runGeneration('', '', '再生成に失敗しました')
+  const handleRegenerate = () =>
+    runGeneration({ instruction: '', baseVersionId: '', failureMessage: '再生成に失敗しました' })
 
   // 今表示している版 (最新の版) を元に、指示した点だけを直した新しい版を作る。
+  // 開始が断られたらダイアログを開いたままにして理由を出す (閉じると指示の下書きが消えるため)。通ったら閉じる。
   const handleRevise = (instruction: string) => {
     if (chapter === null) return
-    setReviseOpen(false)
-    void runGeneration(instruction, chapter.id, '書き直しに失敗しました')
+    setReviseError(null)
+    void runGeneration({
+      instruction,
+      baseVersionId: chapter.id,
+      failureMessage: '書き直しを始められませんでした',
+      onStarted: () => setReviseOpen(false),
+      onStartFailed: setReviseError
+    })
   }
 
   const handleDelete = async () => {
@@ -395,7 +431,7 @@ export default function ChapterDetailPage() {
     reviewPending.chapterNumber === chapterNumber
 
   const displayContent = isRegenerating ? buffer : (chapter?.content ?? '')
-  const busy = isRegenerating || isDeleting
+  const busy = isRegenerating || starting || isDeleting
 
   // 履歴ダイアログで選択中の version (未選択なら先頭=最新)。
   const historyVersions = historyView.status === 'loaded' ? historyView.versions : []
@@ -556,7 +592,10 @@ export default function ChapterDetailPage() {
               size='sm'
               disabled={busy || !canRegenerate || !editAllowed}
               title={!editAllowed ? 'ログインが必要です' : undefined}
-              onClick={() => setReviseOpen(true)}
+              onClick={() => {
+                setReviseError(null)
+                setReviseOpen(true)
+              }}
               className='[&_svg]:size-5!'
             >
               <PenLine />
@@ -585,7 +624,7 @@ export default function ChapterDetailPage() {
                     title={!editAllowed ? 'ログインが必要です' : undefined}
                     className='[&_svg]:size-5!'
                   >
-                    {isRegenerating ? <Loader2 className='animate-spin' /> : <RefreshCw />}
+                    {isRegenerating || starting ? <Loader2 className='animate-spin' /> : <RefreshCw />}
                     本文を再生成
                   </Button>
                 </AlertDialogTrigger>
@@ -680,10 +719,15 @@ export default function ChapterDetailPage() {
 
           <ReviseDialog
             open={reviseOpen}
-            onOpenChange={setReviseOpen}
+            // 開始を依頼している間は閉じさせない (失敗の理由を、下書きを残したまま見せるため)。
+            onOpenChange={(next) => {
+              if (!starting) setReviseOpen(next)
+            }}
             chapterNumber={chapterNumber}
             issues={selectedIssues}
             disabled={busy || !editAllowed}
+            submitting={starting}
+            error={reviseError}
             onSubmit={handleRevise}
           />
 
