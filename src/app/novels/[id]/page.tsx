@@ -13,7 +13,7 @@ import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { GenerationStatus } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
 import { OutlineSelectionDialog } from '@/components/novel/OutlineSelectionDialog'
-import { OutlineView } from '@/components/novel/OutlineView'
+import { OutlineView, type ReviewCounts } from '@/components/novel/OutlineView'
 import { OutlineWarnings } from '@/components/novel/OutlineWarnings'
 import { PageHeader } from '@/components/PageHeader'
 import { QueryBoundary } from '@/components/QueryBoundary'
@@ -32,6 +32,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import { chapterHasReview, startReviewPolling } from '@/lib/review-polling'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
 import {
@@ -229,12 +230,54 @@ function NovelDetailContent({ id }: { id: string }) {
   )
 
   const abortRef = useRef<AbortController | null>(null)
+  // 完了した章の検査の結果を待つ取り直しを止める関数。
+  const stopReviewPollRef = useRef<(() => void) | null>(null)
 
   // 章の本文・章立てが変わると、別の章の「要再生成」も変わる。サーバーから取り直して章の一覧に反映する。
+  // 取り直した novel を返す (取り直せなかったときは undefined)。
   const syncChapters = useCallback(async () => {
     const { data: fresh } = await refetch()
     if (fresh) dispatch({ type: 'CHAPTERS_REFRESHED', chapters: chaptersFromApi(fresh.chapters) })
+    return fresh
   }, [refetch])
+
+  // サーバーは done の後に検査を走らせるので、done の直後の取り直しでは検査の結果がまだ無い。入るまで取り直す。
+  // バッチの途中の章は、次の章が始まった時点で止める (次の章の完了時の取り直しで一緒に入る)。
+  const waitForReview = useCallback(
+    (chapterNumber: number) => {
+      stopReviewPollRef.current?.()
+      stopReviewPollRef.current = startReviewPolling({
+        check: async () => {
+          const fresh = await syncChapters()
+          return fresh !== undefined && chapterHasReview(fresh.chapters, chapterNumber)
+        },
+        onSettled: () => {
+          stopReviewPollRef.current = null
+        }
+      })
+    },
+    [syncChapters]
+  )
+
+  // 章の完了後: 章の一覧を取り直し、検査の結果がまだ無ければ取り直しを始める。
+  const handleChapterDone = useCallback(
+    (chapterNumber: number) => {
+      void syncChapters()
+        .then((fresh) => {
+          if (fresh !== undefined) {
+            if (chapterHasReview(fresh.chapters, chapterNumber)) return
+            const job = fresh.gen_job
+            // 次の章がもう始まっているなら、その章の完了後の取り直しで一緒に入るので、ここでは待たない。
+            if (job !== null && job !== undefined && job.status === 'running' && job.current !== null) {
+              if (job.current !== chapterNumber) return
+            }
+          }
+          waitForReview(chapterNumber)
+        })
+        .catch(() => waitForReview(chapterNumber))
+    },
+    [syncChapters, waitForReview]
+  )
 
   const genJob = novel.gen_job
   const genJobCurrentKey =
@@ -244,6 +287,9 @@ function NovelDetailContent({ id }: { id: string }) {
     if (genJobCurrentKey === null) return
 
     const chapterNum = genJobCurrentKey
+    // 別の章の生成が始まったら、前の章の検査の結果の取り直しは止める。
+    stopReviewPollRef.current?.()
+    stopReviewPollRef.current = null
     dispatch({ type: 'CHAPTER_START', chapterNumber: chapterNum })
 
     const abort = new AbortController()
@@ -255,7 +301,7 @@ function NovelDetailContent({ id }: { id: string }) {
       onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
       onDone: ({ chapterId, title }) => {
         dispatch({ type: 'CHAPTER_DONE', chapterNumber: chapterNum, chapterId, title })
-        void syncChapters()
+        handleChapterDone(chapterNum)
       },
       onError: (msg) => dispatch({ type: 'CHAPTER_ERR', error: msg })
     })
@@ -269,7 +315,7 @@ function NovelDetailContent({ id }: { id: string }) {
       sub.close()
       abort.abort()
     }
-  }, [genJobCurrentKey, id, syncChapters])
+  }, [genJobCurrentKey, id, handleChapterDone])
 
   const [outlineDialogOpen, setOutlineDialogOpen] = useState(false)
   const [chapterDialogOpen, setChapterDialogOpen] = useState(false)
@@ -415,6 +461,15 @@ function NovelDetailContent({ id }: { id: string }) {
   // 生成する章の選択ダイアログに渡す集合。毎回作り直すと、開いている間に再描画されるたびに選択が初期化されるので、
   // chapters が変わったときだけ作る。
   const chaptersDone = useMemo(() => new Set(chapters.filter((c) => c.done).map((c) => c.number)), [chapters])
+  // 章ごとの検査の警告の件数 (章立ての一覧の「確認 N」)。novel は取り直すたびに最新になる。
+  const reviewCounts = useMemo(() => {
+    const counts = new Map<number, ReviewCounts>()
+    for (const c of novel.chapters) {
+      if (c.review !== null)
+        counts.set(c.chapter_number, { checks: c.review.checks.length, issues: c.review.issues.length })
+    }
+    return counts
+  }, [novel.chapters])
   const chaptersStale = useMemo(
     () => new Set(chapters.filter((c) => c.done && c.stale).map((c) => c.number)),
     [chapters]
@@ -425,6 +480,8 @@ function NovelDetailContent({ id }: { id: string }) {
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
+      // ページを離れたら検査の結果の取り直しも止める。
+      stopReviewPollRef.current?.()
     }
   }, [])
 
@@ -561,6 +618,7 @@ function NovelDetailContent({ id }: { id: string }) {
         isGenerating={genStatus === 'generatingOutline'}
         isBusy={isGenerating}
         chapters={chapters}
+        reviewCounts={reviewCounts}
         costs={novel.generation_costs}
         streamingIndex={streamingIndex}
         novelId={novel.id}

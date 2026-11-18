@@ -1,6 +1,6 @@
 'use client'
 
-import { BookMarked, Check, ChevronRight, Loader2, Pencil, TriangleAlert, Users, X } from 'lucide-react'
+import { BookMarked, Check, ChevronRight, ListChecks, Loader2, Pencil, TriangleAlert, Users, X } from 'lucide-react'
 import Link from 'next/link'
 import { type ReactNode, useEffect, useState } from 'react'
 import { MultiSelect } from '@/components/MultiSelect'
@@ -16,12 +16,17 @@ import { cn } from '@/lib/utils'
 import { type ChapterCost, type Outline, type OutlineChapter, OutlineSchema } from '@/schemas/novel.dto'
 import type { StoryThread } from '@/schemas/story.dto'
 
+// 章ごとの検査の警告の件数。checks = 機械的な検査、issues = 内容の矛盾の指摘。
+export type ReviewCounts = { checks: number; issues: number }
+
 type Props = {
   outline: Outline | null
   isGenerating: boolean
   regenerateSlot?: ReactNode
   isBusy?: boolean
   chapters: ChapterData[]
+  // 章番号 → 検査の警告の件数。無い章、または 0 件の章には「確認」の印を出さない。
+  reviewCounts?: ReadonlyMap<number, ReviewCounts>
   costs: ChapterCost[]
   streamingIndex?: number | null
   // 生成済みの章を押したときの遷移先 (例: /novels/[id]/chapters/[number])。
@@ -67,6 +72,29 @@ function StaleBadge({ reasons }: { reasons: ChapterData['staleReasons'] }) {
     >
       <TriangleAlert aria-hidden='true' />
       要再生成
+    </Badge>
+  )
+}
+
+// 本文はあるが、検査で確認してほしい点が見つかった章の印。「要再生成」(amber の塗り) とは別に、枠だけの体裁にする。
+// 内訳は title と aria-label に入れる。検査は AI の判定を含み誤りがありうるので、「警告」ではなく「確認」と呼ぶ。
+function ReviewBadge({ counts }: { counts: ReviewCounts }) {
+  const total = counts.checks + counts.issues
+  const parts = [
+    counts.issues > 0 ? `内容の矛盾 ${counts.issues} 件` : '',
+    counts.checks > 0 ? `機械的な検査 ${counts.checks} 件` : ''
+  ].filter((p) => p !== '')
+  const detail = parts.join('・')
+  return (
+    <Badge
+      variant='outline'
+      role='img'
+      title={detail}
+      aria-label={`検査で確認事項が ${total} 件: ${detail}`}
+      className='font-normal text-muted-foreground'
+    >
+      <ListChecks aria-hidden='true' />
+      確認 <span className='tabular-nums'>{total}</span>
     </Badge>
   )
 }
@@ -155,6 +183,7 @@ export function OutlineView({
   isGenerating,
   regenerateSlot,
   chapters,
+  reviewCounts,
   costs,
   streamingIndex = null,
   novelId,
@@ -302,6 +331,7 @@ export function OutlineView({
           const isStreaming = streamingIndex === n
           const linkable = done && novelId !== undefined && !editing
           const cost = costByNumber.get(n)
+          const reviewCount = reviewCounts !== undefined ? reviewCounts.get(n) : undefined
           const hasOutlineEntry = ch !== undefined
           const draftChapter = draft.find((d) => d.chapter_number === n)
           // 編集モードでは draft のエントリだけを並べる (outline.chapters の中身を直接いじる)。
@@ -415,6 +445,9 @@ export function OutlineView({
                     />
                   ) : null}
                   {done && chapterData?.stale === true && <StaleBadge reasons={chapterData.staleReasons} />}
+                  {done && reviewCount !== undefined && reviewCount.checks + reviewCount.issues > 0 && (
+                    <ReviewBadge counts={reviewCount} />
+                  )}
                 </p>
                 {hasOutlineEntry ? (
                   <p className='mt-0.5 text-xs leading-relaxed text-muted-foreground'>{ch.summary}</p>

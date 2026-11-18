@@ -1,14 +1,16 @@
 'use client'
 
-import { ClipboardList, FileText, History, Loader2, RefreshCw, Trash2, TriangleAlert } from 'lucide-react'
+import { ClipboardList, FileText, History, Loader2, PenLine, RefreshCw, Trash2, TriangleAlert } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { STALE_REASON_LABELS } from '@/components/novel/ChapterReader'
 import { ChapterRecordView } from '@/components/novel/ChapterRecordView'
+import { ChapterReviewView } from '@/components/novel/ChapterReviewView'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
 import { CHAPTER_STAGE_LABELS } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
+import { ReviseDialog } from '@/components/novel/ReviseDialog'
 import { PageHeader } from '@/components/PageHeader'
 import {
   AlertDialog,
@@ -25,6 +27,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
+import { chapterHasReview, startReviewPolling } from '@/lib/review-polling'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
@@ -142,9 +145,19 @@ export default function ChapterDetailPage() {
   >({ status: 'loading' })
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
   // 履歴ダイアログで、選んだ版の何を表示するか。
-  const [versionView, setVersionView] = useState<'content' | 'prompt' | 'record'>('content')
+  const [versionView, setVersionView] = useState<'content' | 'prompt' | 'record' | 'review'>('content')
   // 章の記録 (本文から抽出した確定事項) の表示。
   const [recordOpen, setRecordOpen] = useState(false)
+  // 指示つきの書き直し。選んだ検査の指摘 (review.issues の添字) は、どの版のものかを覚えておく。
+  // 再生成で版が替わると chapterId が合わなくなり、添字が別の版の指摘を指さずに自然に空になる。
+  const [reviseOpen, setReviseOpen] = useState(false)
+  // 完了した章の検査の結果を待っている間 (サーバーは done の後に検査を走らせる)。どの小説のどの章かを覚えておく。
+  const [reviewPending, setReviewPending] = useState<{ novelId: string; chapterNumber: number } | null>(null)
+  const stopReviewPollRef = useRef<(() => void) | null>(null)
+  const [issueSelection, setIssueSelection] = useState<{ chapterId: string; indexes: ReadonlySet<number> }>({
+    chapterId: '',
+    indexes: new Set()
+  })
   const abortRef = useRef<AbortController | null>(null)
   const auth = useAuth()
   const editAllowed = canEdit(auth)
@@ -176,6 +189,8 @@ export default function ChapterDetailPage() {
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
+      // ページを離れたら検査の結果の取り直しも止める。
+      stopReviewPollRef.current?.()
     }
   }, [])
 
@@ -189,22 +204,61 @@ export default function ChapterDetailPage() {
   const isLatest = chapter !== null && chapterNumber === latestDoneNumber
   const canRegenerate = chapter !== null
 
+  // 書き直しの下書きに使う検査の指摘。選択は今の版のものだけを有効にする。
+  const selectedIssueIndexes =
+    chapter !== null && issueSelection.chapterId === chapter.id ? issueSelection.indexes : null
+  const selectedIssues =
+    chapter !== null && chapter.review !== null && selectedIssueIndexes !== null
+      ? chapter.review.issues.filter((_, i) => selectedIssueIndexes.has(i))
+      : []
+  const toggleIssue = (index: number) => {
+    if (chapter === null) return
+    setIssueSelection((prev) => {
+      const next = new Set(prev.chapterId === chapter.id ? prev.indexes : [])
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return { chapterId: chapter.id, indexes: next }
+    })
+  }
+
   const prevHref = chapterNumber > 1 && novelId ? routes.novels.chapter(novelId, chapterNumber - 1) : null
   const nextHref = chapterNumber < totalChapters && novelId ? routes.novels.chapter(novelId, chapterNumber + 1) : null
 
-  const handleRegenerate = async () => {
+  // 検査の結果が入るまで、限られた回数だけ取り直す。別の小説の取り直しで画面を上書きしないよう、同じ小説のときだけ反映する。
+  const beginReviewPolling = (targetNovelId: string, targetChapter: number) => {
+    stopReviewPollRef.current?.()
+    setReviewPending({ novelId: targetNovelId, chapterNumber: targetChapter })
+    stopReviewPollRef.current = startReviewPolling({
+      check: async () => {
+        const refreshed = await api.getNovel({ params: { id: targetNovelId } })
+        setNovel((prev) => (prev !== null && prev.id === refreshed.id ? refreshed : prev))
+        return chapterHasReview(refreshed.chapters, targetChapter)
+      },
+      onSettled: () => {
+        stopReviewPollRef.current = null
+        setReviewPending(null)
+      }
+    })
+  }
+
+  // 本文の再生成。instruction が空なら同じ資料で書き直し、あれば base_version_id の版を元に指示した点だけを直す。
+  const runGeneration = async (instruction: string, baseVersionId: string, failureMessage: string) => {
     if (!novelId || chapterNumber <= 0 || !novel) return
+    // 前の版の検査の結果を待っていたら止める。新しい版が完了したら、そのとき改めて待つ。
+    stopReviewPollRef.current?.()
+    stopReviewPollRef.current = null
+    setReviewPending(null)
     setIsRegenerating(true)
     setBuffer('')
     setStage(null)
     setError(null)
     try {
       await api.startChapterGeneration(
-        { model: asModelRef(novel.writer_model) },
+        { model: asModelRef(novel.writer_model), instruction, base_version_id: baseVersionId },
         { params: { id: novelId, number: String(chapterNumber) } }
       )
 
-      await new Promise<void>((resolve) => {
+      const outcome = await new Promise<{ done: boolean; hasReview: boolean }>((resolve) => {
         const sub = subscribeChapterStream(`/api/novels/${novelId}/chapters/${chapterNumber}/stream`, {
           onStage: (next) => setStage(next),
           // 再接続でサーバーが本文を全文送り直してくるので、足し込む前に空にする。
@@ -214,29 +268,41 @@ export default function ChapterDetailPage() {
             try {
               const refreshed = await api.getNovel({ params: { id: novelId } })
               setNovel(refreshed)
+              resolve({ done: true, hasReview: chapterHasReview(refreshed.chapters, chapterNumber) })
             } catch {
-              // 再取得に失敗しても streaming buffer 自体は描画済み
+              // 再取得に失敗しても streaming buffer 自体は描画済み。結果は取り直しの側で拾う。
+              resolve({ done: true, hasReview: false })
             }
-            resolve()
           },
           onError: (msg) => {
             setError(msg)
-            resolve()
+            resolve({ done: false, hasReview: false })
           }
         })
         // 再生成中にコンポーネントが unmount されても DO 側は続行するが、ローカルの購読は止める。
         abortRef.current?.signal.addEventListener('abort', () => {
           sub.close()
-          resolve()
+          resolve({ done: false, hasReview: false })
         })
       })
+      // 検査は done の後に走るので、この時点ではまだ無いことが多い。入るまで取り直す。
+      if (outcome.done && !outcome.hasReview) beginReviewPolling(novelId, chapterNumber)
     } catch (e) {
-      setError(readApiError(e, '再生成に失敗しました'))
+      setError(readApiError(e, failureMessage))
     } finally {
       setIsRegenerating(false)
       setBuffer('')
       setStage(null)
     }
+  }
+
+  const handleRegenerate = () => runGeneration('', '', '再生成に失敗しました')
+
+  // 今表示している版 (最新の版) を元に、指示した点だけを直した新しい版を作る。
+  const handleRevise = (instruction: string) => {
+    if (chapter === null) return
+    setReviseOpen(false)
+    void runGeneration(instruction, chapter.id, '書き直しに失敗しました')
   }
 
   const handleDelete = async () => {
@@ -277,6 +343,15 @@ export default function ChapterDetailPage() {
       setHistoryView({ status: 'error', message: readApiError(e, '生成履歴の取得に失敗しました') })
     }
   }
+
+  // 検査の結果を待っている章か (この小説のこの章で、まだ結果が入っていない間)。
+  const showReviewPending =
+    !isRegenerating &&
+    chapter !== null &&
+    chapter.review === null &&
+    reviewPending !== null &&
+    reviewPending.novelId === novelId &&
+    reviewPending.chapterNumber === chapterNumber
 
   const displayContent = isRegenerating ? buffer : (chapter?.content ?? '')
   const busy = isRegenerating || isDeleting
@@ -334,6 +409,29 @@ export default function ChapterDetailPage() {
               reasons={chapter.staleness.reasons}
               disabled={busy || !canRegenerate || !editAllowed}
               onRegenerate={() => setRegenOpen(true)}
+            />
+          )}
+
+          {/* live region は常に描画する (中身と同時に差し込むと読み上げられないことがあるため)。
+              待っていないときは sr-only (position: absolute) にして、親の space-y の余白を増やさない。 */}
+          <p
+            aria-live='polite'
+            className={cn(showReviewPending ? 'flex items-center gap-1.5 text-xs text-muted-foreground' : 'sr-only')}
+          >
+            {showReviewPending && (
+              <>
+                <Loader2 aria-hidden='true' className='size-3.5 shrink-0 animate-spin' />
+                検査中…
+              </>
+            )}
+          </p>
+
+          {!isRegenerating && chapter.review !== null && (
+            <ChapterReviewView
+              review={chapter.review}
+              selectedIssues={selectedIssueIndexes !== null ? selectedIssueIndexes : undefined}
+              onToggleIssue={editAllowed ? toggleIssue : undefined}
+              disabled={busy}
             />
           )}
 
@@ -401,6 +499,28 @@ export default function ChapterDetailPage() {
             >
               <ClipboardList />
               この章の記録
+            </Button>
+          </div>
+
+          <div className='border-t pt-6'>
+            <div className='mb-3'>
+              <h2 className='text-sm font-semibold'>書き直し</h2>
+              <p className='mt-0.5 text-sm text-muted-foreground'>
+                指示した点だけを直した新しい版を作ります。元の版は履歴に残ります。
+              </p>
+            </div>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={busy || !canRegenerate || !editAllowed}
+              title={!editAllowed ? 'ログインが必要です' : undefined}
+              onClick={() => setReviseOpen(true)}
+              className='[&_svg]:size-5!'
+            >
+              <PenLine />
+              指示して書き直す
+              {selectedIssues.length > 0 && <span className='tabular-nums'>（指摘 {selectedIssues.length} 件）</span>}
             </Button>
           </div>
 
@@ -517,6 +637,15 @@ export default function ChapterDetailPage() {
             </DialogContent>
           </Dialog>
 
+          <ReviseDialog
+            open={reviseOpen}
+            onOpenChange={setReviseOpen}
+            chapterNumber={chapterNumber}
+            issues={selectedIssues}
+            disabled={busy || !editAllowed}
+            onSubmit={handleRevise}
+          />
+
           <Dialog open={recordOpen} onOpenChange={setRecordOpen}>
             <DialogContent className='sm:max-w-3xl'>
               <DialogHeader>
@@ -540,7 +669,7 @@ export default function ChapterDetailPage() {
               <DialogHeader>
                 <DialogTitle>第 {chapterNumber} 章の生成履歴</DialogTitle>
                 <DialogDescription>
-                  再生成しても過去の生成は残ります。版を選んで本文・プロンプト・記録を確認できます。
+                  再生成しても過去の生成は残ります。版を選んで本文・プロンプト・記録・検査の結果を確認できます。
                 </DialogDescription>
               </DialogHeader>
               {historyView.status === 'loading' && <p className='text-sm text-muted-foreground'>取得中…</p>}
@@ -598,10 +727,23 @@ export default function ChapterDetailPage() {
                         この版の記録を表示
                       </button>
                     )}
+                    {selectedVersion.review !== null && versionView !== 'review' && (
+                      <button
+                        type='button'
+                        onClick={() => setVersionView('review')}
+                        className='underline underline-offset-2 hover:text-foreground'
+                      >
+                        この版の検査の結果を表示
+                      </button>
+                    )}
                   </div>
                   {versionView === 'record' && selectedVersion.record !== null ? (
                     <div className='max-h-[55vh] overflow-auto rounded-md border p-3'>
                       <ChapterRecordView record={selectedVersion.record} />
+                    </div>
+                  ) : versionView === 'review' && selectedVersion.review !== null ? (
+                    <div className='max-h-[55vh] overflow-auto'>
+                      <ChapterReviewView review={selectedVersion.review} />
                     </div>
                   ) : (
                     <pre className='max-h-[55vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap'>

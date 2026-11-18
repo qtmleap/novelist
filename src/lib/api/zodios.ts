@@ -12,6 +12,7 @@ import {
   ChapterVersionSchema,
   CreateCategorySchema,
   CreateNovelSchema,
+  GenerateChapterOptionsSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   ModelRefSchema,
@@ -227,8 +228,8 @@ export const api = makeApi([
     method: 'post',
     path: '/api/novels/:id/chapters/:number/generate',
     alias: 'startChapterGeneration',
-    description: '本文生成を Durable Object にキックオフ',
-    parameters: [{ name: 'body', type: 'Body', schema: GenerateOptionsSchema }],
+    description: '本文生成を Durable Object にキックオフ (instruction があれば、指示つきの書き直し)',
+    parameters: [{ name: 'body', type: 'Body', schema: GenerateChapterOptionsSchema }],
     response: GenerateAckSchema,
     status: 202,
     errors: [{ status: 'default', schema: ErrorBodySchema }]
