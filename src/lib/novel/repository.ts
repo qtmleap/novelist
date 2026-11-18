@@ -2,6 +2,7 @@ import type { Prisma, PrismaClient } from '@/generated/prisma/client'
 import { computeStaleness, outlineEntryHash } from '@/lib/novel/staleness'
 import {
   type CreateNovelInput,
+  normalizeAgeRating,
   type Outline,
   type SaveCastInput,
   type StoredBible,
@@ -383,6 +384,10 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
   const bible = parseStoredBible(novel.bible)
   return {
     ...withWritingNotes(novel),
+    // 生成 (章立て、作品設計、本文、検査) と作品設計の入力のハッシュは、すべてここで読んだ値を使う。
+    // 保存済みの値が知らないもの ('R18G'、空白つきなど) なら、成人指定の検証が外れないよう、
+    // 内容の制限がいちばん強い全年齢として扱う (書き込み側は 3 つの値しか受けない)。
+    age_rating: normalizeAgeRating(novel.age_rating),
     // 作品設計 (検証済み。source_hash を含む)。未作成や壊れた値は null
     bible,
     // 列に値があるのに読めない (壊れている)。未作成 (null や空) とは区別する: 成人指定では、未作成と同じ扱い

@@ -219,7 +219,7 @@ describe('bible and writing_notes', () => {
     source_hash: 'abc'
   }
 
-  function novelPrisma(fields: { bible: string | null; writing_notes: string | null }): PrismaClient {
+  function novelPrisma(fields: { bible: string | null; writing_notes: string | null; age_rating?: string }): PrismaClient {
     return Object.assign(Object.create(null), {
       novel: {
         findUnique: async () => ({
@@ -230,11 +230,26 @@ describe('bible and writing_notes', () => {
           generation_costs: [],
           generation_job: null,
           category: null,
+          age_rating: '全年齢',
           ...fields
         })
       }
     })
   }
+
+  test('getNovelWithChapters reads an unknown age rating as all ages', async () => {
+    for (const [stored, read] of [
+      ['R18', 'R18'],
+      ['R15', 'R15'],
+      ['全年齢', '全年齢'],
+      ['R18G', '全年齢'],
+      ['r18', '全年齢'],
+      ['R18 ', '全年齢']
+    ]) {
+      const novel = await getNovelWithChapters(novelPrisma({ bible: null, writing_notes: null, age_rating: stored }), 'n1')
+      expect(novel?.age_rating).toBe(read)
+    }
+  })
 
   test('getNovelWithChapters reads a null writing_notes as empty and validates the bible', async () => {
     const novel = await getNovelWithChapters(novelPrisma({ bible: JSON.stringify(stored), writing_notes: null }), 'n1')

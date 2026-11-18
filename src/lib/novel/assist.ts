@@ -14,6 +14,7 @@ import {
   type BibleSourceInput,
   bibleSourceHash,
   completeAddresses,
+  findMinorTerms,
   isAdultRating,
   missingAddressPairs,
   validateAdultBibleText,
@@ -110,7 +111,18 @@ const MAX_ATTEMPTS = 2
 // ---------------------- 呼び出しとやり直し ----------------------
 
 // 解釈の結果。失敗でも acceptable があれば「やり直したいが、最後の手段としては使える」値 (作品設計の呼称表が欠けている、など)。
-type Interpreted<T> = { ok: true; value: T } | { ok: false; error: string; acceptable?: T }
+// acceptableScore は使える値の悪さ (小さいほど良い)。2 回とも使える値だったとき、どちらを採るかに使う。
+// 無ければ後の回を採る。
+type Interpreted<T> = { ok: true; value: T } | { ok: false; error: string; acceptable?: T; acceptableScore?: number }
+
+type Fallback<T> = { value: T; score: number | undefined }
+
+// 前の回と今回の使える値のどちらを残すか。どちらにも悪さがあれば小さいほう (同じなら今回)。無ければ今回。
+function betterFallback<T>(previous: Fallback<T> | undefined, next: Fallback<T> | undefined): Fallback<T> | undefined {
+  if (next === undefined) return previous
+  if (previous === undefined || previous.score === undefined || next.score === undefined) return next
+  return previous.score < next.score ? previous : next
+}
 
 type CallOutcome<T> =
   | { ok: true; value: T; usages: UsageCounts[] }
@@ -131,8 +143,8 @@ async function callSafely(call: JsonCaller, prompt: Prompt, options: JsonCallOpt
 // 呼び出し自体の失敗 (throw) はやり直さない。通信やブロックの失敗は、すぐ呼び直しても同じ結果になりやすいため。
 // usages には、解釈か検証に失敗した回も含めて、usage が取れた全部の呼び出しを入れる (失敗した回もトークンは課金されている)。
 // usage が取れるのは応答を受け取れた回だけ。呼び出し自体が失敗した回 (空の応答、ブロック、時間切れ) は取れない。
-// 合格の値が得られないまま終わったときは、それまでに得た acceptable (最後のもの) で合格にする。
-// やり直しの回の応答がより悪い (呼び出しの失敗や、使えない値) こともあるので、前の回の使える値を捨てない。
+// 合格の値が得られないまま終わったときは、それまでに得た acceptable で合格にする (悪さが分かれば小さいほう、
+// 分からなければ最後のもの)。やり直しの回の応答がより悪い (呼び出しの失敗や、使えない値) こともあるので、前の回の使える値を捨てない。
 async function callUntilValid<T>(
   call: JsonCaller,
   prompt: Prompt,
@@ -140,19 +152,24 @@ async function callUntilValid<T>(
   interpret: (text: string) => Interpreted<T>,
   attemptsLeft: number,
   usages: UsageCounts[],
-  fallback?: { value: T }
+  fallback?: Fallback<T>
 ): Promise<CallOutcome<T>> {
   const response = await callSafely(call, prompt, options)
   if (!response.ok) return settle(fallback, response.error, usages)
   const nextUsages = response.usage === undefined ? usages : [...usages, response.usage]
   const interpreted = interpret(response.text)
   if (interpreted.ok) return { ok: true, value: interpreted.value, usages: nextUsages }
-  const nextFallback = interpreted.acceptable === undefined ? fallback : { value: interpreted.acceptable }
+  const nextFallback = betterFallback(
+    fallback,
+    interpreted.acceptable === undefined
+      ? undefined
+      : { value: interpreted.acceptable, score: interpreted.acceptableScore }
+  )
   if (attemptsLeft <= 1) return settle(nextFallback, interpreted.error, nextUsages)
   return callUntilValid(call, prompt, options, interpret, attemptsLeft - 1, nextUsages, nextFallback)
 }
 
-function settle<T>(fallback: { value: T } | undefined, error: string, usages: UsageCounts[]): CallOutcome<T> {
+function settle<T>(fallback: Fallback<T> | undefined, error: string, usages: UsageCounts[]): CallOutcome<T> {
   return fallback === undefined ? { ok: false, error, usages } : { ok: true, value: fallback.value, usages }
 }
 
@@ -254,7 +271,13 @@ function interpretOutline(text: string, numChapters: number): Interpreted<Outlin
   const issues = validateOutlineShape(outline, numChapters)
   if (issues.length > 0) return { ok: false, error: `章立てが条件を満たしていません: ${issues.join('、')}` }
   if (missingPlanWarnings(outline.chapters).length > 0) {
-    return { ok: false, error: missingPlanError(outline.chapters), acceptable: outline }
+    // 2 回とも計画が欠けていたら、欠けている章が少ないほうを採る (同じなら後の回)
+    return {
+      ok: false,
+      error: missingPlanError(outline.chapters),
+      acceptable: outline,
+      acceptableScore: missingPlanWarnings(outline.chapters).length
+    }
   }
   return { ok: true, value: outline }
 }
@@ -999,4 +1022,34 @@ function buildReviewPromptSafely(input: ReviewPromptInput): Interpreted<Prompt> 
   } catch (e) {
     return { ok: false, error: errorMessage(e) }
   }
+}
+
+// ---------------------- 成人指定の作品の、利用者の指示の欄 ----------------------
+
+function quotedTerms(terms: string[]): string {
+  return terms.map((term) => `「${term}」`).join('')
+}
+
+// 成人指定 (R15 / R18) の作品で、利用者の指示として入る欄に未成年を指す語があれば、止める理由の文。無ければ null。
+// 成人指定の読み替えの指示は「資料」(あらすじ、登場人物の辞典) に対するもので、利用者の直接の指示とは正面からぶつかるため、
+// 指示の欄は読み替えずに止める。あらすじと辞典は資料なので検査しない。
+//   writingNotes: 執筆上の指示 (章立てと全章の本文に渡る)
+//   notes:        備考 (章立てにだけ渡る)。本文の生成では渡さない (undefined)
+export function notesBlocker(input: { style: StyleParams; writingNotes: string; notes?: string }): string | null {
+  if (!isAdultStyle(input.style)) return null
+  const fields = [
+    { label: '執筆上の指示', terms: findMinorTerms(input.writingNotes) },
+    { label: '備考（物語に取り込みたい要素）', terms: input.notes === undefined ? [] : findMinorTerms(input.notes) }
+  ].filter((field) => field.terms.length > 0)
+  if (fields.length === 0) return null
+  return `${fields.map((field) => `${field.label}に、未成年を指す語（${quotedTerms(field.terms)}）があります`).join('。')}。成人指定の作品では使えません。`
+}
+
+// 成人指定の作品で、書き直しの指示に未成年を指す語があれば、止める理由の文。無ければ null。
+// 書き直しの元の版 (既に書かれた本文) は検査しない。
+export function instructionBlocker(input: { style: StyleParams; instruction: string }): string | null {
+  if (!isAdultStyle(input.style)) return null
+  const terms = findMinorTerms(input.instruction)
+  if (terms.length === 0) return null
+  return `書き直しの指示に、未成年を指す語（${quotedTerms(terms)}）があります。成人指定の作品では使えません。`
 }

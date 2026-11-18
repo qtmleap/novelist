@@ -4,6 +4,8 @@ import type { Env } from '@/lib/db'
 import {
   buildChapterContext,
   checkGenerationTargets,
+  generationBlock,
+  runningJobPending,
   type ContextChapter,
   type ContextSource,
   contextBlocker,
@@ -99,6 +101,7 @@ function source(chapters: ContextChapter[], chapterNumber = 5): ContextSource {
     bible: null,
     bibleUnreadable: false,
     revision: null,
+    jobPending: [],
     writingNotes: '',
     chapters
   }
@@ -820,7 +823,7 @@ describe('generation start checks', () => {
 })
 
 describe('decideGenerationStart', () => {
-  const ready = { outline, written: new Set([1, 2]), blocker: null }
+  const ready = { outline, written: new Set([1, 2]), blocker: null, baseVersionError: null }
 
   test('targets are sorted and deduplicated, and the first one is started', () => {
     expect(decideGenerationStart(ready, 'n1', [4, 3, 3], 'm')).toEqual({
@@ -834,7 +837,11 @@ describe('decideGenerationStart', () => {
     expect(decideGenerationStart(null, 'n1', [1], 'm')).toMatchObject({ status: 404 })
     expect(decideGenerationStart({ ...ready, outline: null }, 'n1', [1], 'm')).toMatchObject({ status: 404 })
     expect(decideGenerationStart(ready, 'n1', [9], 'm')).toMatchObject({ status: 404 })
-    const blocked = { ...ready, written: new Set<number>(), blocker: '作品設計を作り直してください' }
+    const blocked = {
+      ...ready,
+      written: new Set<number>(),
+      blocker: { error: 'invalid_bible' as const, detail: '作品設計を作り直してください' }
+    }
     expect(decideGenerationStart(blocked, 'n1', [3], 'm')).toEqual({
       ok: false,
       status: 400,
@@ -1218,5 +1225,191 @@ describe('reviewAndSave and the revision base (fake prisma)', () => {
     if (result.ok) throw new Error('expected failure')
     expect(result.error).toContain('元の版')
     expect(result.error).not.toContain('呼び方を直す')
+  })
+})
+
+// ---------------------- レビュー (7fdc2d3) の指摘 ----------------------
+
+describe('instruction fields of adult novels', () => {
+  const adult: StyleParams = { pov: '三人称多元視点', tone: '一般文芸', age_rating: 'R18' }
+  const base = { style: adult, cast: [], bible: null, bibleUnreadable: false, writingNotes: '', instruction: '' }
+
+  test('words for minors in the writing notes or the instruction stop an adult novel', () => {
+    const notes = generationBlock({ ...base, writingNotes: 'ヒロインは女子高生として描写する' })
+    expect(notes?.error).toBe('invalid_notes')
+    expect(notes?.detail).toContain('執筆上の指示')
+    const instruction = generationBlock({ ...base, instruction: 'ヒロインを高校生にして' })
+    expect(instruction?.error).toBe('invalid_instruction')
+    expect(instruction?.detail).toContain('書き直しの指示')
+  })
+
+  test('all-ages novels and clean fields are not stopped', () => {
+    const allAges = { ...base, style: { ...adult, age_rating: '全年齢' } }
+    expect(generationBlock({ ...allAges, writingNotes: '女子高生', instruction: '高校生' })).toBeNull()
+    expect(generationBlock({ ...base, writingNotes: '擬音語は使わない', instruction: '呼び方を直す' })).toBeNull()
+  })
+
+  test('the bible is checked first', () => {
+    const block = generationBlock({ ...base, bibleUnreadable: true, writingNotes: '女子高生' })
+    expect(block?.error).toBe('invalid_bible')
+  })
+
+  test('the generation start answers 400 with the field code', () => {
+    const ready = {
+      outline,
+      written: new Set([1, 2]),
+      blocker: generationBlock({ ...base, writingNotes: '女子高生' }),
+      baseVersionError: null
+    }
+    expect(decideGenerationStart(ready, 'n1', [3], 'm')).toMatchObject({ ok: false, status: 400, error: 'invalid_notes' })
+  })
+
+  test('the DO context stops on the instruction too', async () => {
+    const fx = Object.assign(Object.create(null), {
+      novel: {
+        findUnique: async () => ({
+          id: 'n1',
+          title: 't',
+          genre: 'g',
+          setting: 's',
+          num_chapters: 6,
+          target_chars: 2000,
+          outline_summary_chars: 200,
+          pov: '三人称多元視点',
+          tone: '一般文芸',
+          age_rating: 'R18',
+          pov_character_id: '',
+          ending: '未指定',
+          notes: '',
+          writing_notes: null,
+          editor_model: 'gemini-2.5-flash',
+          bible: null,
+          outline: JSON.stringify(outline),
+          chapters: [],
+          character_links: [],
+          relations: [],
+          generation_costs: [],
+          generation_job: null,
+          category: null
+        })
+      },
+      chapter: { findUnique: async () => ({ id: 'v1', novel_id: 'n1', chapter_number: 1, title: '題', content: '本文', record: null }) }
+    })
+    const result = await buildChapterContext(fx, untouchedEnv, {
+      novelId: 'n1',
+      chapterNumber: 1,
+      model: 'gemini-2.5-flash',
+      instruction: '中学生として描き直して',
+      baseVersionId: 'v1'
+    })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('書き直しの指示')
+  })
+})
+
+describe('the next chapter of a running batch', () => {
+  test('runningJobPending reads only running jobs', () => {
+    expect(runningJobPending({ status: 'running', pending: '[3,4,5]' })).toEqual([3, 4, 5])
+    expect(runningJobPending({ status: 'stopped', pending: '[3,4,5]' })).toEqual([])
+    expect(runningJobPending({ status: 'running', pending: '{oops' })).toEqual([])
+    expect(runningJobPending(null)).toEqual([])
+  })
+
+  test('a next chapter that the batch will rewrite is not passed; otherwise it is', () => {
+    expect(nextChapterOf({ ...source(sixChapters, 3), jobPending: [3, 4, 5] })).toBeNull()
+    expect(nextChapterOf({ ...source(sixChapters, 3), jobPending: [3] })?.title).toBe('題4')
+    // ジョブが止まっていれば (pending を空として読む) 渡す
+    expect(nextChapterOf({ ...source(sixChapters, 3), jobPending: [] })?.title).toBe('題4')
+  })
+})
+
+describe('every target must be in the outline', () => {
+  test('a later target missing from the outline is a 404 at the start', () => {
+    const ready = { outline, written: new Set([1, 2, 3, 4, 5, 6]), blocker: null, baseVersionError: null }
+    expect(decideGenerationStart(ready, 'n1', [5, 6, 7], 'm')).toEqual({ ok: false, status: 404, error: 'not_found' })
+    expect(decideGenerationStart(ready, 'n1', [5, 6], 'm')).toMatchObject({ ok: true, targets: [5, 6] })
+  })
+})
+
+// ---------------------- 書き直しの元の版を開始の時点で確かめる ----------------------
+
+describe('the rewrite base version at the generation start', () => {
+  test('decideGenerationStart answers 400 invalid_base_version after the content checks, before 409', () => {
+    const source = { outline, written: new Set<number>(), blocker: null, baseVersionError: '書き直す元の版が見つかりません' }
+    expect(decideGenerationStart(source, 'n1', [3], 'm')).toEqual({
+      ok: false,
+      status: 400,
+      error: 'invalid_base_version',
+      detail: '書き直す元の版が見つかりません'
+    })
+    const blocked = { ...source, blocker: { error: 'invalid_notes' as const, detail: '指示' } }
+    expect(decideGenerationStart(blocked, 'n1', [3], 'm')).toMatchObject({ error: 'invalid_notes' })
+  })
+
+  type Row = { id: string; novel_id: string; chapter_number: number; title: string | null; content: string; record: null }
+
+  // 本文がある章は無い (novel.chapters が空) 小説と、id で引ける版の行
+  function fake(rows: Row[]): PrismaClient {
+    return Object.assign(Object.create(null), {
+      novel: {
+        findUnique: async () => ({
+          id: 'n1',
+          title: 't',
+          genre: 'g',
+          setting: 's',
+          num_chapters: 6,
+          target_chars: 2000,
+          outline_summary_chars: 200,
+          pov: '三人称多元視点',
+          tone: '一般文芸',
+          age_rating: '全年齢',
+          pov_character_id: '',
+          ending: '未指定',
+          notes: '',
+          writing_notes: null,
+          editor_model: 'gemini-2.5-flash',
+          bible: null,
+          outline: JSON.stringify(outline),
+          chapters: [],
+          character_links: [],
+          relations: [],
+          generation_costs: [],
+          generation_job: null,
+          category: null
+        })
+      },
+      chapter: {
+        findUnique: async (args: { where: { id: string } }) => {
+          const found = rows.find((row) => row.id === args.where.id)
+          return found === undefined ? null : found
+        }
+      }
+    })
+  }
+  const own: Row = { id: 'v1', novel_id: 'n1', chapter_number: 1, title: '題1', content: '　元の版。', record: null }
+  const rewrite = (baseVersionId: string) => ({ instruction: '呼び方を直す', baseVersionId })
+
+  test('a base version of this chapter is accepted', async () => {
+    const start = await prepareGenerationStart(fake([own]), 'n1', [1], 'm', rewrite('v1'))
+    expect(start.ok).toBe(true)
+  })
+
+  test('a base version of another chapter or novel, or a missing one, is a 400', async () => {
+    const rows = [own, { ...own, id: 'v2', chapter_number: 2 }, { ...own, id: 'x1', novel_id: 'other' }]
+    for (const id of ['v2', 'x1', 'nope']) {
+      const start = await prepareGenerationStart(fake(rows), 'n1', [1], 'm', rewrite(id))
+      expect(start).toMatchObject({ ok: false, status: 400, error: 'invalid_base_version' })
+    }
+  })
+
+  test('a rewrite without a base id needs text in the chapter', async () => {
+    const start = await prepareGenerationStart(fake([]), 'n1', [1], 'm', rewrite(''))
+    expect(start).toMatchObject({ ok: false, status: 400, error: 'invalid_base_version' })
+  })
+
+  test('a normal generation ignores the base version id', async () => {
+    const start = await prepareGenerationStart(fake([]), 'n1', [1], 'm', { instruction: '  ', baseVersionId: 'nope' })
+    expect(start.ok).toBe(true)
+    expect((await prepareGenerationStart(fake([]), 'n1', [1], 'm')).ok).toBe(true)
   })
 })

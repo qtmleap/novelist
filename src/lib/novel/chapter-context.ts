@@ -5,7 +5,9 @@ import {
   bibleBlocker,
   castForPrompt,
   extractRecordFlow,
+  instructionBlocker,
   type JsonCaller,
+  notesBlocker,
   type RecordFlowInput,
   type RecordFlowResult,
   reviewChapterFlow,
@@ -224,6 +226,8 @@ export type ContextSource = {
   bibleUnreadable: boolean
   // 指示つきの書き直しのとき、元の版の本文と指示。通常の生成では null
   revision: RevisionInput | null
+  // 走っている生成のジョブで、これから書く章 (pending)。ジョブが無い・止まっていれば空
+  jobPending: number[]
   // 執筆上の指示 (Novel.writing_notes)。無ければ ''
   writingNotes: string
   // 各章の最新 version。今回の章以降を含んでいてもよい (組み立てで除く)
@@ -302,8 +306,11 @@ export function nextOpening(content: string, maxChars: number = NEXT_OPENING_CHA
 // 「書き換えない次の章」として繋げると、古い展開に今回の章を合わせてしまうため。
 // 前の章の作り直し (previous_regenerated) で古くなっただけの次の章は渡す (途中の章の書き直しは、まさにこの場合)。
 // この機能より前の章 (ハッシュが null) は判定できないので渡す。
+// 次の章が、走っている生成のジョブでこれから書かれる章なら渡さない ([3, 4, 5] をまとめて書くときの第 3 章)。
+// 書き直す予定の古い本文に合わせて、今回の章を縛ってしまうため。その章が書かれるときに、今回の章の終わりに合わせる。
 export function nextChapterOf(source: ContextSource): NextChapterInput | null {
   const nextNumber = source.chapterNumber + 1
+  if (source.jobPending.includes(nextNumber)) return null
   const next = source.chapters.find((chapter) => chapter.number === nextNumber)
   if (next === undefined || trimChapterText(next.content).length === 0) return null
   const entry = source.outline.chapters.find((chapter) => chapter.chapter_number === nextNumber)
@@ -731,12 +738,14 @@ export async function buildChapterContext(
     bible: novel.bible === null ? null : toStoryBible(novel.bible),
     bibleUnreadable: novel.bible_unreadable,
     revision: revision.revision,
+    jobPending: runningJobPending(novel.generation_job),
     writingNotes: novel.writing_notes,
     chapters
   }
   // 記録の抽出 (費用がかかる) より前に止める。
-  const blocker = contextBlocker(source)
-  if (blocker !== null) return { ok: false, error: blocker }
+  // 生成の開始 (API) と同じ判定 (作品設計、執筆上の指示、書き直しの指示)。
+  const blocker = generationBlock({ ...source, instruction: revisionInstruction(payload.instruction) })
+  if (blocker !== null) return { ok: false, error: blocker.detail }
   const contextWindow = payload.model === undefined ? null : await findContextWindow(env, payload.model)
   const editorModel = novel.editor_model
   const call = jsonCaller(env, editorModel)
@@ -816,10 +825,44 @@ export function missingChaptersDetail(missing: number[]): string {
   return `第 ${missing.join('、')} 章`
 }
 
+// 生成を止める理由。どの欄が理由かで、エラーのコードを分ける。
+export type GenerationBlock = { error: 'invalid_bible' | 'invalid_notes' | 'invalid_instruction'; detail: string }
+
+// 本文の生成を止める理由 (無ければ null)。生成の開始 (API) と DO の文脈の段階が同じ判定を使う。
+//   作品設計 (bibleBlocker)、執筆上の指示 (成人指定で未成年を指す語)、書き直しの指示 (同じ)
+// 備考 (notes) は本文に渡らないので、ここでは見ない (章立ての生成とプレビューで見る)。
+export function generationBlock(input: {
+  style: StyleParams
+  cast: CastMember[]
+  bible: StoryBible | null
+  bibleUnreadable: boolean
+  writingNotes: string
+  instruction: string
+}): GenerationBlock | null {
+  const bible = bibleBlocker(input)
+  if (bible !== null) return { error: 'invalid_bible', detail: bible }
+  const notes = notesBlocker({ style: input.style, writingNotes: input.writingNotes })
+  if (notes !== null) return { error: 'invalid_notes', detail: notes }
+  const instruction = instructionBlocker({ style: input.style, instruction: input.instruction })
+  return instruction === null ? null : { error: 'invalid_instruction', detail: instruction }
+}
+
+// 走っている生成のジョブで、これから書く章。ジョブが無い・running でない・pending が読めなければ空。
+export function runningJobPending(job: { status: string; pending: string } | null): number[] {
+  if (job === null || job.status !== 'running') return []
+  try {
+    const parsed: unknown = JSON.parse(job.pending)
+    return Array.isArray(parsed) ? parsed.filter((value): value is number => typeof value === 'number') : []
+  } catch {
+    return []
+  }
+}
+
 export type GenerationStart =
   | { ok: true; payload: ChapterGenPayload; targets: number[] }
   | { ok: false; status: 404; error: 'not_found' }
-  | { ok: false; status: 400; error: 'invalid_bible'; detail: string }
+  | ({ ok: false; status: 400 } & GenerationBlock)
+  | { ok: false; status: 400; error: 'invalid_base_version'; detail: string }
   | { ok: false; status: 409; error: 'previous_chapters_missing'; detail: string }
 
 // 生成の開始の判定の材料 (D1 から読んだもの)。
@@ -827,11 +870,14 @@ export type GenerationStartSource = {
   outline: Outline | null
   // 本文がある章の番号
   written: Set<number>
-  // 作品設計で生成を止める理由 (contextBlocker と同じ判定)。止めなければ null
-  blocker: string | null
+  // 生成を止める理由 (generationBlock。DO の文脈の段階と同じ判定)。止めなければ null
+  blocker: GenerationBlock | null
+  // 書き直しの元の版が使えない理由 (revisionBaseOf。DO の文脈の段階と同じ判定)。書き直しでない・使えるなら null
+  baseVersionError: string | null
 }
 
-// 生成を始めてよいか。順に、小説と章立ての最初の対象の章 (404)、成人指定の作品設計 (400 invalid_bible)、
+// 生成を始めてよいか。順に、小説と章立ての対象の章 (全て。404)、
+// 作品設計・執筆上の指示・書き直しの指示 (400 invalid_bible / invalid_notes / invalid_instruction)、
 // 前の章が欠けていないか (409)。ジョブを running にする前、DO を起動する前に判定する
 // (DO の文脈の段階でも同じ判定をする。開始の時点で止めれば、利用者がストリームのエラーで初めて気付くことも、
 // ジョブが一度 running になることも無い)。対象は重複を除いて昇順にする。
@@ -846,10 +892,13 @@ export function decideGenerationStart(
   if (source === null || source.outline === null || first === undefined) {
     return { ok: false, status: 404, error: 'not_found' }
   }
-  if (!source.outline.chapters.some((chapter) => chapter.chapter_number === first)) {
-    return { ok: false, status: 404, error: 'not_found' }
+  // 対象の全ての章が章立てにあること (2 章目以降が無いと、その章の DO の中で初めて error になる)
+  const planned = new Set(source.outline.chapters.map((chapter) => chapter.chapter_number))
+  if (!normalized.every((target) => planned.has(target))) return { ok: false, status: 404, error: 'not_found' }
+  if (source.blocker !== null) return { ok: false, status: 400, ...source.blocker }
+  if (source.baseVersionError !== null) {
+    return { ok: false, status: 400, error: 'invalid_base_version', detail: source.baseVersionError }
   }
-  if (source.blocker !== null) return { ok: false, status: 400, error: 'invalid_bible', detail: source.blocker }
   const checked = checkGenerationTargets(normalized, source.written)
   if (!checked.ok) {
     return {
@@ -863,24 +912,53 @@ export function decideGenerationStart(
 }
 
 // 生成の開始の判定を D1 から行う (小説、章立て、名簿、作品設計、各章の最新 version を読む)。
+export type StartRevision = { instruction: string; baseVersionId: string }
+
+// 書き直しの元の版の確認 (書き直しでなければ null)。DO の文脈の段階 (loadRevision) と同じ revisionBaseOf を使う。
+async function baseVersionError(
+  prisma: PrismaClient,
+  target: { novelId: string; chapterNumber: number | undefined; chapters: ContextChapter[] },
+  revision: StartRevision
+): Promise<string | null> {
+  if (revisionInstruction(revision.instruction).length === 0 || target.chapterNumber === undefined) return null
+  const chapterNumber = target.chapterNumber
+  const baseVersionId = revision.baseVersionId.trim()
+  const row = baseVersionId.length === 0 ? null : await findChapterVersion(prisma, baseVersionId)
+  const base = revisionBaseOf({
+    novelId: target.novelId,
+    chapterNumber,
+    baseVersionId,
+    latest: target.chapters.find((chapter) => chapter.number === chapterNumber),
+    row
+  })
+  return base.ok ? null : base.error
+}
+
+// revision は書き直しの指示と元の版 (1 章の生成だけ。バッチの生成では渡さない)。
 export async function prepareGenerationStart(
   prisma: PrismaClient,
   novelId: string,
   targets: number[],
-  model: ModelRef
+  model: ModelRef,
+  revision: StartRevision = { instruction: '', baseVersionId: '' }
 ): Promise<GenerationStart> {
   const novel = await getNovelWithChapters(prisma, novelId)
   if (novel === null) return decideGenerationStart(null, novelId, targets, model)
-  const blocker = contextBlocker({
+  const blocker = generationBlock({
     style: styleOf(novel),
     cast: buildCastForGemini(novel.character_links),
     bible: novel.bible === null ? null : toStoryBible(novel.bible),
-    bibleUnreadable: novel.bible_unreadable
+    bibleUnreadable: novel.bible_unreadable,
+    writingNotes: novel.writing_notes,
+    instruction: revisionInstruction(revision.instruction)
   })
+  const chapters = contextChapters(novel)
+  const normalized = normalizeTargets(targets)
   const source = {
     outline: parseOutline(novel.outline),
     written: new Set(novel.chapters.map((chapter) => chapter.chapter_number)),
-    blocker
+    blocker,
+    baseVersionError: await baseVersionError(prisma, { novelId, chapterNumber: normalized[0], chapters }, revision)
   }
   return decideGenerationStart(source, novelId, targets, model)
 }

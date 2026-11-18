@@ -10,6 +10,8 @@ import {
   currentBibleHash,
   extractRecordFlow,
   findQuote,
+  instructionBlocker,
+  notesBlocker,
   generateBibleFlow,
   generateOutlineFlow,
   type JsonCaller,
@@ -1561,5 +1563,65 @@ describe('reviewChapterFlow', () => {
     const result = await reviewChapterFlow(call, { ...reviewInput, content: ' \n ' })
     expect(calls).toHaveLength(0)
     expect(result.ok).toBe(false)
+  })
+})
+
+// ---------------------- レビュー (7fdc2d3) の指摘 ----------------------
+
+describe('notesBlocker and instructionBlocker', () => {
+  const adult = { pov: '三人称多元視点', tone: '一般文芸', age_rating: 'R18' }
+
+  test('names the field that has the word', () => {
+    expect(notesBlocker({ style: adult, writingNotes: '女子高生として描写する' })).toContain('執筆上の指示に')
+    const both = notesBlocker({ style: adult, writingNotes: '高校生', notes: '中学生の妹を出す' })
+    expect(both).toContain('執筆上の指示に')
+    expect(both).toContain('備考')
+    expect(notesBlocker({ style: adult, writingNotes: '', notes: '中学生の妹を出す' })).toContain('備考')
+    expect(instructionBlocker({ style: adult, instruction: '高校生として書き直す' })).toContain('書き直しの指示に')
+  })
+
+  test('all ages, clean text and missing notes pass', () => {
+    expect(notesBlocker({ style: { ...adult, age_rating: '全年齢' }, writingNotes: '女子高生', notes: '高校生' })).toBeNull()
+    expect(notesBlocker({ style: adult, writingNotes: '擬音語は使わない' })).toBeNull()
+    expect(instructionBlocker({ style: adult, instruction: '呼び方を直す' })).toBeNull()
+  })
+})
+
+describe('outlines missing a plan twice', () => {
+  // missing 章番号の章だけ計画が欠けた章立て
+  function withGaps(missing: number[], flag: string): string {
+    return JSON.stringify({
+      chapters: [1, 2, 3].map((n) => ({
+        chapter_number: n,
+        title: `題${n}${flag}`,
+        summary: `概要${n}`,
+        characters: [],
+        ...(missing.includes(n) ? {} : PLAN)
+      }))
+    })
+  }
+
+  test('the answer with fewer gaps is taken', async () => {
+    const first = await generateOutlineFlow(
+      fakeCall([{ text: withGaps([2], '（1 回目）') }, { text: withGaps([1, 2, 3], '（2 回目）') }]).call,
+      input
+    )
+    if (!first.ok) throw new Error(first.error)
+    expect(first.outline.chapters[0].title).toBe('題1（1 回目）')
+    const second = await generateOutlineFlow(
+      fakeCall([{ text: withGaps([1, 2], '（1 回目）') }, { text: withGaps([3], '（2 回目）') }]).call,
+      input
+    )
+    if (!second.ok) throw new Error(second.error)
+    expect(second.outline.chapters[0].title).toBe('題1（2 回目）')
+  })
+
+  test('a tie takes the second answer', async () => {
+    const result = await generateOutlineFlow(
+      fakeCall([{ text: withGaps([2], '（1 回目）') }, { text: withGaps([3], '（2 回目）') }]).call,
+      input
+    )
+    if (!result.ok) throw new Error(result.error)
+    expect(result.outline.chapters[0].title).toBe('題1（2 回目）')
   })
 })

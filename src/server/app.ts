@@ -22,6 +22,7 @@ import {
   currentBibleHash,
   generateOutlineFlow,
   normalizeBible,
+  notesBlocker,
   type OutlineFlowInput,
   outlinePromptInput,
   prepareBibleFlow,
@@ -112,6 +113,12 @@ function outlineFlowInput(novel: NovelWithChapters): OutlineFlowInput {
     bible: novel.bible === null ? null : toStoryBible(novel.bible),
     bibleUnreadable: novel.bible_unreadable
   }
+}
+
+// 章立ての生成とプレビューで、利用者の指示の欄 (執筆上の指示、備考) を理由に止める文。止めなければ null。
+// 成人指定で、指示の欄に未成年を指す語があるとき (作品設計の有無に関係なく検査する)。
+function outlineNotesBlocker(novel: NovelWithChapters, input: OutlineFlowInput): string | null {
+  return notesBlocker({ style: input.style, writingNotes: novel.writing_notes, notes: novel.notes })
 }
 
 // 生成の開始を止めるときの応答の本文。
@@ -491,6 +498,10 @@ export const app = new Hono()
       // 選んでいない章まで作り直し、全本文を消してしまうので、何もせずエラーにする (POST /outline/:number と同じ扱い)。
       if (partial && generated && existing === null) return c.json({ error: 'invalid_outline' }, 500)
 
+      // 指示の欄で止めるなら、作品設計を作る (費用がかかる) より前に止める。
+      const notes = outlineNotesBlocker(novel, input)
+      if (notes !== null) return c.json({ error: 'invalid_notes', detail: notes }, 400)
+
       // 作品設計が無ければ先に作る (章立ては作品設計を入力に取る)。モデルは章立てと同じ (指定が無ければ editor_model)。
       const bible = await prepareBibleFlow(
         jsonCaller(env, options.model !== undefined ? options.model : novel.editor_model),
@@ -567,6 +578,8 @@ export const app = new Hono()
       const input = outlineFlowInput(novel)
       const blocked = bibleBlocker(input)
       if (blocked !== null) return c.json({ error: 'invalid_bible', detail: blocked }, 400)
+      const notes = outlineNotesBlocker(novel, input)
+      if (notes !== null) return c.json({ error: 'invalid_notes', detail: notes }, 400)
       const prompt = renderPromptForStorage(buildOutlinePrompt(outlinePromptInput(input)))
       return c.json({ prompt })
     } finally {
@@ -635,6 +648,8 @@ export const app = new Hono()
 
         const env = getEnv()
         const input = outlineFlowInput(novel)
+        const notes = outlineNotesBlocker(novel, input)
+        if (notes !== null) return c.json({ error: 'invalid_notes', detail: notes }, 400)
         const bible = await prepareBibleFlow(
           jsonCaller(env, options.model !== undefined ? options.model : novel.editor_model),
           input,
@@ -680,7 +695,12 @@ export const app = new Hono()
       // 小説と章立ての該当章があること、作品設計が成人指定の条件を満たすこと、前の章が欠けていないことを確かめる。
       // 文脈 (既出の章、確定事項) は DO が組み立てる (DO も同じ作品設計の判定をする)。
       const model = options.model !== undefined ? options.model : DEFAULT_CHAPTER_MODEL
-      const start = await prepareGenerationStart(prisma, id, [chapterNumber], model).finally(() => prisma.$disconnect())
+      // 書き直しの指示も、成人指定なら開始の時点で検査する (400 invalid_instruction)。
+      // 書き直しなら、元の版がこの小説のこの章のもので本文があることも確かめる (400 invalid_base_version)。
+      const start = await prepareGenerationStart(prisma, id, [chapterNumber], model, {
+        instruction: options.instruction,
+        baseVersionId: options.base_version_id
+      }).finally(() => prisma.$disconnect())
       if (!start.ok) return c.json(startErrorBody(start), start.status)
       const payload =
         revisionInstruction(options.instruction).length > 0
