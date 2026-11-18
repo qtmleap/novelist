@@ -199,13 +199,15 @@ export type ChapterStaleness = z.infer<typeof ChapterStalenessSchema>
 //   ending_overlap        章末の言い回しが他の章と重なっている
 //   speech_copy           口調の例が本文にそのまま使われている
 //   indent                段落頭の字下げが揃っていない
+//   minor_term            成人指定 (R15 / R18) の作品の本文に、未成年を指す語 (高校生、学年の表現など) がある
 export const CHECK_KINDS = [
   'length',
   'missing_character',
   'unexpected_character',
   'ending_overlap',
   'speech_copy',
-  'indent'
+  'indent',
+  'minor_term'
 ] as const
 export const CheckKindSchema = z.enum(CHECK_KINDS)
 export type CheckKind = z.infer<typeof CheckKindSchema>

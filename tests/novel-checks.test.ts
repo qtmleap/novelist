@@ -4,6 +4,7 @@ import {
   chapterTail,
   checkChapter,
   findEndingOverlaps,
+  findMinorTermsInChapter,
   findMissingCharacters,
   findSpeechCopies,
   findUnexpectedCharacters,
@@ -286,6 +287,50 @@ describe('findMissingCharacters / findUnexpectedCharacters', () => {
   })
 })
 
+describe('findMinorTermsInChapter', () => {
+  test('returns each term once with an excerpt around its first occurrence (10 before, 15 after)', () => {
+    const content = `${'あ'.repeat(30)}制服姿の女子高生が廊下を歩いていた。${'い'.repeat(30)}女子高生は笑った。`
+    expect(findMinorTermsInChapter(content)).toEqual([
+      { term: '女子高生', excerpt: '…ああああああ制服姿の女子高生が廊下を歩いていた。いいいいい…' }
+    ])
+  })
+  test('terms come back in the order they are found', () => {
+    const found = findMinorTermsInChapter('JKの彼女と、高校3年の彼と、未成年の彼女。')
+    expect(found.map((item) => item.term)).toEqual(['JK', '高校3年', '未成年'])
+  })
+  test('the excerpt has no line breaks and no leading or trailing ellipsis at the ends of the text', () => {
+    const [item] = findMinorTermsInChapter('朝の廊下。\n\n制服姿の女子高生が\r\nこちらへ歩いてきた。')
+    expect(item?.excerpt).not.toMatch(/[\r\n]/)
+    expect(item?.excerpt).toBe('…の廊下。 制服姿の女子高生が こちらへ歩いてきた。')
+    expect(findMinorTermsInChapter('女子高生だった')[0]?.excerpt).toBe('女子高生だった')
+  })
+  test('the excerpt keeps the original characters even where NFKC changes them', () => {
+    const [item] = findMinorTermsInChapter('彼女は高２だった！　そう…彼女は高２なのだ。')
+    expect(item?.term).toBe('高2')
+    expect(item?.excerpt).toContain('高２だった！ そう…')
+  })
+  test('skips an occurrence that is not the term (標高2000m) and locates the real one', () => {
+    const [item] = findMinorTermsInChapter('標高2000mの山を越えた。翌朝、彼女は高2の制服を着ていた。')
+    expect(item?.term).toBe('高2')
+    expect(item?.excerpt).toContain('制服')
+    expect(item?.excerpt).not.toContain('標高')
+  })
+  test('lowercase jk is found and reported as JK', () => {
+    expect(findMinorTermsInChapter('彼女はjkだと名乗った')).toEqual([{ term: 'JK', excerpt: '彼女はjkだと名乗った' }])
+  })
+  test('does not cut an emoji in half', () => {
+    const emoji = '😀'
+    const [item] = findMinorTermsInChapter(`${emoji.repeat(12)}女子高生${emoji.repeat(12)}`)
+    expect(item?.excerpt).toBe(`…${emoji.repeat(5)}女子高生${emoji.repeat(7)}…`)
+  })
+  test('ordinary words are not terms: 高校教師, 高校時代, 少女', () => {
+    expect(findMinorTermsInChapter('高校教師は高校時代を思い出した。少女は笑った。高校生活は楽しかった。')).toEqual([])
+  })
+  test('empty content gives an empty list', () => {
+    expect(findMinorTermsInChapter('')).toEqual([])
+  })
+})
+
 describe('checkChapter', () => {
   const target = 1000
   // 目標どおりの長さで、地の文は字下げあり、章末は他の章と重ならない本文
@@ -419,16 +464,18 @@ describe('checkChapter', () => {
 
   test('returns warnings in the documented kind order', () => {
     const example = 'しかもいい話ふうになってるのが余計許せないよ！'
-    const content = `彩葉は走った。\n東雲かぐやが現れた。「${example}」まだ始まったばかりだ`
+    const content = `彩葉は走った。女子高生が来た。\n東雲かぐやが現れた。「${example}」まだ始まったばかりだ`
     const warnings = checkChapter({
       chapter: { number: 2, content },
       targetChars: 4000,
       plannedCharacters: ['酒寄彩葉', '八雲'],
       castNames: ['酒寄彩葉', '八雲', '東雲かぐや'],
       speechExamples: [example],
-      otherChapters: [{ number: 1, content: '……だったのだ。まだ始まったばかりだ。' }]
+      otherChapters: [{ number: 1, content: '……だったのだ。まだ始まったばかりだ。' }],
+      ageRating: 'R18'
     })
     expect(warnings.map((w) => w.kind)).toEqual([
+      'minor_term',
       'length',
       'missing_character',
       'unexpected_character',
@@ -436,6 +483,76 @@ describe('checkChapter', () => {
       'speech_copy',
       'indent'
     ])
+  })
+
+  describe('minor_term', () => {
+    const withTerm = `${goodContent}\n${indentedLine('制服姿の女子高生が廊下を歩いていた。')}`
+    const minorOf = (content: string, ageRating: string | undefined) =>
+      checkChapter(baseInput({ chapter: { number: 2, content }, targetChars: content.length, ageRating })).filter(
+        (w) => w.kind === 'minor_term'
+      )
+
+    test('warns once in an R15 / R18 work, naming the term and quoting where it is', () => {
+      for (const rating of ['R15', 'R18']) {
+        const warnings = minorOf(withTerm, rating)
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]?.message).toContain('「女子高生」')
+        // 前 10 字には直前の行の終わりまで入り、行の切れ目 (改行と字下げの全角空白) は空白 1 つになる
+        expect(warnings[0]?.message).toContain('（…夜だった 制服姿の女子高生が廊下を歩いていた。）')
+      }
+    })
+    test('is the first warning (before length)', () => {
+      const kinds = checkChapter(
+        baseInput({ chapter: { number: 2, content: indentedLine('女子高生は走った。') }, ageRating: 'R18' })
+      ).map((w) => w.kind)
+      expect(kinds[0]).toBe('minor_term')
+      expect(kinds).toContain('length')
+    })
+    test('does not warn for an all-ages work', () => {
+      expect(minorOf(withTerm, '全年齢')).toEqual([])
+    })
+    test('does not warn when ageRating is not passed', () => {
+      expect(minorOf(withTerm, undefined)).toEqual([])
+      expect(checkChapter(baseInput({ chapter: { number: 2, content: withTerm } })).map((w) => w.kind)).not.toContain(
+        'minor_term'
+      )
+    })
+    test('does not warn when there is no term', () => {
+      const content = `${goodContent}\n${indentedLine('高校教師は高校時代を思い出した。少女は笑った。')}`
+      expect(minorOf(content, 'R18')).toEqual([])
+      expect(minorOf(goodContent, 'R18')).toEqual([])
+    })
+    test('several terms are gathered into one warning', () => {
+      const content = `${goodContent}\n${indentedLine('女子高生と男子高生とJKがいた。')}`
+      const warnings = minorOf(content, 'R18')
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]?.message).toContain('「女子高生」「男子高生」「JK」')
+    })
+    test('shows at most 8 terms and counts the rest', () => {
+      const terms = ['高校生', '中学生', '小学生', '未成年', '園児', '幼女', '美少女', '美少年', 'ティーン']
+      const warnings = minorOf(`${goodContent}\n${indentedLine(terms.join('、'))}`, 'R18')
+      expect(warnings).toHaveLength(1)
+      const message = warnings[0]?.message
+      expect(message).toContain('「美少年」')
+      expect(message).not.toContain('「ティーン」')
+      expect(message).toContain('ほか 1 語')
+    })
+    test('adds an excerpt for at most 2 terms, with no line breaks', () => {
+      const lines = ['女子高生が\n来た。', '男子高生も\n来た。', 'JKも\n来た。'].map(indentedLine)
+      const content = [goodContent, ...lines].join('\n')
+      const message = minorOf(content, 'R18')[0]?.message
+      expect(message).toBeDefined()
+      expect(message).not.toMatch(/[\r\n]/)
+      expect(message?.match(/（/g)?.length).toBe(2)
+    })
+    test('message stays within 600 chars and satisfies the schema', () => {
+      const longTerms = ['高校生', '中学生', '小学生', '未成年', '園児', '幼女', '美少女', '美少年', 'ティーン', 'JK']
+      const content = longTerms.map((term) => `${'あ'.repeat(40)}${term}${'い'.repeat(40)}`).join('\n')
+      const warnings = minorOf(content, 'R18')
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]?.message.length).toBeLessThanOrEqual(600)
+      expect(CheckWarningSchema.safeParse(warnings[0]).success).toBe(true)
+    })
   })
 
   test('every warning satisfies CheckWarningSchema (message within 600 chars)', () => {

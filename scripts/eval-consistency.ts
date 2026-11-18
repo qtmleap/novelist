@@ -11,17 +11,20 @@
 import { readFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { z } from 'zod'
+import { isAdultRating } from '../src/lib/novel/bible'
 import {
   type CheckChapter,
   type EndingOverlap,
   findEndingOverlaps,
+  findMinorTermsInChapter,
   findMissingCharacters,
   findSpeechCopies,
   findUnexpectedCharacters,
   type IndentStyle,
   indentStats,
   indentStyle,
-  lengthRatio
+  lengthRatio,
+  type MinorTermExcerpt
 } from '../src/lib/novel/checks'
 import { type Character, CharacterSchema } from '../src/schemas/character.dto'
 import { type NovelWithChapters, NovelWithChaptersSchema } from '../src/schemas/novel.dto'
@@ -137,6 +140,8 @@ type ChapterMetrics = {
   unexpected: string[] | null
   // この章を含む重複
   overlaps: EndingOverlap[]
+  // 成人指定 (R15 / R18) の本文にある未成年を指す語。null = 全年齢なので計測しない
+  minorTerms: MinorTermExcerpt[] | null
 }
 
 // 小説の名簿の人物名 → 口調の例。バリエーションに口調の例があればそれ、無ければ本体のもの
@@ -169,6 +174,7 @@ function collectMetrics(novel: NovelWithChapters, characters: Character[] | unde
   const overlaps = findEndingOverlaps(chapters)
   const castNames = novel.cast.map((member) => member.name)
   const examplesByName = characters === undefined ? undefined : speechExamplesByName(novel, characters)
+  const adult = isAdultRating(novel.age_rating)
 
   return chapters.map((chapter) => {
     const entry =
@@ -188,7 +194,8 @@ function collectMetrics(novel: NovelWithChapters, characters: Character[] | unde
       speechCopies: examples === undefined ? null : findSpeechCopies(chapter.content, examples),
       missing: hasPlan ? findMissingCharacters(chapter.content, planned) : null,
       unexpected: hasPlan ? findUnexpectedCharacters(chapter.content, planned, castNames) : null,
-      overlaps: overlaps.filter((o) => o.a === chapter.number || o.b === chapter.number)
+      overlaps: overlaps.filter((o) => o.a === chapter.number || o.b === chapter.number),
+      minorTerms: adult ? findMinorTermsInChapter(chapter.content) : null
     }
   })
 }
@@ -208,10 +215,10 @@ const countCell = (items: string[] | null): string => (items === null ? '-' : St
 const chapterLabel = (number: number): string => `第 ${number} 章`
 const clip = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text)
 
-function renderTable(metrics: ChapterMetrics[]): string[] {
+function renderTable(metrics: ChapterMetrics[], showMinor: boolean): string[] {
   return [
-    '| 章 | 文字数 | 目標比 | 字下げ | 口調の丸写し | 未登場 | 予定外 | 章末の重複 |',
-    '|---:|---:|---:|---|---:|---:|---:|---:|',
+    `| 章 | 文字数 | 目標比 | 字下げ | 口調の丸写し | 未登場 | 予定外 | 章末の重複 |${showMinor ? ' 未成年を指す語 |' : ''}`,
+    `|---:|---:|---:|---|---:|---:|---:|---:|${showMinor ? '---:|' : ''}`,
     ...metrics
       .map((m) =>
         [
@@ -222,19 +229,23 @@ function renderTable(metrics: ChapterMetrics[]): string[] {
           countCell(m.speechCopies),
           countCell(m.missing),
           countCell(m.unexpected),
-          m.overlaps.length
+          m.overlaps.length,
+          ...(showMinor ? [m.minorTerms === null ? '-' : m.minorTerms.length] : [])
         ].join(' | ')
       )
       .map((row) => `| ${row} |`)
   ]
 }
 
-function renderSummary(metrics: ChapterMetrics[], measuresSpeech: boolean): string[] {
+function renderSummary(metrics: ChapterMetrics[], measuresSpeech: boolean, showMinor: boolean): string[] {
   const mean = metrics.length === 0 ? '-' : percent(metrics.reduce((sum, m) => sum + m.ratio, 0) / metrics.length)
   const enough = metrics.filter((m) => m.ratio >= ENOUGH_RATIO).length
   // 重複は章のペアを 1 件と数える (各章の表のセルは、その章を含むペアの数)
   const overlapCount = metrics.reduce((sum, m) => sum + m.overlaps.length, 0) / 2
   const copyCount = metrics.reduce((sum, m) => sum + (m.speechCopies === null ? 0 : m.speechCopies.length), 0)
+  // 未成年を指す語は、章ごとの語の種類を数えて合計する (同じ語が何度出ても 1 つ)
+  const minorCount = metrics.reduce((sum, m) => sum + (m.minorTerms === null ? 0 : m.minorTerms.length), 0)
+  const minorChapters = metrics.filter((m) => m.minorTerms !== null && m.minorTerms.length > 0).length
   const indentCounts = INDENT_ORDER.map(
     (style) => `${INDENT_LABELS[style]} ${metrics.filter((m) => m.indent === style).length}`
   )
@@ -243,7 +254,8 @@ function renderSummary(metrics: ChapterMetrics[], measuresSpeech: boolean): stri
     `- 目標の 80% 以上の章: ${enough} / ${metrics.length}`,
     `- 章末の重複: ${overlapCount} 件`,
     `- 口調の例の丸写し: ${measuresSpeech ? `${copyCount} 件` : '未計測（--characters なし）'}`,
-    `- 字下げの種類ごとの章数: ${indentCounts.join(' / ')}`
+    `- 字下げの種類ごとの章数: ${indentCounts.join(' / ')}`,
+    ...(showMinor ? [`- 未成年を指す語: ${minorCount} 語（${minorChapters} / ${metrics.length} 章）`] : [])
   ]
 }
 
@@ -261,29 +273,40 @@ function renderDetails(metrics: ChapterMetrics[]): string[] {
       const text = items.map((item) => (quote ? `「${clip(item, 40)}」` : item)).join('、')
       return [`- ${label}: ${chapterLabel(m.number)} ${text}`]
     })
+  // 語ごとに 1 行。抜粋は本文のどこかを探す手がかり
+  const minorLines = metrics.flatMap((m) =>
+    (m.minorTerms === null ? [] : m.minorTerms).map(
+      (item) =>
+        `- 未成年を指す語: ${chapterLabel(m.number)}「${item.term}」${item.excerpt === '' ? '' : `（${clip(item.excerpt, 80)}）`}`
+    )
+  )
   return [
     ...overlapLines,
     ...perChapter('口調の例の丸写し', (m) => m.speechCopies, true),
     ...perChapter('未登場', (m) => m.missing, false),
-    ...perChapter('予定外', (m) => m.unexpected, false)
+    ...perChapter('予定外', (m) => m.unexpected, false),
+    ...minorLines
   ]
 }
 
 function renderReport(novel: NovelWithChapters, metrics: ChapterMetrics[], measuresSpeech: boolean): string {
   const details = renderDetails(metrics)
+  // 成人指定のときだけ、未成年を指す語の列と行を出す (全年齢では出さない)
+  const showMinor = isAdultRating(novel.age_rating)
   return [
     `# ${novel.title}`,
     '',
     `- 章数: ${novel.num_chapters}（本文あり ${metrics.length}）`,
     `- 目標文字数: ${novel.target_chars} 字`,
+    `- 年齢指定: ${novel.age_rating}`,
     '',
     '## 章ごと',
     '',
-    ...(metrics.length === 0 ? ['本文のある章がありません。'] : renderTable(metrics)),
+    ...(metrics.length === 0 ? ['本文のある章がありません。'] : renderTable(metrics, showMinor)),
     '',
     '## まとめ',
     '',
-    ...renderSummary(metrics, measuresSpeech),
+    ...renderSummary(metrics, measuresSpeech, showMinor),
     ...(details.length === 0 ? [] : ['', '## 詳細', '', ...details]),
     ''
   ].join('\n')
