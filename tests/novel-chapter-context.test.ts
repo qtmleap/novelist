@@ -1407,6 +1407,23 @@ describe('the rewrite base version at the generation start', () => {
     expect(start).toMatchObject({ ok: false, status: 400, error: 'invalid_base_version' })
   })
 
+  test('a rewrite without a base id uses the latest version of the chapter when it has text', async () => {
+    // getNovelWithChapters が第 1 章の最新 version (本文あり) を返す偽物
+    const latest = { ...own, version: 2, outline_hash: null, prev_chapter_id: null, review: null, created_at: new Date(0) }
+    const base = fake([])
+    const prisma: PrismaClient = Object.assign(Object.create(null), {
+      novel: {
+        findUnique: async () => ({
+          ...(await base.novel.findUnique({ where: { id: 'n1' } })),
+          chapters: [{ id: 'v1', chapter_number: 1, version: 2 }]
+        })
+      },
+      chapter: { findMany: async () => [latest], findUnique: async () => null }
+    })
+    const start = await prepareGenerationStart(prisma, 'n1', [1], 'm', rewrite(''))
+    expect(start.ok).toBe(true)
+  })
+
   test('a normal generation ignores the base version id', async () => {
     const start = await prepareGenerationStart(fake([]), 'n1', [1], 'm', { instruction: '  ', baseVersionId: 'nope' })
     expect(start.ok).toBe(true)
