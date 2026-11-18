@@ -69,6 +69,10 @@ export type PriorChapterText = { chapter_number: number; title: string | null; c
 export type PriorChapterOmitted = { chapter_number: number; title: string | null; omitted: true }
 export type PriorChapterInput = PriorChapterText | PriorChapterOmitted
 
+export type NextChapterInput = { opening: string; title: string; summary: string }
+// 指示つきの書き直し。baseContent はその章の今の本文 (全文)、instruction は利用者の修正指示。
+export type RevisionInput = { baseContent: string; instruction: string }
+
 export type ChapterPromptInput = {
   novel: NovelParams
   outline: Outline
@@ -80,6 +84,13 @@ export type ChapterPromptInput = {
   bible?: StoryBible | null
   // 本文にも渡る執筆上の指示 (Novel.writing_notes)。'' や未指定なら出さない。
   writingNotes?: string
+  // 途中の章を書き直すときだけ渡す。次の章が既に書かれているので、その冒頭へ繋がる状態で終えさせる。
+  // opening は次の章の本文の冒頭 (500 字程度)、title と summary は次の章の章立ての項目。
+  // 冒頭が空のとき、章立ての上でこの章が最終章のときは使わない。
+  nextChapter?: NextChapterInput | null
+  // 指示つきの書き直しのときだけ渡す。今の本文を【元の版】、指示を【修正指示】として渡し、指示された点だけを直させる。
+  // 本文か指示が空のときは使わない (通常の生成になる)。
+  revision?: RevisionInput | null
   targetChars: number
   style: StyleParams
   cast: CastMember[]
@@ -273,19 +284,39 @@ const TONE_LINES: Record<string, string | undefined> = {
 }
 
 const ADULT_ONLY = '物語の登場人物はすべて 18 歳以上の成人とする。'
-// 人物設定の原文 (辞典) に未成年を連想させる記述が残っているときの読み替え。
+// 作品設計が無い旧データで使う、従来の読み替えの文面 (変えない)。
 const READ_AS_ADULT =
   'たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。'
-// 作品設計が成人としての人物設定を確定しているとき。人物設定は差し替わって渡るので、上の読み替えは要らない。
-// ただし【作品情報】の世界観・設定は利用者が書いた原文のまま渡る (「高校二年生の編入試験」など)。
-// 成人指定の作品で未成年として描写させないよう、設定の原文についての読み替えだけを残す。
-const READ_SETTING_AS_ADULT =
-  '【作品情報】の世界観・設定に、高校や学年など未成年を連想させる記述があっても、成人の設定として読み替えること。学校設定が必要な場合は大学とする。'
+// 作品設計がある作品で使う。読み替えの指示を、プロンプトの全ての資料にかける。
+// 作品設計が成人としての人物設定を確定していても外さない。未成年を連想させる記述は、次のところに残りうるため:
+//   原文のまま渡る資料 (世界観・設定、関係の種別と説明、名簿の役割、口調の例、執筆上の指示、
+//   成人指定に変える前に書かれた章とその記録) と、作品設計そのもの (書き直しきれずに残った記述)。
+const READ_ALL_AS_ADULT =
+  'このプロンプトの資料と指示のどこか（作品情報、作品設計、人物の設定、関係、口調の例、章立て、既に書かれた本文とその記録など）に「高校生」「17歳」「女子高生」「十代」「美少女」、学年、制服等、未成年を連想させる記述が含まれていても、本作品においては成人（大学生または社会人）として読み替えて書くこと。学校設定が必要な場合は大学とする。'
+// 作品設計が成人としての人物設定を確定しているときに添える (読み替えの指示は外さない)。
+const ADULT_CAST_RESOLVED = '登場人物の年齢・職業・外見・背景は、成人として確定したものを載せている。'
+
+// 成人指定のときの、読み替えの指示の出し方。
+//   legacy    作品設計が無い旧データ。従来の文面
+//   all       作品設計がある。全ての資料にかける
+//   resolved  作品設計が成人としての人物設定 (cast) を確定していて、渡される人物設定がそれに差し替わっている。
+//             全ての資料にかけ、人物設定が確定済みであることを添える
+type AdultReading = 'legacy' | 'all' | 'resolved'
+
+function adultReadingOf(bible: StoryBible | null | undefined): AdultReading {
+  if (bible === null || bible === undefined) return 'legacy'
+  return bible.cast.length > 0 ? 'resolved' : 'all'
+}
+
+const ADULT_READING_TEXT: Record<AdultReading, string> = {
+  legacy: READ_AS_ADULT,
+  all: READ_ALL_AS_ADULT,
+  resolved: `${READ_ALL_AS_ADULT}${ADULT_CAST_RESOLVED}`
+}
 
 // 年齢指定は描写の踏み込み度合いを決める (文体とは独立)。知らない値なら undefined。
-// castResolved = 作品設計が成人としての人物設定 (cast) を確定していて、渡される人物設定がそれに差し替わっている。
-function ratingLine(ageRating: string | undefined, castResolved: boolean): string | undefined {
-  const reading = castResolved ? READ_SETTING_AS_ADULT : READ_AS_ADULT
+function ratingLine(ageRating: string | undefined, adultReading: AdultReading): string | undefined {
+  const reading = ADULT_READING_TEXT[adultReading]
   if (ageRating === '全年齢') return '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること'
   if (ageRating === 'R15') {
     return `${ADULT_ONLY}${reading}性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する`
@@ -306,9 +337,9 @@ export const ENDING_LINES: Record<string, string | undefined> = {
 }
 
 // 本文の【文体・視点】。結末の方向は渡さない (本文は章立てと作品設計を通して結末へ向かう)。
-function styleBody(style: StyleParams, castResolved: boolean): string {
+function styleBody(style: StyleParams, adultReading: AdultReading): string {
   const tone = TONE_LINES[style.tone]
-  const rating = ratingLine(style.age_rating, castResolved)
+  const rating = ratingLine(style.age_rating, adultReading)
   return [
     `視点: ${povLine(style)}`,
     `文体: ${tone === undefined ? DEFAULT_TONE_LINE : tone}`,
@@ -320,11 +351,6 @@ function styleBody(style: StyleParams, castResolved: boolean): string {
 
 // ---------------------- 作品設計・呼称表 ----------------------
 
-// 作品設計が成人としての人物設定を確定しているか。
-function castResolvedBy(bible: StoryBible | null | undefined): boolean {
-  return bible !== null && bible !== undefined && bible.cast.length > 0
-}
-
 function labeledList(label: string, items: string[]): string {
   const lines = items.map(oneLine).filter((item) => item.length > 0)
   return lines.length > 0 ? [`${label}:`, ...lines.map((item) => `- ${item}`)].join('\n') : ''
@@ -333,7 +359,7 @@ function labeledList(label: string, items: string[]): string {
 // 【作品設計】の中身。物語の核、結末、人物の変化、世界のルールと用語、時系列。空の項目は出さない。
 // 呼称表は【呼称表】の節に分ける (本文だけに渡す)。成人としての人物設定 (cast) は人物設定に差し替えて渡るので、ここには出さない。
 // 小見出しの語 (「結末」「人物の変化」など) は system の規則が名前で指している。
-function bibleBody(bible: StoryBible | null | undefined): string {
+export function bibleBody(bible: StoryBible | null | undefined): string {
   if (bible === null || bible === undefined) return ''
   const arcs = bible.arcs
     .map((arc) => ({ name: arc.name.trim(), start: oneLine(arc.start), end: oneLine(arc.end) }))
@@ -368,9 +394,12 @@ type AddressTable = { rows: AddressEntry[]; calls: Map<string, string> }
 
 const pairKey = (from: string, to: string): string => `${from}\u0000${to}`
 
-// 空の行を除き、同じ組は最初の 1 行だけにする。並びは作品設計のまま。
 function addressTableOf(bible: StoryBible | null | undefined): AddressTable {
-  const entries = bible === null || bible === undefined ? [] : bible.addresses
+  return addressTableFrom(bible === null || bible === undefined ? [] : bible.addresses)
+}
+
+// 空の行を除き、同じ組は最初の 1 行だけにする。並びは渡された順のまま。
+function addressTableFrom(entries: AddressEntry[]): AddressTable {
   const rows: AddressEntry[] = []
   const calls = new Map<string, string>()
   for (const entry of entries) {
@@ -532,6 +561,16 @@ function castForChapter(present: CastMember[], table: AddressTable): CastMember[
   })
 }
 
+// 検査のプロンプト (assist-prompts.ts) 用。本文プロンプトの【呼称表】と【この章の登場人物】と同じ文面を、
+// 呼称の行の一覧から作る。
+export function addressTableBody(addresses: AddressEntry[]): string {
+  return addressBody(addressTableFrom(addresses))
+}
+
+export function castForAddresses(cast: CastMember[], addresses: AddressEntry[]): CastMember[] {
+  return castForChapter(cast, addressTableFrom(addresses))
+}
+
 // 呼称表にある組は、関係の行の「呼び方は「…」」を出さない (型のままの指定と、表の具体的な呼び方を並べない)。
 function relationsForChapter(relations: CastRelation[], table: AddressTable): CastRelation[] {
   return relations.map((relation) =>
@@ -683,7 +722,7 @@ function consistencyRules(flags: ChapterSystemFlags): string[] {
   ].filter((rule) => rule.length > 0)
 }
 
-const ADDRESS_PATTERN_RULE =
+export const ADDRESS_PATTERN_RULE =
   '呼び方の「名前」「苗字」は型を表す。相手の名や姓に置き換えて呼ぶ（「苗字＋さん」なら、相手の姓に「さん」を付ける）。'
 
 // 呼び方の規則。呼称表があれば表に 1 本化する。
@@ -829,16 +868,67 @@ function previousChapterOf(
 // 見出しの無い文字列を渡されても、そのまま本文として扱う。どちらでも見出しは 1 つになる。
 const LEDGER_HEADING = '確定事項'
 
-function ledgerBody(ledgerText: string | undefined): string {
+export function ledgerBody(ledgerText: string | undefined): string {
   if (ledgerText === undefined) return ''
   const text = ledgerText.replace(/\r\n|\r/g, '\n').trim()
   const heading = `【${LEDGER_HEADING}】`
   return text.startsWith(heading) ? text.slice(heading.length).trim() : text
 }
 
+// 次の章の冒頭 (既に書かれている次の章へ繋げるとき)。節の中身と、【今回の執筆】の文言の切り替えに使う。
+// system は変えない (書き直しでも、作品を通して同じ system と同じ前半を送り、キャッシュに乗せる)。
+// そのため、繋げ方の指示は節の中に書く。
+const NEXT_OPENING_HEADING = '次の章の冒頭'
+
+function nextOpeningBody(next: NextChapterInput, nextNumber: number): string {
+  const label = chapterLabel(nextNumber, next.title)
+  const summary = oneLine(next.summary)
+  return [
+    `${label}は既に書かれていて、変更しない。この章は、下の冒頭に自然に繋がる状態（時、場所、その場にいる人物、直前の出来事）で終える。次の章の冒頭の文や出来事を、この章の中に書かない。`,
+    summary.length > 0 ? `次の章の概要: ${summary}` : '',
+    `▼ 第${nextNumber}章の冒頭`,
+    trimChapterText(next.opening),
+    // 冒頭は途中で切ってある。次の章がここで終わると読ませない
+    '（冒頭はここまで。続きは省略）'
+  ]
+    .filter((line) => line.length > 0)
+    .join('\n')
+}
+
+// 指示つきの書き直し。nextChapter と同じく system は変えず、直し方の指示は【今回の執筆】に書く。
+const REVISION_BASE_HEADING = '元の版'
+const REVISION_INSTRUCTION_HEADING = '修正指示'
+
+// 【元の版】の中身。保存用には本文を入れない (確定済みの本文と同じ扱い)。
+function revisionBaseBody(label: string, text: string, mode: PromptMode): string {
+  return [
+    // 「既に書かれた言い回しを繰り返さない」の規則は確定済みの本文 (前の章) についてのもの。
+    // この章の今の本文は、繰り返しを避ける対象ではなく、直す対象だと示す。
+    'この章の今の本文である。確定済みの本文ではなく、これを直したものがこの章の新しい本文になる。',
+    `▼ ${label}`,
+    mode === 'send' ? text : `（本文${formatNumber(text.length)}字。モデルには全文を渡し、保存では省略）`
+  ].join('\n')
+}
+
+// 書き直しのときに【今回の執筆】の先頭に置く、直し方の指示。
+const REVISION_RULES = [
+  `直すのは【${REVISION_INSTRUCTION_HEADING}】に書かれた点だけにする。それ以外は【${REVISION_BASE_HEADING}】の文章をそのまま保つ（言い回しを変えない。【${REVISION_INSTRUCTION_HEADING}】が求めない限り、場面を足したり削ったりしない）。`,
+  '直した結果、前後の文と辻褄が合わなくなる箇所は、合わせて直す。',
+  // 元の版が表記の規則より前に書かれた章のこともある。system の【表記】と「元のまま保つ」がぶつからないようにする。
+  '表記の規則（字下げなど）に合っていない箇所は、規則に合わせて直す。',
+  // system の「出来事をすべて場面として書く」「章末の状況で終える」は、新しく書くときの規則。
+  // 書き直しでは 修正指示 > 元の版 > 計画 の順に優先させる (計画どおりに書き直させない)。
+  `下の題、概要、出来事などは、【${REVISION_BASE_HEADING}】を書いたときの計画である。【${REVISION_BASE_HEADING}】が計画と違っていても、【${REVISION_INSTRUCTION_HEADING}】に書かれていなければ直さない。【${REVISION_INSTRUCTION_HEADING}】が計画と食い違うときは、【${REVISION_INSTRUCTION_HEADING}】に従う。`,
+  '出力は章の全文にする。直していない部分も含めて最初から最後まで書き、どこを直したかの説明は付けない。'
+]
+
 type WritingBrief = {
   entry: OutlineChapter
   plan: ChapterPlan
+  // 次の章が既に書かれていて、【次の章の冒頭】を渡している
+  hasNextOpening: boolean
+  // 指示つきの書き直しのとき、元の版の字数。通常の生成では null
+  revisionBaseChars: number | null
   // 伏線の id → 説明 (回収する伏線の説明を引く)
   setups: Map<string, string>
   // 前の章が張り、後の章が回収する伏線
@@ -866,7 +956,11 @@ function writtenLine(brief: WritingBrief): string {
 function upcomingLine(brief: WritingBrief): string {
   const n = brief.entry.chapter_number
   if (n >= brief.totalChapters) return 'この後の章: なし（この章が最終章。結末まで書き切る）'
-  return `この後の章: ${chapterRange(n + 1, brief.totalChapters)}（この章では書かない。物語は途中なので、章末で締めくくらない）`
+  const range = chapterRange(n + 1, brief.totalChapters)
+  if (brief.hasNextOpening) {
+    return `この後の章: ${range}（第${n + 1}章は既に書かれている。この章では書かず、章末は【${NEXT_OPENING_HEADING}】に繋がるように終える。物語は途中なので、締めくくらない）`
+  }
+  return `この後の章: ${range}（この章では書かない。物語は途中なので、章末で締めくくらない）`
 }
 
 // 分量。出来事があれば出来事ごとに割り当てる。無い旧データは場面数で指示する。
@@ -876,6 +970,12 @@ function lengthLine(targetChars: number, eventCount: number): string {
   }
   const { scenes, charsPerScene } = sceneGuide(targetChars)
   return `分量: 約${formatNumber(targetChars)}字。概要の範囲を${scenes}場面程度に分け、1場面あたり約${formatNumber(charsPerScene)}字を目安に書く。場面を端折って短く終えない。`
+}
+
+// 書き直しの分量。目標の字数に合わせて水増し・削減させない (元の版の字数を 100 字単位で示す)。
+function revisionLengthLine(baseChars: number): string {
+  const rounded = Math.max(100, Math.round(baseChars / 100) * 100)
+  return `分量: 【${REVISION_BASE_HEADING}】（約${formatNumber(rounded)}字）と同じ程度にする。字数を合わせるために増やしたり削ったりしない。【${REVISION_INSTRUCTION_HEADING}】が分量に触れているときは、それに従う。`
 }
 
 // 見出しの行と、字下げした項目の行。項目が無ければ ''。
@@ -890,20 +990,28 @@ function writingBody(brief: WritingBrief): string {
   const title = entry.title.trim()
   const summary = hang(entry.summary, '  ')
   // 最終章は結末まで書き切るので、章末の状況で止める注記は付けない。
+  // 次の章が既に書かれているときは、計画よりも書かれた本文を正とする (次の章は変えられない)。
+  const endNote = brief.hasNextOpening
+    ? `この状況になったところで章を終える。【${NEXT_OPENING_HEADING}】と食い違うときは、次の章の冒頭に合わせる`
+    : 'この状況になったところで章を終える'
+  // 書き直しでは注記を付けない (章末は元の版に書かれている。計画どおりに章末を書き直させない)。
   const endState =
     plan.endState.length === 0
       ? ''
-      : isLast
+      : isLast || brief.revisionBaseChars !== null
         ? `章末の状況: ${plan.endState}`
-        : `章末の状況: ${plan.endState.replace(/。+$/, '')}（この状況になったところで章を終える）`
+        : `章末の状況: ${plan.endState.replace(/。+$/, '')}（${endNote}）`
+  const revising = brief.revisionBaseChars !== null
   const items = [
+    ...(revising ? REVISION_RULES : []),
     writtenLine(brief),
     upcomingLine(brief),
     title.length > 0 ? `題: ${title}` : '',
     summary.length > 0 ? `概要: ${summary}` : '',
     plan.timePlace.length > 0 ? `時と場所: ${plan.timePlace}` : '',
     nested(
-      '出来事（この順に、すべてを場面として書く）',
+      // 書き直しでは、出来事は元の版に書かれている。計画どおりに書き直させない。
+      revising ? '出来事（元の版を書いたときの計画）' : '出来事（この順に、すべてを場面として書く）',
       plan.events.map((event, index) => `${index + 1}. ${event}`)
     ),
     endState,
@@ -922,9 +1030,14 @@ function writingBody(brief: WritingBrief): string {
       'まだ回収しない伏線（後の章で回収する。この章では決着させない）',
       brief.deferred.map((setup) => `- ${threadLine(setup.id, setup.description)}`)
     ),
-    lengthLine(brief.targetChars, plan.events.length)
+    brief.revisionBaseChars === null
+      ? lengthLine(brief.targetChars, plan.events.length)
+      : revisionLengthLine(brief.revisionBaseChars)
   ].filter((line) => line.length > 0)
-  return `第${entry.chapter_number}章（全${totalChapters}章）の本文を書く。\n${bullets(items)}`
+  const head = revising
+    ? `第${entry.chapter_number}章（全${totalChapters}章）の本文を、【${REVISION_BASE_HEADING}】を直して書く。`
+    : `第${entry.chapter_number}章（全${totalChapters}章）の本文を書く。`
+  return `${head}\n${bullets(items)}`
 }
 
 // 本文 1 章ぶんのプロンプトを組み立てる。章立てに chapterNumber が無ければ throw する。
@@ -950,13 +1063,27 @@ function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Pro
   const previous = previousChapterOf(priorChapters, chapterNumber, hasLedger)
   const design = bibleBody(bible)
   const notes = input.writingNotes === undefined ? '' : compactText(input.writingNotes)
+  // 章立ての上で最終章なら、次の章の冒頭は使わない (結末まで書き切る指示とぶつかる)。
+  const next =
+    input.nextChapter === undefined ||
+    input.nextChapter === null ||
+    chapterNumber >= totalChapters ||
+    trimChapterText(input.nextChapter.opening).length === 0
+      ? null
+      : input.nextChapter
+  // 本文か指示が空なら、書き直しとして扱わない。
+  const revisionText =
+    input.revision === undefined || input.revision === null ? '' : trimChapterText(input.revision.baseContent)
+  const revisionInstruction =
+    input.revision === undefined || input.revision === null ? '' : compactText(input.revision.instruction)
+  const revising = revisionText.length > 0 && revisionInstruction.length > 0
 
   // 章をまたいで変わらない部分。章番号や今回の登場人物を入れない (前半を 1 字も変えないため)。
   // 全文の章が増えていく間は、前の章のプロンプトのここまでが、次の章のプロンプトの先頭と一致する
   // (古い章が省略に回ったところでは変わる)。
   const stable: Section[] = [
     { heading: '作品情報', body: novelInfoBody(novel, false) },
-    { heading: '文体・視点', body: styleBody(style, castResolvedBy(bible)) },
+    { heading: '文体・視点', body: styleBody(style, adultReadingOf(bible)) },
     { heading: '作品設計', body: design },
     { heading: '呼称表', body: addressBody(table) },
     { heading: '執筆上の指示', body: notes },
@@ -964,7 +1091,6 @@ function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Pro
     { heading: '確定済みの本文', body: priorBody }
   ]
   // この章だけの部分。【確定事項】は章が進むたびに増えるので、変わらない部分の後に置く。
-  // Phase 4 / 5 で【次の章の冒頭】【元の版】【修正指示】を【今回の執筆】の前に足す。
   const perChapter: Section[] = [
     { heading: LEDGER_HEADING, body: ledger },
     {
@@ -981,11 +1107,19 @@ function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Pro
       heading: 'この章に登場しない人物',
       body: absentBody(absent, present, relations, table, plan.events.length > 0)
     },
+    { heading: NEXT_OPENING_HEADING, body: next === null ? '' : nextOpeningBody(next, chapterNumber + 1) },
+    {
+      heading: REVISION_BASE_HEADING,
+      body: revising ? revisionBaseBody(chapterLabel(chapterNumber, entry.title), revisionText, mode) : ''
+    },
+    { heading: REVISION_INSTRUCTION_HEADING, body: revising ? revisionInstruction : '' },
     {
       heading: '今回の執筆',
       body: writingBody({
         entry,
         plan,
+        hasNextOpening: next !== null,
+        revisionBaseChars: revising ? revisionText.length : null,
         setups: setupDescriptions(chapters),
         deferred: deferredSetups(chapters, chapterNumber),
         totalChapters,
@@ -1011,7 +1145,7 @@ export function buildChapterPrompt(input: ChapterPromptInput): Prompt {
   return assembleChapterPrompt(input, 'send')
 }
 
-// 保存・表示用 (Chapter.prompt)。buildChapterPrompt と同じ内容で、【確定済みの本文】の全文の章だけ、
+// 保存・表示用 (Chapter.prompt)。buildChapterPrompt と同じ内容で、【確定済みの本文】の全文の章と【元の版】だけ、
 // 本文を字数の 1 行に置き換える (見出しは残す)。system と user を renderPromptForStorage で 1 つの文字列にして返す。
 export function buildChapterPromptForStorage(input: ChapterPromptInput): string {
   return renderPromptForStorage(assembleChapterPrompt(input, 'storage'))
@@ -1128,7 +1262,7 @@ function castNamesLine(cast: CastMember[]): string {
 // 年齢指定と結末の方向は残す。結末の具体像が作品設計にあれば、そちらを正とする。
 function outlineInfoBody(input: OutlinePromptInput): string {
   const { novel, style, bible } = input
-  const rating = ratingLine(style.age_rating, castResolvedBy(bible))
+  const rating = ratingLine(style.age_rating, adultReadingOf(bible))
   const ending = style.ending === undefined ? undefined : ENDING_LINES[style.ending]
   const hasBibleEnding = bible !== null && bible !== undefined && bible.ending.trim().length > 0
   return [
@@ -1223,7 +1357,7 @@ function outlineChapterSystem(flags: OutlineFlags, chapterNumber: number): strin
 }
 
 // 【他の章】【書き直す章】の 1 章ぶん。題と概要に、計画の項目を字下げして添える。
-function outlineChapterBlock(chapter: OutlineChapter): string {
+export function outlineChapterBlock(chapter: OutlineChapter): string {
   const plan = planOf(chapter)
   const summary = hang(chapter.summary, '  ')
   const label = chapterLabel(chapter.chapter_number, chapter.title)

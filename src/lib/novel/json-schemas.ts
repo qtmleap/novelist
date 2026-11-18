@@ -1,6 +1,7 @@
 import type { JsonSchema } from '@/lib/novel/outline'
+import { REVIEW_ISSUE_KINDS } from '@/schemas/story.dto'
 
-// 補助の呼び出し (章の記録の抽出、作品設計) が返す JSON の形 (純粋関数)。
+// 補助の呼び出し (章の記録の抽出、作品設計、検査) が返す JSON の形 (純粋関数)。
 // Gemini の generationConfig.responseFormat.text.schema に渡す。書き方は outline.ts の章立ての schema に合わせる:
 // - 型名は小文字。長さの制約 (minLength、maxItems など) はサーバーが無視するか、複雑すぎるとして拒否するので入れない。
 // - 項目はすべて required にする。出力は schema のキーの順に生成されるので、キーの順序 = 書かせる順序。
@@ -87,5 +88,16 @@ export function bibleJsonSchema(input: { castNames: string[]; adult: boolean }):
     ...(hasAddressPairs(names)
       ? { addresses: arrayOf(objectOf({ from: oneOf(names), to: oneOf(names), call: text() })) }
       : {})
+  })
+}
+
+// ---------------------- 検査 (ReviewIssueSchema の配列) ----------------------
+
+// { issues: [{ quote, reason, kind }] }。
+// 項目は quote → reason → kind の順に書かせる。先に本文の該当箇所を抜き出させ、食い違いを説明させてから種別を選ばせる
+// (種別を先に書かせると、種別ごとに指摘を探して埋めようとする)。Zod はキーの順序を見ないので、保存の形には影響しない。
+export function reviewJsonSchema(): JsonSchema {
+  return objectOf({
+    issues: arrayOf(objectOf({ quote: text(), reason: text(), kind: oneOf([...REVIEW_ISSUE_KINDS]) }))
   })
 }

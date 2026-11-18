@@ -2,19 +2,25 @@ import { type AddressPair, isAddressPattern, isAdultRating, requiredAddressPairs
 import { hasAddressPairs, usableValues } from '@/lib/novel/json-schemas'
 import { ACTIONS_LIMIT, FACTS_LIMIT, LEARNED_LIMIT } from '@/lib/novel/ledger'
 import {
+  ADDRESS_PATTERN_RULE,
+  addressTableBody,
+  bibleBody,
   bullets,
   type CastMember,
   type CastRelation,
   castBody,
+  castForAddresses,
   chapterLabel,
   ENDING_LINES,
   inlineJson,
   JSON_ONLY_REQUEST,
+  ledgerBody,
   type NovelParams,
   narratorName,
   narratorTag,
   novelInfoBody,
   oneLine,
+  outlineChapterBlock,
   type Prompt,
   relationsBody,
   renderSections,
@@ -23,9 +29,16 @@ import {
   type StyleParams,
   trimChapterText
 } from '@/lib/novel/prompts'
-import type { StoryThread } from '@/schemas/story.dto'
+import type { OutlineChapter } from '@/schemas/novel.dto'
+import {
+  type AddressEntry,
+  REVIEW_ISSUE_KINDS,
+  type ReviewIssueKind,
+  type StoryBible,
+  type StoryThread
+} from '@/schemas/story.dto'
 
-// 補助の呼び出し (章の記録の抽出、作品設計) のプロンプト (純粋関数)。cloudflare:workers、Prisma、fetch に依存させない。
+// 補助の呼び出し (章の記録の抽出、作品設計、検査) のプロンプト (純粋関数)。cloudflare:workers、Prisma、fetch に依存させない。
 //
 // 文面の方針は prompts.ts と同じ (system は規則、user は資料と今回の依頼。常体の箇条書き)。加えて:
 // - 項目の出し分け (伏線の id、名簿、成人の人物設定) は json-schemas.ts の schema と同じ条件にする。
@@ -438,6 +451,174 @@ export function buildBiblePrompt(input: BiblePromptInput): Prompt {
       hasPairs,
       hasEnding: style.ending !== undefined && ENDING_LINES[style.ending] !== undefined,
       example: exampleName(roster)
+    }),
+    user: renderSections(sections)
+  }
+}
+
+// ---------------------- 検査 (Phase 5) ----------------------
+
+export type ReviewPromptInput = {
+  chapterNumber: number
+  title: string | null
+  // 検査する章の本文
+  content: string
+  // この章の計画 (概要、出来事、章末の状況、伏線)
+  entry: OutlineChapter
+  bible: StoryBible | null
+  // この章より前の章までの確定事項 (ledger.ts の renderLedger の出力。無ければ '')
+  ledgerText: string
+  // この章に登場する人物 (成人指定なら差し替え済み)
+  cast: CastMember[]
+  // 登場人物どうしの呼称 (呼称表があるとき)
+  addresses: AddressEntry[]
+  style: StyleParams
+}
+
+// 1 回の検査で挙げさせる数の上限。警告が多いと読まれなくなるので、はっきりしたものに絞らせる。
+export const REVIEW_ISSUES_MAX = 10
+// 引用の長さ (字)。短すぎると本文のどこか分からず、長すぎると一字一句の一致が崩れやすい。
+export const REVIEW_QUOTE_MIN_CHARS = 10
+export const REVIEW_QUOTE_MAX_CHARS = 80
+
+type ReviewFlags = {
+  hasBible: boolean
+  hasLedger: boolean
+  hasCast: boolean
+  // 【呼称】の節がある
+  hasAddresses: boolean
+  // 人物の「他者の呼び方」の行が残っている (呼称が無いか、呼称に無い組がある)
+  hasAddressPatterns: boolean
+  // この章の計画に「張る伏線」がある
+  hasSetups: boolean
+}
+
+const REVIEW_ROLE =
+  'あなたは小説の校閲者として、書き上がった1章の本文を資料と突き合わせ、資料と食い違う箇所を挙げる。指摘は作者にそのまま見せ、書き直しの指示にも使う。誤った指摘が混ざると指摘が読まれなくなるので、はっきり食い違う箇所だけを挙げる。'
+
+// 何を挙げ、何を挙げないか。誤検出を減らす向きの規則を先に置く。
+function reviewPrinciples(flags: ReviewFlags): string[] {
+  return [
+    '挙げるのは、本文が資料の記述と食い違う箇所だけにする。文章の好み、表現の改善案、構成の提案は挙げない。',
+    '資料に書かれていないことは、食い違いではない。本文が新しく決めたこと（資料に無い人物、物、出来事、細部）は新しい事実であって、指摘しない。',
+    '確信が持てないものは挙げない。資料のどの記述と食い違うかを示せないもの、読み方によっては両立するものは挙げない。',
+    '挙げるのは、本文に書かれている箇所だけにする。書かれていないこと（計画にある出来事が抜けている、など）は挙げない。',
+    `同じ食い違いが何度も出てくるときは、最初の1箇所だけを挙げる。はっきりしたものから順に、${REVIEW_ISSUES_MAX}件まで。`,
+    '食い違いが無ければ、issues は空の配列にする。数を揃えるために挙げない。',
+    // 作品設計の結末と、人物の変化の終わりの状態は、最終章で至るもの。途中の章が達していないことを指摘させない。
+    flags.hasBible
+      ? '【作品設計】の「結末」と、「人物の変化」の終わりの状態は、物語の最後に至るものである。この章がまだそこに達していないことは、食い違いではない。'
+      : '',
+    // 人物の設定 (辞典) は章が進んでも同じ文面で渡る。変装や関係の進展を、設定との食い違いとして挙げさせない。
+    flags.hasCast
+      ? `【登場人物】の設定は、物語の始まりの時点のものである。${flags.hasLedger ? '前の章までに変わったこと（【確定事項】にある）や、' : ''}この章の中で変わること（外見、持ち物、関係）は、食い違いではない。`
+      : '',
+    // 確定事項の「知っていること」は 1 章あたり数項目の抜粋。一覧に無いことを知っているだけでは指摘させない。
+    flags.hasLedger
+      ? '【確定事項】は、この章より前の章までの本文から抜き出した記録である。「知っていること」は抜粋で、全部ではない。一覧に無いことを人物が知っているだけでは挙げない。'
+      : '',
+    flags.hasLedger
+      ? '【確定事項】の「直前の章の終わり」から時間や場所が移っていること自体は、食い違いではない（章の間で時間は進む）。'
+      : '',
+    '【この章の計画】は、この章で書く予定だった内容である。本文に計画に無い細部があることは、食い違いではない。'
+  ].filter((rule) => rule.length > 0)
+}
+
+// 種別ごとの、挙げる対象。画面の種別のラベル (設定、既出の事実、呼び方、時系列、伏線、人物の居場所・知識、その他) と対応する。
+function reviewKindRules(flags: ReviewFlags): Record<ReviewIssueKind, string> {
+  const settingSource = [flags.hasBible ? '【作品設計】' : '', flags.hasCast ? '人物の設定' : '']
+    .filter((source) => source.length > 0)
+    .join('や')
+  const addressSource = flags.hasAddresses
+    ? flags.hasAddressPatterns
+      ? '【呼称】や人物の「他者の呼び方」'
+      : '【呼称】'
+    : '人物の「他者の呼び方」'
+  return {
+    setting: `${settingSource.length > 0 ? settingSource : '資料の設定'}との食い違い（外見、性格、能力、世界のルール、用語の表記）。`,
+    fact: flags.hasLedger
+      ? '【確定事項】の「事実」や「これまでの流れ」との食い違い。'
+      : '前の章までに確定した事実との食い違い。',
+    address: flags.hasCast
+      ? `台詞の中での相手の呼び方が、${addressSource}と違う。または、一人称が人物の設定と違う。地の文での人物の書き方は対象にしない。`
+      : '呼び方や一人称が、資料と違う。',
+    timeline: '時系列の食い違い（日付、時間帯、季節、経過時間）。',
+    thread: flags.hasSetups
+      ? '伏線の扱いの誤り。【この章の計画】の「張る伏線」の種明かしをしている、前の章までに決着したことを未解決として扱っている、など。'
+      : '伏線の扱いの誤り。前の章までに決着したことを未解決として扱っている、など。',
+    presence: flags.hasLedger
+      ? 'その場にいない人物が発言・行動している。人物が、居合わせていない場面の出来事を、誰かから聞く・自分で気づくといった描写なしに知っている。【確定事項】の「知っていること」に挙がっていることを、初めて知ったように扱っている。'
+      : 'その場にいない人物が発言・行動している。人物が、居合わせていない場面の出来事を、誰かから聞く・自分で気づくといった描写なしに知っている。',
+    other: '上のどれにも当たらない、資料との食い違い。'
+  }
+}
+
+function reviewSkeleton(): string {
+  return jsonSkeleton([
+    ['issues', [{ quote: '本文からそのまま抜き出した箇所', reason: 'どの資料とどう食い違うか', kind: '種別' }]]
+  ])
+}
+
+function reviewSystem(flags: ReviewFlags): string {
+  const kinds = reviewKindRules(flags)
+  const fields = [
+    `quote: 本文の該当箇所を、一字一句そのまま抜き出す。${REVIEW_QUOTE_MIN_CHARS}〜${REVIEW_QUOTE_MAX_CHARS}字。言い換えたり、要約したり、途中を省いてつないだりしない。食い違いがいちばんはっきり分かる1箇所を選ぶ。本文に無い文字列を書いた指摘は捨てられる。`,
+    // reason は「「引用」: 理由」の形で、そのまま書き直しの指示の下書きになる。
+    'reason: どの資料のどの記述と、どう食い違うかを書く。資料の名前と、その記述の内容を示し、どう直せばよいかを添える。1〜2文で、この文だけを読んで何をどう直すかが分かるようにする。',
+    'kind: 下の【種別】のどれか1つ。',
+    flags.hasAddressPatterns ? ADDRESS_PATTERN_RULE : ''
+  ].filter((line) => line.length > 0)
+  const sections = renderSections([
+    { heading: '検査の原則', body: bullets(reviewPrinciples(flags)) },
+    { heading: '各項目の書き方', body: bullets(fields) },
+    { heading: '種別', body: bullets(REVIEW_ISSUE_KINDS.map((kind) => `${kind}: ${kinds[kind]}`)) },
+    outputSection(reviewSkeleton())
+  ])
+  return `${REVIEW_ROLE}\n\n${sections}`
+}
+
+// 書き上がった章を資料と突き合わせて、食い違いを挙げさせるプロンプト。返させる形は { issues: ReviewIssue[] }。
+// 本文が空なら throw する (記録の抽出と同じ扱い)。
+export function buildReviewPrompt(input: ReviewPromptInput): Prompt {
+  const text = trimChapterText(input.content)
+  if (text.length === 0) {
+    throw new Error(`Chapter ${input.chapterNumber} has no content to review`)
+  }
+  const label = chapterLabel(input.chapterNumber, input.title)
+  const design = bibleBody(input.bible)
+  const ledger = ledgerBody(input.ledgerText)
+  const addresses = addressTableBody(input.addresses)
+  const plan = outlineChapterBlock(input.entry)
+  const narrator = narratorName(input.style, input.cast)
+  // 口調の例は渡さない (口調の評価は好みの指摘になりやすい)。呼び方は【呼称】に 1 本化し、
+  // 呼称に無い相手が残る人物だけ「他者の呼び方」の行を残す (本文プロンプトと同じ)。
+  const cast = castForAddresses(input.cast, input.addresses).map((member) => ({ ...member, speech_examples: [] }))
+
+  // 資料を先に、長い本文をその後に、依頼を最後に置く (依頼が本文に埋もれないようにする)。
+  const sections: Section[] = [
+    { heading: '作品設計', body: design },
+    { heading: '確定事項', body: ledger },
+    { heading: 'この章の計画', body: plan },
+    {
+      heading: '登場人物',
+      body: castBody(cast, (member) => (member.name === narrator ? narratorTag(input.style) : ''))
+    },
+    { heading: '呼称', body: addresses },
+    { heading: '検査する本文', body: `▼ ${label}\n${text}` },
+    {
+      heading: '今回の依頼',
+      body: bullets([`${label}の本文を検査し、資料と食い違う箇所を挙げる。`, JSON_ONLY_REQUEST])
+    }
+  ]
+  return {
+    system: reviewSystem({
+      hasBible: design.length > 0,
+      hasLedger: ledger.length > 0,
+      hasCast: cast.length > 0,
+      hasAddresses: addresses.length > 0,
+      hasAddressPatterns: cast.some((member) => member.address_others.length > 0),
+      // 計画の節に実際に「張る伏線」の行が出ているか (種別の説明が指す小見出しと揃える)
+      hasSetups: plan.includes('\n  張る伏線:\n')
     }),
     user: renderSections(sections)
   }

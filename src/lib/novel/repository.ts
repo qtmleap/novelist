@@ -1,6 +1,13 @@
 import type { Prisma, PrismaClient } from '@/generated/prisma/client'
-import { type CreateNovelInput, type SaveCastInput, type StoredBible, StoredBibleSchema } from '@/schemas/novel.dto'
-import { type ChapterRecord, ChapterRecordSchema } from '@/schemas/story.dto'
+import { computeStaleness, outlineEntryHash } from '@/lib/novel/staleness'
+import {
+  type CreateNovelInput,
+  type Outline,
+  type SaveCastInput,
+  type StoredBible,
+  StoredBibleSchema
+} from '@/schemas/novel.dto'
+import { type ChapterRecord, ChapterRecordSchema, type ChapterStaleness } from '@/schemas/story.dto'
 
 // Novel.writing_notes は null 許容の列 (理由は schema.prisma の注記)。読むときはここで '' にそろえる。
 function withWritingNotes<T extends { writing_notes: string | null }>(row: T): T & { writing_notes: string } {
@@ -99,6 +106,14 @@ export async function saveBible(prisma: PrismaClient, id: string, stored: Stored
   await prisma.novel.update({ where: { id }, data: { bible: JSON.stringify(stored) } })
 }
 
+// 章をどの章立てと、どの前章の版から作ったか。鮮度の判定 (staleness.ts) に使う。
+export type ChapterLineage = {
+  // 生成に使った章立ての、この章の項目のハッシュ
+  outlineHash: string | null
+  // 直前の章として使った version の id。第 1 章と、直前の章の本文が無かったときは null
+  prevChapterId: string | null
+}
+
 // Chapter は append-only。再生成のたびに version をインクリメントして INSERT する。
 // 表示は getNovelWithChapters で最新 version のみ抜き出すが、過去 version も DB には残る。
 export async function saveChapter(
@@ -107,7 +122,8 @@ export async function saveChapter(
   chapterNumber: number,
   content: string,
   title: string | null,
-  prompt: string
+  prompt: string,
+  lineage: ChapterLineage
 ) {
   const latest = await prisma.chapter.findFirst({
     where: { novel_id: novelId, chapter_number: chapterNumber },
@@ -122,9 +138,86 @@ export async function saveChapter(
       version: (latest?.version ?? 0) + 1,
       content,
       title,
-      prompt
+      prompt,
+      outline_hash: lineage.outlineHash,
+      prev_chapter_id: lineage.prevChapterId
     }
   })
+}
+
+// 本文がある章の番号 (どれかの version がある章)。生成の開始で、前の章が欠けていないかを確かめるのに使う。
+export async function writtenChapterNumbers(prisma: PrismaClient, novelId: string): Promise<Set<number>> {
+  const rows = await prisma.chapter.findMany({
+    where: { novel_id: novelId },
+    select: { chapter_number: true },
+    distinct: ['chapter_number']
+  })
+  return new Set(rows.map((row) => row.chapter_number))
+}
+
+export type OutlineHashStamp = { id: string; outlineHash: string }
+
+// outline_hash が null の章に変更前のハッシュを書き (outlineStamps)、それから章立てを保存する。
+// D1 の $transaction([...]) は順に実行するだけで、途中で失敗すると前の書き込みは残る。そのため順序で安全側に倒す:
+// ハッシュだけ書けて章立てが保存されなかった場合は、変更前の章立てとハッシュが一致するので「新しい」のまま (正しい)。
+// 先に章立てを書くと、ハッシュを書けなかった古い本文が、書き換えた後も「新しい」に見えてしまう。
+export async function saveOutlineWithStamps(
+  prisma: PrismaClient,
+  novelId: string,
+  outlineJson: string,
+  stamps: OutlineHashStamp[]
+) {
+  await prisma.$transaction([
+    ...stamps.map((stamp) =>
+      prisma.chapter.update({ where: { id: stamp.id }, data: { outline_hash: stamp.outlineHash } })
+    ),
+    prisma.novel.update({ where: { id: novelId }, data: { outline: outlineJson } })
+  ])
+}
+
+// ---------------------- 鮮度 (純粋) ----------------------
+
+export type LineageChapter = {
+  id: string
+  chapter_number: number
+  outline_hash: string | null
+  prev_chapter_id: string | null
+}
+
+// 章立ての 1 章ぶんの項目のハッシュ。章立てに無い章は、空の項目のハッシュ。
+function entryHash(outline: Outline | null, chapterNumber: number): string {
+  const entry = outline === null ? undefined : outline.chapters.find((ch) => ch.chapter_number === chapterNumber)
+  return outlineEntryHash(entry === undefined ? { title: '', summary: '', characters: [] } : entry)
+}
+
+// 各章の最新 version の鮮度 (章番号 → 判定)。outline は今の章立て。
+// 章立てが無い・壊れている (null) ときは章立ての比較を飛ばし、前の章の作り直しだけを見る
+// (読めない章立てを理由に全章を「要再生成」にしない)。
+export function chapterStaleness(chapters: LineageChapter[], outline: Outline | null): Map<number, ChapterStaleness> {
+  const current = new Map(
+    outline === null
+      ? []
+      : outline.chapters.map((entry): [number, string] => [entry.chapter_number, outlineEntryHash(entry)])
+  )
+  return computeStaleness(
+    chapters.map((chapter) => ({
+      number: chapter.chapter_number,
+      id: chapter.id,
+      outlineHash: outline === null ? null : chapter.outline_hash,
+      prevChapterId: chapter.prev_chapter_id
+    })),
+    current
+  )
+}
+
+// 章立てを書き換える前に、outline_hash が null の章 (この機能より前に生成された章) へ書き込むハッシュ。
+// 変更前の章立てのその章の項目のハッシュ (項目が無ければ空の項目のハッシュ) を入れておくと、
+// 書き換えた後の章立てと食い違った章だけが outline_changed になる (変わっていない章は一致して「新しい」のまま)。
+// 対象は渡した章の最新 version 全部 (書き換えた章だけでなく、伏線の検証で直された章も拾うため)。
+export function outlineStamps(chapters: LineageChapter[], previous: Outline | null): OutlineHashStamp[] {
+  return chapters
+    .filter((chapter) => chapter.outline_hash === null)
+    .map((chapter) => ({ id: chapter.id, outlineHash: entryHash(previous, chapter.chapter_number) }))
 }
 
 // 章の記録を保存する (version ごとに 1:1。同じ version に抽出し直したら上書き)。
@@ -174,6 +267,8 @@ async function latestChapters(prisma: PrismaClient, rows: Array<{ id: string; ch
       title: true,
       content: true,
       record: true,
+      outline_hash: true,
+      prev_chapter_id: true,
       created_at: true
     }
   })

@@ -436,7 +436,8 @@ export class ChapterGenerationDO extends DurableObject<Env> {
         payload.chapterNumber,
         this.buffer,
         context.title,
-        context.storagePrompt
+        context.storagePrompt,
+        context.lineage
       )
     } catch (e) {
       await prisma.$disconnect()

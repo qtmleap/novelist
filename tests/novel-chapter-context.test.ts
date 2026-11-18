@@ -4,6 +4,7 @@ import type { Env } from '@/lib/db'
 import {
   buildChapterContext,
   chapterGenPayload,
+  checkGenerationTargets,
   type ContextChapter,
   type ContextSource,
   contextBlocker,
@@ -11,6 +12,10 @@ import {
   extractAndSaveRecord,
   ledgerMaxChars,
   ledgerOf,
+  lineageOf,
+  missingChaptersDetail,
+  nextChapterOf,
+  nextOpening,
   outlineHasChapter,
   planChapterContext,
   provisionalRecord,
@@ -24,7 +29,9 @@ import {
 } from '@/lib/novel/chapter-context'
 import type { JsonCaller } from '@/lib/novel/assist'
 import { LEDGER_MAX_CHARS, renderLedger } from '@/lib/novel/ledger'
+import { validateAdultCast } from '@/lib/novel/bible'
 import { RECORDED_CHAPTER_CHARS } from '@/lib/novel/memory'
+import { outlineEntryHash } from '@/lib/novel/staleness'
 import { buildChapterPrompt, type CastMember, type StyleParams } from '@/lib/novel/prompts'
 import type { Outline } from '@/schemas/novel.dto'
 import type { ChapterRecord, StoryBible, StoryThread } from '@/schemas/story.dto'
@@ -54,7 +61,7 @@ function record(n: number, overrides: Partial<ChapterRecord> = {}): ChapterRecor
 }
 
 function chapter(n: number, rec: ChapterRecord | null = record(n)): ContextChapter {
-  return { id: `v${n}`, number: n, title: `題${n}`, content: content(n), record: rec }
+  return { id: `v${n}`, number: n, title: `題${n}`, content: content(n), record: rec, outlineHash: null }
 }
 
 const outline: Outline = {
@@ -105,6 +112,7 @@ function reservedChars(src: ContextSource): number {
     ledgerText: renderLedger(ledgerOf(prior, new Map()), { previousChapter: src.chapterNumber - 1 }),
     bible: src.bible,
     writingNotes: src.writingNotes,
+    nextChapter: nextChapterOf(src),
     priorChapters: []
   })
   return skeleton.system.length + skeleton.user.length
@@ -124,7 +132,9 @@ describe('planChapterContext', () => {
   test('chapters from the current one on are not included', () => {
     const plan = planChapterContext(source(sixChapters), huge)
     expect(plan.prompt.user).not.toContain(marker(5))
-    expect(plan.prompt.user).not.toContain(marker(6))
+    // 次の章は冒頭 (500 字) だけが【次の章の冒頭】に入り、全文は入らない
+    expect(plan.prompt.user).not.toContain(content(6))
+    expect(plan.prompt.user).toContain(nextOpening(content(6)))
     // 今回の章の古い版の記録も、後の章の記録も確定事項に入れない
     expect(plan.prompt.user).not.toContain('第5章の記録の要約')
     expect(plan.prompt.user).not.toContain('第6章の記録の要約')
@@ -432,7 +442,9 @@ describe('bible, writing notes and planned setups (Phase 3)', () => {
     expect(contextBlocker({ ...adult, bible: null })).toBeNull()
     const broken = { ...bible, cast: [{ ...bible.cast[0], age: '17' }, bible.cast[1]] }
     const message = contextBlocker({ ...adult, bible: broken })
-    expect(message).toContain('酒寄彩葉 の年齢が 17 歳です')
+    const issues = validateAdultCast('R18', broken.cast, ['酒寄彩葉', '月見ヤチヨ'])
+    expect(issues).toHaveLength(1)
+    expect(message).toContain(issues[0])
     expect(message).toContain('作品設計を作り直す')
     // 全年齢では人物設定を問わない
     expect(contextBlocker({ ...adult, style: { ...adultStyle, age_rating: '全年齢' }, bible: broken })).toBeNull()
@@ -645,7 +657,9 @@ describe('buildChapterContext errors and chapterGenPayload', () => {
       payload
     )
     if (result.ok) throw new Error('expected failure')
-    expect(result.error).toContain('酒寄彩葉 の成人としての設定がありません')
+    const issues = validateAdultCast('R18', [], ['酒寄彩葉'])
+    expect(issues).toHaveLength(1)
+    expect(result.error).toContain(issues[0])
     expect(result.error).toContain('作品設計を作り直す')
     // 作品設計が無い旧データは止めない
     const legacy = await buildChapterContext(
@@ -666,5 +680,96 @@ describe('buildChapterContext errors and chapterGenPayload', () => {
       chapterNumber: 2,
       model: 'gemini-2.5-flash'
     })
+  })
+})
+
+// ---------------------- 下流の追従 (Phase 4) ----------------------
+
+describe('nextOpening', () => {
+  test('a short chapter is passed whole, without blank lines around it', () => {
+    expect(nextOpening('\n\n　始まり。\n　続き。\n\n')).toBe('　始まり。\n　続き。')
+  })
+
+  test('cuts at the last line break within the limit', () => {
+    const text = ['あ'.repeat(4), 'い'.repeat(4), 'う'.repeat(4)].join('\n')
+    // 上限 12 字: 「ああああ\nいいいい\nう」の途中で切らず、2 行目の終わりまで
+    expect(nextOpening(text, 12)).toBe('ああああ\nいいいい')
+  })
+
+  test('a line ending exactly at the limit is kept', () => {
+    const text = `${'あ'.repeat(5)}\n${'い'.repeat(5)}`
+    expect(nextOpening(text, 5)).toBe('あああああ')
+  })
+
+  test('without a line break, cuts at the limit', () => {
+    expect(nextOpening('あ'.repeat(600))).toBe('あ'.repeat(500))
+  })
+
+  test('counts code points and never splits a surrogate pair', () => {
+    const text = '𠮷'.repeat(10)
+    expect(nextOpening(text, 3)).toBe('𠮷𠮷𠮷')
+  })
+})
+
+describe('nextChapterOf and lineageOf', () => {
+  test('the next chapter text and its outline entry are passed when the next chapter exists', () => {
+    const next = nextChapterOf(source(sixChapters, 3))
+    expect(next).toEqual({
+      opening: nextOpening(content(4)),
+      title: '題4',
+      summary: '第4章の章立ての概要'
+    })
+  })
+
+  test('a next chapter written from a different outline entry is not passed', () => {
+    const current = outlineEntryHash(outline.chapters[3])
+    const withHash = (hash: string | null) => [...[1, 2, 3].map((n) => chapter(n)), { ...chapter(4), outlineHash: hash }]
+    // 章立てを作り直した後の古い第 4 章
+    expect(nextChapterOf(source(withHash('前の章立てのハッシュ'), 3))).toBeNull()
+    // 今の章立てから書かれた第 4 章と、判定できない第 4 章 (null) は渡す
+    expect(nextChapterOf(source(withHash(current), 3))?.title).toBe('題4')
+    expect(nextChapterOf(source(withHash(null), 3))?.title).toBe('題4')
+  })
+
+  test('no next chapter text means no next chapter', () => {
+    expect(nextChapterOf(source([1, 2, 3].map((n) => chapter(n)), 3))).toBeNull()
+    const blank = { ...chapter(4), content: '\n  \n' }
+    expect(nextChapterOf(source([...[1, 2, 3].map((n) => chapter(n)), blank], 3))).toBeNull()
+  })
+
+  test('the opening of the next chapter reaches the prompt', () => {
+    const plan = planChapterContext(source(sixChapters, 3), huge)
+    expect(plan.prompt.user).toContain(marker(4))
+  })
+
+  test('lineage records the outline entry hash and the previous version id', () => {
+    expect(lineageOf(source(sixChapters, 3))).toEqual({
+      outlineHash: outlineEntryHash(outline.chapters[2]),
+      prevChapterId: 'v2'
+    })
+    expect(lineageOf(source(sixChapters, 1)).prevChapterId).toBeNull()
+    // 直前の章の本文が無ければ null
+    expect(lineageOf(source([chapter(1)], 3)).prevChapterId).toBeNull()
+    expect(planChapterContext(source(sixChapters, 3), huge).lineage).toEqual(lineageOf(source(sixChapters, 3)))
+  })
+})
+
+describe('generation start checks', () => {
+  test('targets are sorted and deduplicated', () => {
+    expect(checkGenerationTargets([3, 1, 2, 3], new Set())).toEqual({ ok: true, targets: [1, 2, 3] })
+  })
+
+  test('a missing earlier chapter blocks the start', () => {
+    expect(checkGenerationTargets([4], new Set([1]))).toEqual({ ok: false, missing: [2, 3] })
+    // 同じ生成で先に書かれる章は欠けていない
+    expect(checkGenerationTargets([2, 4, 3], new Set([1]))).toEqual({ ok: true, targets: [2, 3, 4] })
+    // 書き直し (前の章はある) は通る
+    expect(checkGenerationTargets([2], new Set([1, 2, 3]))).toEqual({ ok: true, targets: [2] })
+    expect(checkGenerationTargets([1], new Set())).toEqual({ ok: true, targets: [1] })
+  })
+
+  test('the 409 detail lists the chapters', () => {
+    expect(missingChaptersDetail([2, 3])).toBe('第 2、3 章')
+    expect(missingChaptersDetail([5])).toBe('第 5 章')
   })
 })

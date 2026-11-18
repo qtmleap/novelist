@@ -31,7 +31,9 @@ import {
   buildCastForGemini,
   buildRelationsForGemini,
   chapterGenPayload,
+  checkGenerationStart,
   jsonCaller,
+  missingChaptersDetail,
   recordCostsBestEffort,
   viewpointCharFor
 } from '@/lib/novel/chapter-context'
@@ -39,6 +41,7 @@ import { normalizeOutlineCharacters, sortOutline, validateThreads } from '@/lib/
 import { buildOutlinePrompt, renderPromptForStorage } from '@/lib/novel/prompts'
 import {
   arrangeNovels,
+  chapterStaleness,
   createCategory,
   createNovel,
   deleteCategory,
@@ -48,11 +51,12 @@ import {
   listCategories,
   listChapterVersions,
   listNovels,
+  outlineStamps,
   renameCategory,
   reorderCategories,
   saveBible,
   saveNovelCast,
-  saveOutline,
+  saveOutlineWithStamps,
   stopGenerationJob,
   updateNovel,
   upsertGenerationJob
@@ -323,6 +327,8 @@ export const app = new Hono()
     try {
       const novel = await getNovelWithChapters(prisma, id)
       if (!novel) return c.json({ error: 'not_found' }, 404)
+      // 各章の鮮度 (章立てが変わった、前の章が作り直された)。判定できない章 (この機能より前の章) は stale にならない。
+      const staleness = chapterStaleness(novel.chapters, parseStoredOutline(novel.outline))
       return c.json({
         ...serializeNovel(novel),
         written_chars: novel.chapters.reduce((sum, ch) => sum + ch.content.length, 0),
@@ -333,7 +339,8 @@ export const app = new Hono()
           title: ch.title,
           content: ch.content,
           created_at: ch.created_at.toISOString(),
-          record: ch.record
+          record: ch.record,
+          staleness: staleness.get(ch.chapter_number)
         })),
         cast: novel.cast,
         relations: novel.relations,
@@ -490,21 +497,18 @@ export const app = new Hono()
           recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: n, kind: 'outline' }, usages)
         )
         if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
-        await saveOutline(prisma, id, JSON.stringify(result.outline))
-        // 各章本文も整合性のため削除する (per-chapter outline regen と同じルール)。
-        // 章立てを保存できたときだけ消す (途中の章で失敗したら、どの章の本文も残す)。
-        await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: { in: targets } } })
+        // 本文は消さない。章立てが変わった章は鮮度の判定で「要再生成」になる。
+        await saveOutlineWithStamps(prisma, id, JSON.stringify(result.outline), outlineStamps(novel.chapters, existing))
         return c.json({ outline: result.outline, warnings: result.warnings })
       }
 
-      // 全章まとめて生成。既存本文は無効化されるので全削除。
+      // 全章まとめて生成。本文は消さない (章立てが変わった章は「要再生成」になる)。
       // 失敗した回もトークンは課金されているので、成否にかかわらず記録する。
       const result = await generateOutlineFlow(call, planned)
       await recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: 0, kind: 'outline' }, result.usages)
       if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
       const outline = sortOutline(result.outline)
-      await saveOutline(prisma, id, JSON.stringify(outline))
-      await prisma.chapter.deleteMany({ where: { novel_id: id } })
+      await saveOutlineWithStamps(prisma, id, JSON.stringify(outline), outlineStamps(novel.chapters, existing))
       return c.json({ outline, warnings: result.warnings })
     } finally {
       await prisma.$disconnect()
@@ -528,7 +532,13 @@ export const app = new Hono()
         castNames.length > 0 ? normalizeOutlineCharacters(outline, castNames) : { outline, warnings: [] }
       // 伏線は検証・修復して保存する (回収の id が前の章の伏線に無ければ外す、など)。
       const threads = validateThreads(sortOutline(normalized.outline))
-      await saveOutline(prisma, id, JSON.stringify(threads.outline))
+      // 手で直した章も、生成と同じく鮮度の判定に乗せる (この機能より前の章に、変更前の章立てのハッシュを書く)。
+      await saveOutlineWithStamps(
+        prisma,
+        id,
+        JSON.stringify(threads.outline),
+        outlineStamps(novel.chapters, parseStoredOutline(novel.outline))
+      )
       return c.json({ outline: threads.outline, warnings: [...normalized.warnings, ...threads.warnings] })
     } finally {
       await prisma.$disconnect()
@@ -624,10 +634,13 @@ export const app = new Hono()
           (n, usages) => recordCostsBestEffort(prisma, env, { novelId: id, chapterNumber: n, kind: 'outline' }, usages)
         )
         if (!result.ok) return c.json({ error: 'generation_failed', detail: result.error }, 502)
-        await saveOutline(prisma, id, JSON.stringify(result.outline))
-        // 章立て (タイトル・要約) と本文がずれた状態は混乱の元なので、
-        // 章立てを上書きしたらこの章の本文も全 version 削除する。
-        await prisma.chapter.deleteMany({ where: { novel_id: id, chapter_number: chapterNumber } })
+        // 本文は消さない。章立てが変わった章は鮮度の判定で「要再生成」になる。
+        await saveOutlineWithStamps(
+          prisma,
+          id,
+          JSON.stringify(result.outline),
+          outlineStamps(novel.chapters, parsedOutline.data)
+        )
         return c.json({ outline: result.outline, warnings: result.warnings })
       } finally {
         await prisma.$disconnect()
@@ -647,19 +660,25 @@ export const app = new Hono()
       const { id, number: chapterNumber } = c.req.valid('param')
       const options = c.req.valid('json')
       const prisma = getPrisma()
-      // 小説と章立ての該当章があることだけ確かめる。文脈 (既出の章、確定事項) は DO が組み立てる。
-      let payload: import('@/lib/chapter-gen-do').StartChapterGenPayload | null
-      try {
-        payload = await chapterGenPayload(
-          prisma,
-          id,
-          chapterNumber,
-          options.model !== undefined ? options.model : DEFAULT_CHAPTER_MODEL
+      // 小説と章立ての該当章があること、前の章が欠けていないことを確かめる。文脈 (既出の章、確定事項) は DO が組み立てる。
+      const model = options.model !== undefined ? options.model : DEFAULT_CHAPTER_MODEL
+      const prepared = await (async () => {
+        try {
+          const payload = await chapterGenPayload(prisma, id, chapterNumber, model)
+          const checked = payload === null ? null : await checkGenerationStart(prisma, id, [chapterNumber])
+          return { payload, checked }
+        } finally {
+          await prisma.$disconnect()
+        }
+      })()
+      if (prepared.payload === null) return c.json({ error: 'not_found' }, 404)
+      if (prepared.checked !== null && !prepared.checked.ok) {
+        return c.json(
+          { error: 'previous_chapters_missing', detail: missingChaptersDetail(prepared.checked.missing) },
+          409
         )
-      } finally {
-        await prisma.$disconnect()
       }
-      if (!payload) return c.json({ error: 'not_found' }, 404)
+      const payload = prepared.payload
 
       const env = getEnv()
       const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)
@@ -688,17 +707,23 @@ export const app = new Hono()
       const { chapters, model } = c.req.valid('json')
       const prisma = getPrisma()
       try {
-        // 小説と章立ての該当章を確かめてからジョブを running にする (404 のときに running のジョブを残さない)。
-        const payload = await chapterGenPayload(prisma, id, chapters[0], model)
+        // 前から順に書く。対象は重複を除いて昇順にし、前の章が欠けていれば始めない (409)。
+        const checked = await checkGenerationStart(prisma, id, chapters)
+        // 小説と章立ての該当章を確かめてからジョブを running にする (404 / 409 のときに running のジョブを残さない)。
+        const first = checked.ok ? checked.targets[0] : chapters[0]
+        const payload = await chapterGenPayload(prisma, id, first, model)
         if (!payload) return c.json({ error: 'not_found' }, 404)
+        if (!checked.ok) {
+          return c.json({ error: 'previous_chapters_missing', detail: missingChaptersDetail(checked.missing) }, 409)
+        }
         await upsertGenerationJob(prisma, id, {
           status: 'running',
-          pending: JSON.stringify(chapters),
-          current: chapters[0],
+          pending: JSON.stringify(checked.targets),
+          current: first,
           model
         })
         const env = getEnv()
-        const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapters[0]}`)
+        const doId = env.CHAPTER_GEN.idFromName(`${id}:${first}`)
         const stub = env.CHAPTER_GEN.get(doId)
         await stub.start(payload)
         return c.json({ status: 'started' }, 202)

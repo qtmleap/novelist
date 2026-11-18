@@ -162,7 +162,13 @@ export type StoryBible = z.infer<typeof StoryBibleSchema>
 //   dropped_character  名簿と照合できず捨てた登場人物名
 //   unresolved_setup   どの章でも回収されない伏線
 //   dropped_payoff     前の章で張られていないため外した「回収する伏線」
-export const OUTLINE_WARNING_KINDS = ['dropped_character', 'unresolved_setup', 'dropped_payoff'] as const
+//   missing_plan       章の計画 (出来事、章末の状況) が欠けている。やり直しても欠けたままだったので、そのまま保存した
+export const OUTLINE_WARNING_KINDS = [
+  'dropped_character',
+  'unresolved_setup',
+  'dropped_payoff',
+  'missing_plan'
+] as const
 export const OutlineWarningSchema = z.object({
   chapter_number: z.number().int().min(0),
   kind: z.enum(OUTLINE_WARNING_KINDS),

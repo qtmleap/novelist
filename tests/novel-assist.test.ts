@@ -24,6 +24,7 @@ import {
   replaceOutlineChapter
 } from '@/lib/novel/assist'
 import { buildBiblePrompt, buildRecordPrompt } from '@/lib/novel/assist-prompts'
+import { validateAdultCast } from '@/lib/novel/bible'
 import { bibleJsonSchema, recordJsonSchema } from '@/lib/novel/json-schemas'
 import { outlineChapterJsonSchema, outlineJsonSchema } from '@/lib/novel/outline'
 import { buildOutlineChapterPrompt, buildOutlinePrompt, type CastMember, type Prompt } from '@/lib/novel/prompts'
@@ -656,6 +657,15 @@ const ADULT_CAST = [
   { name: '月見ヤチヨ', age: '22歳', occupation: '船乗り', appearance: '日に焼けた肌', background: '灯台守の娘' }
 ]
 
+// 成人指定の検証の問題の文 (文面は bible.ts が決める。テストは文面に依らず、validateAdultCast の結果と比べる)。
+function adultIssues(cast: Array<Record<string, string>>): string[] {
+  return validateAdultCast(
+    'R18',
+    cast.map((row) => ({ name: '', age: '', occupation: '', appearance: '', background: '', ...row })),
+    ['酒寄彩葉', '月見ヤチヨ']
+  )
+}
+
 function bibleJson(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     premise: '彩葉が灯台の鍵を探す物語',
@@ -709,7 +719,9 @@ describe('generateBibleFlow', () => {
     ])
     const result = await generateBibleFlow(call, adultBibleInput)
     expect(calls).toHaveLength(2)
-    expect(result).toEqual({ ok: false, error: '酒寄彩葉 の年齢が 17 歳です（18 歳以上にしてください）', usages: [usage(1), usage(2)] })
+    const issues = adultIssues([{ ...ADULT_CAST[0], age: '17' }, ADULT_CAST[1]])
+    expect(issues).toHaveLength(1)
+    expect(result).toEqual({ ok: false, error: issues.join('、'), usages: [usage(1), usage(2)] })
   })
 
   test('an under-age cast on the first try is fixed by the retry', async () => {
@@ -727,7 +739,9 @@ describe('generateBibleFlow', () => {
     const result = await generateBibleFlow(call, adultBibleInput)
     expect(calls).toHaveLength(2)
     if (result.ok) throw new Error('expected failure')
-    expect(result.error).toContain('酒寄彩葉 の年齢が数字で書かれていません')
+    const issues = adultIssues([{ ...ADULT_CAST[0], age: '二十代' }, ADULT_CAST[1]])
+    expect(issues).toHaveLength(1)
+    expect(result.error).toBe(issues.join('、'))
   })
 
   test('a missing cast row counts as a problem', async () => {
@@ -735,7 +749,9 @@ describe('generateBibleFlow', () => {
     const { call } = fakeCall([{ text: short }, { text: short }])
     const result = await generateBibleFlow(call, adultBibleInput)
     if (result.ok) throw new Error('expected failure')
-    expect(result.error).toBe('月見ヤチヨ の成人としての設定がありません')
+    const issues = adultIssues([ADULT_CAST[0]])
+    expect(issues).toHaveLength(1)
+    expect(result.error).toBe(issues.join('、'))
   })
 
   test('missing address pairs are retried', async () => {
@@ -849,7 +865,8 @@ describe('bible helpers', () => {
     expect(adultBibleIssues(bible, adultBibleInput)).toEqual([])
     expect(brokenBibleError(bible, adultBibleInput)).toBeNull()
     const broken = { ...bible, cast: [ADULT_CAST[0]] }
-    expect(adultBibleIssues(broken, adultBibleInput)).toEqual(['月見ヤチヨ の成人としての設定がありません'])
+    expect(adultBibleIssues(broken, adultBibleInput)).toEqual(adultIssues([ADULT_CAST[0]]))
+    expect(adultBibleIssues(broken, adultBibleInput)).toHaveLength(1)
     expect(brokenBibleError(broken, adultBibleInput)).toContain('作品設計を作り直す')
     // 全年齢では人物設定を問わない
     expect(brokenBibleError(broken, bibleInput)).toBeNull()
@@ -1056,7 +1073,9 @@ describe('preparing the bible for the outline', () => {
     if (result.ok) throw new Error('expected failure')
     expect(result.status).toBe(400)
     expect(result.error).toBe('invalid_bible')
-    expect(result.detail).toContain('酒寄彩葉 の年齢が 16 歳です')
+    const issues = adultIssues([{ ...ADULT_CAST[0], age: '16' }, ADULT_CAST[1]])
+    expect(issues).toHaveLength(1)
+    expect(result.detail).toContain(issues[0])
     expect(calls).toHaveLength(0)
     expect(fx.saved).toEqual([])
   })

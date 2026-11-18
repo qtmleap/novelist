@@ -19,13 +19,21 @@ import {
   type CastMember,
   type CastRelation,
   type ChapterPromptInput,
+  type NextChapterInput,
   type NovelParams,
   narratorName,
   type PriorChapterInput,
   type Prompt,
-  type StyleParams
+  type StyleParams,
+  trimChapterText
 } from '@/lib/novel/prompts'
-import { getNovelWithChapters, saveChapterRecord } from '@/lib/novel/repository'
+import {
+  type ChapterLineage,
+  getNovelWithChapters,
+  saveChapterRecord,
+  writtenChapterNumbers
+} from '@/lib/novel/repository'
+import { missingPredecessors, normalizeTargets, outlineEntryHash } from '@/lib/novel/staleness'
 import { findContextWindow } from '@/lib/openai/models'
 import type { UsageCounts } from '@/lib/openai/protocol'
 import { type ModelRef, type Outline, OutlineSchema, parseModelRef } from '@/schemas/novel.dto'
@@ -170,6 +178,8 @@ export type ContextChapter = {
   content: string
   // 保存済みの記録 (検証済み)。未抽出・抽出の失敗・この機能より前の章は null
   record: ChapterRecord | null
+  // 生成に使った章立ての項目のハッシュ。この機能より前の章は null
+  outlineHash: string | null
 }
 
 // 文脈の組み立ての材料 (D1 から読んだもの)。
@@ -235,6 +245,54 @@ export type ContextPlan = {
   missing: number[]
   // 今回より前の章の記録を累積したもの
   ledger: Ledger
+  // 本文と一緒に保存する、どの章立てと前章の版から作ったか (鮮度の判定に使う)
+  lineage: ChapterLineage
+}
+
+// 次の章の冒頭として渡す長さの上限 (字)。
+export const NEXT_OPENING_CHARS = 500
+
+// 次の章の冒頭。前後の空行を除いた本文の先頭から、上限を超えない範囲の最後の改行まで (行の途中で切らない)。
+// 最初の行だけで上限を超えるとき (改行が無いとき) は、上限の字数で切る。字数はコードポイントで数える (サロゲートを割らない)。
+export function nextOpening(content: string, maxChars: number = NEXT_OPENING_CHARS): string {
+  const chars = [...trimChapterText(content)]
+  if (chars.length <= maxChars) return chars.join('')
+  const head = chars.slice(0, maxChars).join('')
+  // 上限のちょうど次が改行なら、上限までが行の切れ目
+  if (chars[maxChars] === '\n') return head
+  const lastBreak = head.lastIndexOf('\n')
+  return lastBreak > 0 ? head.slice(0, lastBreak).trimEnd() : head
+}
+
+// 途中の章を書き直すとき、次の章 (番号 + 1) に本文があれば、その冒頭と章立ての題と概要を渡す。
+// 本文が無ければ渡さない。今回の章が最終章なら、プロンプトの側が無視する。
+// 次の章が今の章立てと違う章立てから書かれていたら (章立てを作り直した後)、渡さない。その本文は作り直す対象で、
+// 「書き換えない次の章」として繋げると、古い展開に今回の章を合わせてしまうため。
+// 前の章の作り直し (previous_regenerated) で古くなっただけの次の章は渡す (途中の章の書き直しは、まさにこの場合)。
+// この機能より前の章 (ハッシュが null) は判定できないので渡す。
+export function nextChapterOf(source: ContextSource): NextChapterInput | null {
+  const nextNumber = source.chapterNumber + 1
+  const next = source.chapters.find((chapter) => chapter.number === nextNumber)
+  if (next === undefined || trimChapterText(next.content).length === 0) return null
+  const entry = source.outline.chapters.find((chapter) => chapter.chapter_number === nextNumber)
+  const planChanged = next.outlineHash !== null && (entry === undefined || outlineEntryHash(entry) !== next.outlineHash)
+  if (planChanged) return null
+  return {
+    opening: nextOpening(next.content),
+    title: entry === undefined ? '' : entry.title,
+    summary: entry === undefined ? '' : entry.summary
+  }
+}
+
+// 今回の章をどの章立てと前章の版から作るか。前章は最新 version (本文があるもの) の id。第 1 章は null。
+// 章立てに今回の章が無ければ null のハッシュ (その場合 buildChapterPrompt が throw する)。
+export function lineageOf(source: ContextSource): ChapterLineage {
+  const entry = source.outline.chapters.find((chapter) => chapter.chapter_number === source.chapterNumber)
+  const previous = source.chapters.find((chapter) => chapter.number === source.chapterNumber - 1)
+  return {
+    outlineHash: entry === undefined ? null : outlineEntryHash(entry),
+    prevChapterId: previous === undefined || trimChapterText(previous.content).length === 0 ? null : previous.id
+  }
 }
 
 function priorChaptersOf(source: ContextSource): ContextChapter[] {
@@ -280,7 +338,8 @@ export function planChapterContext(
     // 直前の章の記録が無いとき、もっと前の章の章末を「直前の章の終わり」として出さない (previousChapter)。
     ledgerText: renderLedger(ledger, { maxChars: ledgerMaxChars(budget), previousChapter: source.chapterNumber - 1 }),
     bible: source.bible,
-    writingNotes: source.writingNotes
+    writingNotes: source.writingNotes,
+    nextChapter: nextChapterOf(source)
   }
   const skeleton = buildChapterPrompt({ ...base, priorChapters: [] })
   const selection = selectPriorChapters(
@@ -307,7 +366,8 @@ export function planChapterContext(
     missing: prior
       .filter((chapter) => recorded.has(chapter.number) && effectiveRecord(chapter, extra) === null)
       .map((chapter) => chapter.number),
-    ledger
+    ledger,
+    lineage: lineageOf(source)
   }
 }
 
@@ -594,7 +654,8 @@ function contextChapters(novel: LoadedNovel): ContextChapter[] {
     number: chapter.chapter_number,
     title: chapter.title,
     content: chapter.content,
-    record: chapter.record
+    record: chapter.record,
+    outlineHash: chapter.outline_hash
   }))
 }
 
@@ -607,6 +668,8 @@ export type ChapterContext = {
   editorModel: ModelRef
   // この章の記録の抽出の材料 (未回収の伏線は、今回より前の章までの分)
   record: RecordMaterials
+  // 本文と一緒に保存する、どの章立てと前章の版から作ったか
+  lineage: ChapterLineage
 }
 
 export type ChapterContextResult = { ok: true; context: ChapterContext } | { ok: false; error: string }
@@ -676,7 +739,8 @@ export async function buildChapterContext(
       storagePrompt: resolved.plan.storagePrompt,
       title: entry.title,
       editorModel,
-      record: resolved.record
+      record: resolved.record,
+      lineage: resolved.plan.lineage
     }
   }
 }
@@ -704,6 +768,32 @@ export async function loadRecordMaterials(
 
 // 生成の開始 (API) が DO に渡す payload。小説があり、章立てにその章があるときだけ作る (無ければ null)。
 // 文脈は DO が組み立てるので、ここでは章立てだけを読む。
+// ---------------------- 生成の開始の検証 ----------------------
+
+export type GenerationTargets = { ok: true; targets: number[] } | { ok: false; missing: number[] }
+
+// 生成する章 (重複を除いて昇順) と、本文がある章から、前の章が欠けていないかを確かめる。
+// 対象より前の章は、本文があるか、同じ生成の対象 (先に書かれる) でなければならない。
+export function checkGenerationTargets(targets: number[], written: Set<number>): GenerationTargets {
+  const normalized = normalizeTargets(targets)
+  const missing = missingPredecessors(normalized, written)
+  return missing.length === 0 ? { ok: true, targets: normalized } : { ok: false, missing }
+}
+
+// 409 previous_chapters_missing の detail (「第 2、3 章」)。
+export function missingChaptersDetail(missing: number[]): string {
+  return `第 ${missing.join('、')} 章`
+}
+
+// 生成の開始の検証を D1 から行う。本文がある章の番号を読むだけ。
+export async function checkGenerationStart(
+  prisma: PrismaClient,
+  novelId: string,
+  targets: number[]
+): Promise<GenerationTargets> {
+  return checkGenerationTargets(targets, await writtenChapterNumbers(prisma, novelId))
+}
+
 export async function chapterGenPayload(
   prisma: PrismaClient,
   novelId: string,

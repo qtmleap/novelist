@@ -1480,6 +1480,242 @@ describe('buildChapterPrompt: 成人指定と作品設計', () => {
   })
 })
 
+// ---------------------- 本文: 途中の章の書き直し (Phase 4) ----------------------
+
+describe('buildChapterPrompt: 次の章の冒頭', () => {
+  // 第 3 章が既に書かれている状態で、第 2 章を作り直す。
+  const nextChapter = {
+    opening: '\n\n　翌朝、部室の鍵は開いていた。\n「遅いよ、ミオちゃん」\n　ルナが窓際で',
+    title: '顧問の条件',
+    summary: '入部の条件が出る。'
+  }
+  const rewriting = (overrides: Partial<ChapterPromptInput> = {}): ChapterPromptInput =>
+    planned(2, { nextChapter, ...overrides })
+
+  test('【次の章の冒頭】を【今回の執筆】の直前に置く', () => {
+    const { user } = buildChapterPrompt(rewriting())
+    expect(headings(user).slice(-3)).toEqual(['キャラクター間の関係', '次の章の冒頭', '今回の執筆'])
+    expect(section(user, '次の章の冒頭')).toBe(
+      [
+        '【次の章の冒頭】',
+        '第3章「顧問の条件」は既に書かれていて、変更しない。この章は、下の冒頭に自然に繋がる状態（時、場所、その場にいる人物、直前の出来事）で終える。次の章の冒頭の文や出来事を、この章の中に書かない。',
+        '次の章の概要: 入部の条件が出る。',
+        '▼ 第3章の冒頭',
+        // 前後の空行だけ落とし、字下げと途中で切れた文はそのまま
+        '　翌朝、部室の鍵は開いていた。',
+        '「遅いよ、ミオちゃん」',
+        '　ルナが窓際で',
+        '（冒頭はここまで。続きは省略）'
+      ].join('\n')
+    )
+    expect(user).not.toContain('\n\n\n')
+  })
+
+  test('【今回の執筆】の「この後の章」と「章末の状況」を、次の章が書かれていることに合わせる', () => {
+    const body = section(buildChapterPrompt(rewriting()).user, '今回の執筆')
+    expect(body).toContain(
+      '- この後の章: 第3〜5章（第3章は既に書かれている。この章では書かず、章末は【次の章の冒頭】に繋がるように終える。物語は途中なので、締めくくらない）'
+    )
+    expect(body).toContain(
+      '- 章末の状況: 夕方、部室。ルナが入部届を書きかけている（この状況になったところで章を終える。【次の章の冒頭】と食い違うときは、次の章の冒頭に合わせる）'
+    )
+    expect(body).not.toContain('この章では書かない。物語は途中なので、章末で締めくくらない')
+  })
+
+  test('それ以外の節と system は、通常の生成と同じ (前半が変わらないので、キャッシュに乗る)', () => {
+    const normal = buildChapterPrompt(planned(2))
+    const rewrite = buildChapterPrompt(rewriting())
+    expect(rewrite.system).toBe(normal.system)
+    const cut = (user: string): string => user.slice(0, user.indexOf('\n\n【今回の執筆】'))
+    expect(cut(rewrite.user)).toBe(`${cut(normal.user)}\n\n${section(rewrite.user, '次の章の冒頭')}`)
+    // 計画の無い旧データでも同じ
+    const legacyNormal = buildChapterPrompt(input(2))
+    const legacyRewrite = buildChapterPrompt(input(2, { nextChapter }))
+    expect(legacyRewrite.system).toBe(legacyNormal.system)
+    expect(section(legacyRewrite.user, '今回の執筆')).toContain('第3章は既に書かれている。')
+  })
+
+  test('渡されないとき、冒頭が空のときは、文面が変わらない', () => {
+    const normal = buildChapterPrompt(planned(2))
+    for (const none of [undefined, null, { ...nextChapter, opening: '' }, { ...nextChapter, opening: ' \n\n' }]) {
+      expect(buildChapterPrompt(planned(2, { nextChapter: none }))).toEqual(normal)
+    }
+  })
+
+  test('章立ての上で最終章なら、使わない (結末まで書き切る指示とぶつかる)', () => {
+    expect(buildChapterPrompt(planned(5, { nextChapter }))).toEqual(buildChapterPrompt(planned(5)))
+  })
+
+  test('題と概要が空なら、番号だけで示す', () => {
+    const body = section(
+      buildChapterPrompt(rewriting({ nextChapter: { opening: '　翌朝。', title: ' ', summary: '' } })).user,
+      '次の章の冒頭'
+    )
+    expect(body.split('\n')).toEqual([
+      '【次の章の冒頭】',
+      '第3章は既に書かれていて、変更しない。この章は、下の冒頭に自然に繋がる状態（時、場所、その場にいる人物、直前の出来事）で終える。次の章の冒頭の文や出来事を、この章の中に書かない。',
+      '▼ 第3章の冒頭',
+      '　翌朝。',
+      '（冒頭はここまで。続きは省略）'
+    ])
+  })
+
+  test('保存用にも、冒頭をそのまま入れる (500 字程度なので省略しない)', () => {
+    const stored = buildChapterPromptForStorage(rewriting())
+    expect(stored).toContain('【次の章の冒頭】\n')
+    expect(stored).toContain('　翌朝、部室の鍵は開いていた。')
+  })
+})
+
+// ---------------------- 本文: 指示つきの書き直し (Phase 5) ----------------------
+
+describe('buildChapterPrompt: 指示つきの書き直し', () => {
+  const baseContent = `\n\n${chapterText(2)}\n\n`
+  const revision = {
+    baseContent,
+    instruction: '- 「第2章の台詞」: ルナの口調が硬い。もっと砕けた口調にする。\n\n- 柊誠が部室を出る場面を削る。\n'
+  }
+  const nextChapter = { opening: '　翌朝、部室の鍵は開いていた。', title: '顧問の条件', summary: '入部の条件が出る。' }
+  const revising = (overrides: Partial<ChapterPromptInput> = {}): ChapterPromptInput =>
+    planned(2, { revision, ...overrides })
+
+  test('【元の版】と【修正指示】を【今回の執筆】の直前に置く (【次の章の冒頭】があればその後)', () => {
+    expect(headings(buildChapterPrompt(revising()).user).slice(-4)).toEqual([
+      'キャラクター間の関係',
+      '元の版',
+      '修正指示',
+      '今回の執筆'
+    ])
+    expect(headings(buildChapterPrompt(revising({ nextChapter })).user).slice(-5)).toEqual([
+      'キャラクター間の関係',
+      '次の章の冒頭',
+      '元の版',
+      '修正指示',
+      '今回の執筆'
+    ])
+    expect(buildChapterPrompt(revising({ nextChapter })).user).not.toContain('\n\n\n')
+  })
+
+  test('【元の版】は今の本文の全文、【修正指示】は指示をそのまま (空行は詰める)', () => {
+    const { user } = buildChapterPrompt(revising())
+    expect(section(user, '元の版')).toBe(
+      [
+        '【元の版】',
+        'この章の今の本文である。確定済みの本文ではなく、これを直したものがこの章の新しい本文になる。',
+        // 見出しは章立ての題。本文は前後の空行だけ落とし、字下げと本文の中の空行はそのまま
+        '▼ 第2章「入部届」',
+        chapterText(2)
+      ].join('\n')
+    )
+    expect(section(user, '修正指示')).toBe(
+      '【修正指示】\n- 「第2章の台詞」: ルナの口調が硬い。もっと砕けた口調にする。\n- 柊誠が部室を出る場面を削る。'
+    )
+  })
+
+  test('【今回の執筆】: 修正指示の点だけを直し、全文を出力させる。優先は 修正指示 > 元の版 > 計画', () => {
+    const body = section(buildChapterPrompt(revising()).user, '今回の執筆')
+    expect(body.split('\n').slice(0, 7)).toEqual([
+      '【今回の執筆】',
+      '第2章（全5章）の本文を、【元の版】を直して書く。',
+      '- 直すのは【修正指示】に書かれた点だけにする。それ以外は【元の版】の文章をそのまま保つ（言い回しを変えない。【修正指示】が求めない限り、場面を足したり削ったりしない）。',
+      '- 直した結果、前後の文と辻褄が合わなくなる箇所は、合わせて直す。',
+      '- 表記の規則（字下げなど）に合っていない箇所は、規則に合わせて直す。',
+      '- 下の題、概要、出来事などは、【元の版】を書いたときの計画である。【元の版】が計画と違っていても、【修正指示】に書かれていなければ直さない。【修正指示】が計画と食い違うときは、【修正指示】に従う。',
+      '- 出力は章の全文にする。直していない部分も含めて最初から最後まで書き、どこを直したかの説明は付けない。'
+    ])
+    // 計画は載せるが、計画どおりに書き直させる文言は付けない
+    expect(body).toContain('- 出来事（元の版を書いたときの計画）:\n  1. ルナが部室に来て、入部したいと言う。')
+    expect(body).not.toContain('すべてを場面として書く')
+    // 章末の状況も計画として載せるだけ (「この状況になったところで章を終える」の注記は付けない)
+    expect(body).toContain('- 章末の状況: 夕方、部室。ルナが入部届を書きかけている。\n')
+    expect(body).not.toContain('この状況になったところで章を終える')
+    expect(section(buildChapterPrompt(revising({ nextChapter })).user, '今回の執筆')).not.toContain(
+      'この状況になったところで章を終える'
+    )
+    expect(body).toContain('- 執筆済み: 第1章（その終わりから続けて書く）')
+  })
+
+  test('分量は「元の版と同じ程度」にする (目標字数に合わせて水増し・削減させない)', () => {
+    const lengthOf = (content: string, targetChars: number): string | undefined =>
+      section(
+        buildChapterPrompt(revising({ revision: { ...revision, baseContent: content }, targetChars })).user,
+        '今回の執筆'
+      )
+        .split('\n')
+        .at(-1)
+    // 元の版の字数を 100 字単位で示す。目標字数 (4,000 / 20,000) は出さない
+    for (const targetChars of [4000, 20000]) {
+      expect(lengthOf('あ'.repeat(2254), targetChars)).toBe(
+        '- 分量: 【元の版】（約2,300字）と同じ程度にする。字数を合わせるために増やしたり削ったりしない。【修正指示】が分量に触れているときは、それに従う。'
+      )
+    }
+    expect(lengthOf('あ'.repeat(30), 4000)).toContain('【元の版】（約100字）と同じ程度')
+    const body = section(buildChapterPrompt(revising()).user, '今回の執筆')
+    expect(body).not.toContain('約4,000字')
+    expect(body).not.toContain('出来事1つあたり')
+    expect(body).not.toContain('端折って')
+  })
+
+  test('それ以外の節と system は、通常の生成と同じ (整合性の規則はそのまま効く)', () => {
+    const normal = buildChapterPrompt(planned(2))
+    const revised = buildChapterPrompt(revising())
+    expect(revised.system).toBe(normal.system)
+    const cut = (user: string, heading: string): string => user.slice(0, user.indexOf(`\n\n【${heading}】`))
+    expect(cut(revised.user, '元の版')).toBe(cut(normal.user, '今回の執筆'))
+    // 作品設計も計画も執筆上の指示も無い旧データでも、system は変わらない
+    expect(buildChapterPrompt(input(2, { revision })).system).toBe(buildChapterPrompt(input(2)).system)
+    expect(buildChapterPrompt(input(2, { revision, nextChapter })).system).toBe(buildChapterPrompt(input(2)).system)
+    // 確定事項つきでも同じ
+    const withLedger = buildChapterPrompt(revising({ ledgerText }))
+    expect(withLedger.system).toBe(normal.system)
+    expect(headings(withLedger.user)).toContain('確定事項')
+  })
+
+  test('保存用では【元の版】の本文を字数の 1 行に置き換え、指示は残す', () => {
+    const stored = buildChapterPromptForStorage(revising())
+    expect(section(stored, '元の版')).toBe(
+      [
+        '【元の版】',
+        'この章の今の本文である。確定済みの本文ではなく、これを直したものがこの章の新しい本文になる。',
+        '▼ 第2章「入部届」',
+        `（本文${chapterText(2).length}字。モデルには全文を渡し、保存では省略）`
+      ].join('\n')
+    )
+    expect(stored).not.toContain('第2章の地の文')
+    expect(section(stored, '修正指示')).toBe(section(buildChapterPrompt(revising()).user, '修正指示'))
+    // 送る側には全文が入る
+    expect(buildChapterPrompt(revising()).user).toContain('第2章の地の文、二段落め。')
+  })
+
+  test('渡されないとき、本文か指示が空のときは、文面が変わらない', () => {
+    const normal = buildChapterPrompt(planned(2))
+    const empties = [
+      undefined,
+      null,
+      { baseContent: '', instruction: '口調を直す。' },
+      { baseContent: ' \n\n', instruction: '口調を直す。' },
+      { baseContent: chapterText(2), instruction: '' },
+      { baseContent: chapterText(2), instruction: '  \n' }
+    ]
+    for (const none of empties) {
+      expect(buildChapterPrompt(planned(2, { revision: none }))).toEqual(normal)
+      expect(buildChapterPromptForStorage(planned(2, { revision: none }))).toBe(
+        buildChapterPromptForStorage(planned(2))
+      )
+    }
+  })
+
+  test('計画の無い旧データ、最終章でも書き直せる', () => {
+    const legacy = section(buildChapterPrompt(input(2, { revision })).user, '今回の執筆')
+    expect(legacy).toContain('第2章（全5章）の本文を、【元の版】を直して書く。')
+    expect(legacy).toContain('- 分量: 【元の版】（約100字）と同じ程度にする。')
+    expect(legacy).not.toContain('場面程度に分け')
+    const last = section(buildChapterPrompt(planned(5, { revision })).user, '今回の執筆')
+    expect(last).toContain('- この後の章: なし（この章が最終章。結末まで書き切る）')
+    expect(last).toContain('第5章（全5章）の本文を、【元の版】を直して書く。')
+  })
+})
+
 // ---------------------- 章立て ----------------------
 
 // 見本 (system の【出力】) のキーの並び。全章用は章 1 件の行、1 章用は見本そのもの。

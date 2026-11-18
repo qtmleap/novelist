@@ -168,6 +168,12 @@ model Chapter {
   // 本文から抽出した記録 (ChapterRecordSchema の JSON)。version ごとに 1:1。
   // 抽出に失敗した章と、この列追加より前に生成された章は null。
   record         String?
+  // 生成に使った章立ての、この章の項目のハッシュ (staleness.ts の outlineEntryHash)。今の章立てと違えば「要再生成」。
+  // この列追加より前に生成された章は null (判定しない)。章立てを作り直すときに、変更前の章立てのハッシュが入る。
+  outline_hash   String?
+  // 直前の章として使った version の id。第 1 章と、直前の章の本文が無かったときは null。
+  // 直前の章の最新 version がこれと違えば (作り直された)、この章は「要再生成」。
+  prev_chapter_id String?
   created_at     DateTime @default(now())
 
   novel Novel @relation(fields: [novel_id], references: [id], onDelete: Cascade)

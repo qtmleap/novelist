@@ -19,6 +19,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   invalid_chapter_number: '章番号が不正です',
   chapter_not_in_outline: 'この章は章立てに含まれていません',
   not_latest_chapter: '最新の生成済み章でのみ操作できます',
+  previous_chapters_missing: '前の章の本文がありません。前の章から順に生成してください',
   no_chapters: 'まだ章本文が生成されていません',
   db_error: 'データベースエラーが発生しました',
   // 認証ミドルウェア由来。401 ステータスとセットで返る。

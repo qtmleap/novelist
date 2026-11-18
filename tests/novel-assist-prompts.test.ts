@@ -4,15 +4,35 @@ import {
   bibleAddressPairs,
   buildBiblePrompt,
   buildRecordPrompt,
-  type RecordPromptInput
+  buildReviewPrompt,
+  REVIEW_ISSUES_MAX,
+  REVIEW_QUOTE_MAX_CHARS,
+  REVIEW_QUOTE_MIN_CHARS,
+  type RecordPromptInput,
+  type ReviewPromptInput
 } from '@/lib/novel/assist-prompts'
 import { requiredAddressPairs } from '@/lib/novel/bible'
-import { bibleJsonSchema, hasAddressPairs, recordJsonSchema, usableValues } from '@/lib/novel/json-schemas'
-import { ACTIONS_LIMIT, FACTS_LIMIT, LEARNED_LIMIT, STATE_MAX } from '@/lib/novel/ledger'
+import {
+  bibleJsonSchema,
+  hasAddressPairs,
+  recordJsonSchema,
+  reviewJsonSchema,
+  usableValues
+} from '@/lib/novel/json-schemas'
+import { ACTIONS_LIMIT, buildLedger, FACTS_LIMIT, LEARNED_LIMIT, renderLedger, STATE_MAX } from '@/lib/novel/ledger'
 import type { JsonSchema } from '@/lib/novel/outline'
 import type { CastMember, CastRelation, NovelParams, StyleParams } from '@/lib/novel/prompts'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
-import { ChapterRecordDraftSchema, StoryBibleSchema, type StoryThread } from '@/schemas/story.dto'
+import type { OutlineChapter } from '@/schemas/novel.dto'
+import {
+  ChapterRecordDraftSchema,
+  ChapterReviewSchema,
+  REVIEW_ISSUE_KINDS,
+  ReviewIssueSchema,
+  type StoryBible,
+  StoryBibleSchema,
+  type StoryThread
+} from '@/schemas/story.dto'
 
 // ---------------------- 入力の見本 ----------------------
 
@@ -958,5 +978,359 @@ describe('buildBiblePrompt: system の規則', () => {
     expect(system).toContain('call は台詞にそのまま書ける文字列にする')
     expect(system).toContain('姓と名の区切りが分からない名前は、もっとも自然な読みで分ける')
     expect(system).toContain('「指定」はそのまま call にする')
+  })
+})
+
+// ---------------------- 検査: schema ----------------------
+
+describe('reviewJsonSchema', () => {
+  const schema = reviewJsonSchema()
+
+  test('{ issues: [{ quote, reason, kind }] }。種別は REVIEW_ISSUE_KINDS の enum', () => {
+    expect(keysOf(schema.properties)).toEqual(['issues'])
+    expect(schema.required).toEqual(['issues'])
+    // 先に引用と理由を書かせ、種別は最後に選ばせる
+    expect(keysOf(at(schema, 'properties', 'issues', 'items', 'properties'))).toEqual(['quote', 'reason', 'kind'])
+    expect(at(schema, 'properties', 'issues', 'items', 'properties', 'kind', 'enum')).toEqual([...REVIEW_ISSUE_KINDS])
+    expect(at(schema, 'properties', 'issues', 'items', 'properties', 'quote')).toEqual({ type: 'string' })
+    expectWellFormed(schema)
+  })
+
+  test('schema どおりの応答は ReviewIssueSchema を通り、どの項目も捨てられない', () => {
+    const response = sampleOf(schema)
+    const issue = at(response, 'issues')
+    const parsed = ReviewIssueSchema.safeParse(Array.isArray(issue) ? issue[0] : null)
+    expect(parsed.success).toBe(true)
+    expect(keyPaths(parsed.data).sort()).toEqual(['kind', 'quote', 'reason'])
+    // 保存する形 (Chapter.review) にもそのまま入る
+    const stored = ChapterReviewSchema.safeParse(response)
+    expect(stored.success).toBe(true)
+    expectKeysKept(stored.data, response)
+  })
+
+  test('呼ぶたびに新しいオブジェクトを返す', () => {
+    expect(reviewJsonSchema()).toEqual(schema)
+    expect(reviewJsonSchema()).not.toBe(schema)
+    expect(at(schema, 'properties', 'issues', 'items', 'properties', 'kind', 'enum')).not.toBe(REVIEW_ISSUE_KINDS)
+  })
+})
+
+// ---------------------- 検査: プロンプト ----------------------
+
+const reviewBible: StoryBible = {
+  premise: '朝倉澪は廃部寸前の天文部を、流星群の観測会で立て直そうとする。',
+  ending: '観測会の夜、ルナが部員の名簿に名前を書く。',
+  arcs: [{ name: '朝倉澪', start: '一人で部を背負い込んでいる。', end: '部員に仕事を任せられるようになる。' }],
+  world: {
+    rules: ['屋上の鍵は、顧問の許可が無いと借りられない。'],
+    terms: [{ term: '観測会', note: '年に一度の行事。' }]
+  },
+  timeline: ['10月上旬: ルナが屋上に現れる。'],
+  addresses: [],
+  cast: []
+}
+
+// 全ての組を持つ呼称
+const reviewAddresses = [
+  { from: '朝倉澪', to: 'ルナ', call: 'ルナ' },
+  { from: 'ルナ', to: '朝倉澪', call: 'ミオちゃん' },
+  { from: '朝倉澪', to: '柊誠', call: '柊先生' },
+  { from: '柊誠', to: '朝倉澪', call: '朝倉' },
+  { from: 'ルナ', to: '柊誠', call: 'せんせー' },
+  { from: '柊誠', to: 'ルナ', call: 'ルナ君' }
+]
+
+const reviewEntry: OutlineChapter = {
+  chapter_number: 3,
+  title: '顧問の条件',
+  summary: '柊誠が入部の条件を出す。',
+  characters: ['朝倉澪', 'ルナ', '柊誠'],
+  time_place: '翌週の放課後、職員室',
+  events: ['朝倉澪とルナが職員室を訪ねる。', '柊誠が入部の条件を出す。'],
+  end_state: '夕方、職員室。朝倉澪が屋上の鍵を預かる。',
+  setups: [{ id: 's3', description: '柊誠は望遠鏡の持ち主を知っている。' }],
+  payoffs: ['s1']
+}
+
+// ledger.ts の renderLedger の実際の出力
+const reviewLedger = renderLedger(
+  buildLedger([
+    {
+      number: 2,
+      record: {
+        summary: 'ルナが天文部に入りたいと言い出した。',
+        facts: ['入部届は柊誠が預かっている。'],
+        characters: [
+          {
+            name: '朝倉澪',
+            actions: ['ルナを部室へ案内した'],
+            learned: ['ルナから、住所が無いと聞いた'],
+            state: '部室にいる。'
+          }
+        ],
+        threads_opened: [{ id: 's1', description: '屋上の望遠鏡の持ち主が分からない。' }],
+        threads_resolved: [],
+        end_state: { time: '夕方', place: '部室', present: ['朝倉澪', 'ルナ'] }
+      }
+    }
+  ])
+)
+
+const reviewInput = (overrides: Partial<ReviewPromptInput> = {}): ReviewPromptInput => ({
+  chapterNumber: 3,
+  title: '保存済みの題',
+  content: chapterText,
+  entry: reviewEntry,
+  bible: reviewBible,
+  ledgerText: reviewLedger,
+  cast,
+  addresses: reviewAddresses,
+  style,
+  ...overrides
+})
+
+// 資料が何も無い入力 (旧データ)
+const bareReview = (): ReviewPromptInput =>
+  reviewInput({
+    title: null,
+    entry: { ...reviewEntry, time_place: '', events: [], end_state: '', setups: [], payoffs: [] },
+    bible: null,
+    ledgerText: '',
+    cast: [],
+    addresses: []
+  })
+
+describe('buildReviewPrompt: 資料', () => {
+  test('作品設計 → 確定事項 → この章の計画 → 登場人物 → 呼称 → 検査する本文 → 今回の依頼', () => {
+    const { system, user } = buildReviewPrompt(reviewInput())
+    expect(headings(user)).toEqual([
+      '作品設計',
+      '確定事項',
+      'この章の計画',
+      '登場人物',
+      '呼称',
+      '検査する本文',
+      '今回の依頼'
+    ])
+    expect(user).not.toContain('\n\n\n')
+    expect(system).not.toContain('\n\n\n')
+  })
+
+  test('資料が無い節は出さない (作品設計なし、確定事項なし、人物なし、呼称なし)', () => {
+    const { system, user } = buildReviewPrompt(bareReview())
+    expect(headings(user)).toEqual(['この章の計画', '検査する本文', '今回の依頼'])
+    for (const word of ['作品設計', '確定事項', '登場人物', '呼称', '張る伏線']) {
+      expect(system).not.toContain(word)
+    }
+    // 1 つずつ外しても、その節だけが消える
+    expect(headings(buildReviewPrompt(reviewInput({ bible: null })).user)).not.toContain('作品設計')
+    expect(headings(buildReviewPrompt(reviewInput({ ledgerText: ' \n' })).user)).not.toContain('確定事項')
+    expect(headings(buildReviewPrompt(reviewInput({ addresses: [] })).user)).not.toContain('呼称')
+    expect(headings(buildReviewPrompt(reviewInput({ cast: [] })).user)).not.toContain('登場人物')
+  })
+
+  test('確定事項は見出し 1 つで、渡された文面のまま置く', () => {
+    const { user } = buildReviewPrompt(reviewInput())
+    expect(user.split('\n').filter((line) => line === '【確定事項】')).toHaveLength(1)
+    expect(user).toContain(`${reviewLedger}\n\n【この章の計画】\n`)
+  })
+
+  test('この章の計画: 題、概要、時と場所、出来事、章末の状況、伏線', () => {
+    expect(section(buildReviewPrompt(reviewInput()).user, 'この章の計画')).toBe(
+      [
+        '【この章の計画】',
+        '第3章「顧問の条件」: 柊誠が入部の条件を出す。',
+        '  時と場所: 翌週の放課後、職員室',
+        '  出来事:',
+        '    1. 朝倉澪とルナが職員室を訪ねる。',
+        '    2. 柊誠が入部の条件を出す。',
+        '  章末の状況: 夕方、職員室。朝倉澪が屋上の鍵を預かる。',
+        '  張る伏線:',
+        '    - [s3] 柊誠は望遠鏡の持ち主を知っている。',
+        '  回収する伏線: s1'
+      ].join('\n')
+    )
+    expect(section(buildReviewPrompt(bareReview()).user, 'この章の計画')).toBe(
+      '【この章の計画】\n第3章「顧問の条件」: 柊誠が入部の条件を出す。'
+    )
+  })
+
+  test('登場人物: 口調の例は渡さない。呼称があれば「他者の呼び方」の行を出さない。語り手に注記を付ける', () => {
+    const { system, user } = buildReviewPrompt(reviewInput())
+    const people = section(user, '登場人物')
+    expect(people).toContain('■ 朝倉澪（17歳・女性・学生）\n  役割: 主人公・語り手\n  一人称: 私\n  外見: ')
+    expect(people).toContain('■ 柊誠（42歳・男性・教師）')
+    expect(user).not.toContain('口調の例')
+    expect(user).not.toContain('そういうの、後でまとめて聞くから')
+    expect(people).not.toContain('他者の呼び方')
+    expect(system).not.toContain('他者の呼び方')
+    expect(system).not.toContain('型を表す')
+    expect(section(user, '呼称')).toBe(
+      ['【呼称】', '「呼ぶ人 → 呼ばれる人: 呼び方」の表。', '- 朝倉澪 → ルナ: ルナ', '- ルナ → 朝倉澪: ミオちゃん']
+        .concat([
+          '- 朝倉澪 → 柊誠: 柊先生',
+          '- 柊誠 → 朝倉澪: 朝倉',
+          '- ルナ → 柊誠: せんせー',
+          '- 柊誠 → ルナ: ルナ君'
+        ])
+        .join('\n')
+    )
+  })
+
+  test('呼称が無い、または無い組が残るときは、「他者の呼び方」の行と型の説明を残す', () => {
+    const none = buildReviewPrompt(reviewInput({ addresses: [] }))
+    expect(section(none.user, '登場人物')).toContain('  他者の呼び方: 苗字＋さん')
+    expect(none.system).toContain('address: 台詞の中での相手の呼び方が、人物の「他者の呼び方」と違う。')
+    expect(none.system).toContain('呼び方の「名前」「苗字」は型を表す')
+    // 朝倉澪 ⇔ ルナ の組だけがある呼称: 柊誠への呼び方が表に無いので、行が残る
+    const partial = buildReviewPrompt(reviewInput({ addresses: reviewAddresses.slice(0, 2) }))
+    expect(section(partial.user, '登場人物')).toContain('  他者の呼び方: 苗字＋さん')
+    expect(partial.system).toContain('address: 台詞の中での相手の呼び方が、【呼称】や人物の「他者の呼び方」と違う。')
+    expect(partial.system).toContain('呼び方の「名前」「苗字」は型を表す')
+  })
+
+  test('検査する本文は字下げを保ち、前後の空行と CRLF だけ直す', () => {
+    const { user } = buildReviewPrompt(
+      reviewInput({ content: `\r\n\r\n${chapterText.replace(/\n/g, '\r\n')}\r\n\r\n` })
+    )
+    expect(user).toContain(`【検査する本文】\n▼ 第3章「保存済みの題」\n${chapterText}\n\n【今回の依頼】\n`)
+    expect(user).not.toContain('\r')
+  })
+
+  // OpenAI 互換の json_object モードは、入力 (user) に「json」の語が無い要求を拒否する。system は数えられない。
+  test('今回の依頼。user に「JSON」の語がある', () => {
+    expect(section(buildReviewPrompt(reviewInput()).user, '今回の依頼')).toBe(
+      '【今回の依頼】\n- 第3章「保存済みの題」の本文を検査し、資料と食い違う箇所を挙げる。\n- 出力は JSON だけにする。'
+    )
+    const bare = buildReviewPrompt(bareReview())
+    expect(bare.user).toMatch(/json/i)
+    expect(section(bare.user, '今回の依頼')).toContain('- 第3章の本文を検査し、')
+  })
+
+  test('本文が空なら throw する', () => {
+    expect(() => buildReviewPrompt(reviewInput({ content: ' \n\n' }))).toThrow('Chapter 3 has no content to review')
+  })
+})
+
+describe('buildReviewPrompt: system の規則', () => {
+  const { system, user } = buildReviewPrompt(reviewInput())
+
+  test('挙げるのは資料との食い違いだけ。誤検出を避ける向きの規則', () => {
+    expect(system).toContain(
+      '挙げるのは、本文が資料の記述と食い違う箇所だけにする。文章の好み、表現の改善案、構成の提案は挙げない。'
+    )
+    expect(system).toContain('資料に書かれていないことは、食い違いではない。')
+    expect(system).toContain(
+      '本文が新しく決めたこと（資料に無い人物、物、出来事、細部）は新しい事実であって、指摘しない。'
+    )
+    expect(system).toContain('確信が持てないものは挙げない。')
+    expect(system).toContain('読み方によっては両立するものは挙げない')
+    expect(system).toContain('書かれていないこと（計画にある出来事が抜けている、など）は挙げない')
+    expect(system).toContain(`最初の1箇所だけを挙げる。はっきりしたものから順に、${REVIEW_ISSUES_MAX}件まで。`)
+    expect(system).toContain('食い違いが無ければ、issues は空の配列にする。数を揃えるために挙げない。')
+  })
+
+  test('資料ごとの、食い違いではないもの', () => {
+    // 結末と人物の変化は最終章で至る。途中の章が達していないことを挙げさせない
+    expect(system).toContain('この章がまだそこに達していないことは、食い違いではない。')
+    // 人物の設定は始まりの時点。変装や関係の進展を挙げさせない
+    expect(system).toContain(
+      '【登場人物】の設定は、物語の始まりの時点のものである。前の章までに変わったこと（【確定事項】にある）や、この章の中で変わること（外見、持ち物、関係）は、食い違いではない。'
+    )
+    // 「知っていること」は抜粋
+    expect(system).toContain(
+      '「知っていること」は抜粋で、全部ではない。一覧に無いことを人物が知っているだけでは挙げない。'
+    )
+    expect(system).toContain('時間や場所が移っていること自体は、食い違いではない（章の間で時間は進む）。')
+    expect(system).toContain('本文に計画に無い細部があることは、食い違いではない。')
+    // 確定事項が無いときは、確定事項についての規則を出さない
+    const withoutLedger = buildReviewPrompt(reviewInput({ ledgerText: '' })).system
+    expect(withoutLedger).not.toContain('確定事項')
+    expect(withoutLedger).toContain(
+      '【登場人物】の設定は、物語の始まりの時点のものである。この章の中で変わること（外見、持ち物、関係）は、食い違いではない。'
+    )
+  })
+
+  test('quote は一字一句そのまま、reason はそれだけで直し方が分かる文', () => {
+    expect(system).toContain(
+      `quote: 本文の該当箇所を、一字一句そのまま抜き出す。${REVIEW_QUOTE_MIN_CHARS}〜${REVIEW_QUOTE_MAX_CHARS}字。言い換えたり、要約したり、途中を省いてつないだりしない。`
+    )
+    expect(system).toContain('本文に無い文字列を書いた指摘は捨てられる。')
+    expect(system).toContain('資料の名前と、その記述の内容を示し、どう直せばよいかを添える。')
+    expect(system).toContain('この文だけを読んで何をどう直すかが分かるようにする。')
+    expect(REVIEW_QUOTE_MIN_CHARS).toBe(10)
+    expect(REVIEW_QUOTE_MAX_CHARS).toBe(80)
+  })
+
+  test('種別は REVIEW_ISSUE_KINDS の全部を、同じ順で説明する', () => {
+    const lines = section(system, '種別').split('\n').slice(1)
+    expect(lines.map((line) => line.slice(2, line.indexOf(':')))).toEqual([...REVIEW_ISSUE_KINDS])
+    expect(lines[0]).toBe(
+      '- setting: 【作品設計】や人物の設定との食い違い（外見、性格、能力、世界のルール、用語の表記）。'
+    )
+    expect(lines[1]).toBe('- fact: 【確定事項】の「事実」や「これまでの流れ」との食い違い。')
+    expect(lines[2]).toBe(
+      '- address: 台詞の中での相手の呼び方が、【呼称】と違う。または、一人称が人物の設定と違う。地の文での人物の書き方は対象にしない。'
+    )
+    expect(lines[3]).toBe('- timeline: 時系列の食い違い（日付、時間帯、季節、経過時間）。')
+    expect(lines[4]).toContain('【この章の計画】の「張る伏線」の種明かしをしている')
+    expect(lines[5]).toContain('その場にいない人物が発言・行動している。')
+    expect(lines[5]).toContain('誰かから聞く・自分で気づくといった描写なしに知っている。')
+    expect(lines[5]).toContain('【確定事項】の「知っていること」に挙がっていることを、初めて知ったように扱っている。')
+    expect(lines[6]).toBe('- other: 上のどれにも当たらない、資料との食い違い。')
+    // 資料が無くても、種別は全部ある (schema の enum と揃える)
+    const bareLines = section(buildReviewPrompt(bareReview()).system, '種別').split('\n').slice(1)
+    expect(bareLines.map((line) => line.slice(2, line.indexOf(':')))).toEqual([...REVIEW_ISSUE_KINDS])
+  })
+
+  test('system が名前で指す小見出しは、user の資料に実際にある', () => {
+    for (const label of ['事実', 'これまでの流れ', '知っていること', '直前の章の終わり']) {
+      expect(system).toContain(`「${label}」`)
+      expect(section(user, '確定事項')).toContain(label)
+    }
+    for (const label of ['結末', '人物の変化']) {
+      expect(system).toContain(`「${label}」`)
+      expect(section(user, '作品設計')).toContain(`\n${label}:`)
+    }
+    expect(system).toContain('「張る伏線」')
+    expect(section(user, 'この章の計画')).toContain('\n  張る伏線:\n')
+    // 張る伏線が無い章では、種別の説明から外す
+    const withoutSetups = buildReviewPrompt(reviewInput({ entry: { ...reviewEntry, setups: [] } }))
+    expect(withoutSetups.system).not.toContain('張る伏線')
+    expect(withoutSetups.system).toContain(
+      '- thread: 伏線の扱いの誤り。前の章までに決着したことを未解決として扱っている、など。'
+    )
+  })
+
+  test('出力の見本は schema と同じ項目・同じ順', () => {
+    for (const input of [reviewInput(), bareReview()]) {
+      const skeleton = skeletonOf(buildReviewPrompt(input).system)
+      expect(keyPaths(skeleton)).toEqual(keyPaths(sampleOf(reviewJsonSchema())))
+      expect(keyPaths(skeleton)).toEqual(['issues', 'issues[].quote', 'issues[].reason', 'issues[].kind'])
+      // 見本の kind は「種別」という仮の語 (特定の種別を見本に置くと、その種別に寄る)。
+      // 種別を入れれば ReviewIssueSchema を通る
+      const issue = at(skeleton, 'issues')
+      const first = Array.isArray(issue) && isRecord(issue[0]) ? issue[0] : {}
+      expect(first.kind).toBe('種別')
+      for (const kind of REVIEW_ISSUE_KINDS) {
+        expect(ReviewIssueSchema.safeParse({ ...first, kind }).success).toBe(true)
+      }
+    }
+  })
+
+  test('規則に、入力の人物名や本文の内容を使わない。同じ条件なら、章や本文が変わっても同じ文面', () => {
+    for (const word of ['朝倉澪', 'ルナ', '柊誠', '天文部', '屋上', '観測会', '鍵', 's1', 's3']) {
+      expect(system).not.toContain(word)
+    }
+    expect(system).not.toMatch(/第\s*[0-9０-９]+\s*章/)
+    const other = buildReviewPrompt(
+      reviewInput({
+        chapterNumber: 7,
+        title: null,
+        content: '　別の章の本文。',
+        entry: { ...reviewEntry, chapter_number: 7 }
+      })
+    )
+    expect(other.system).toBe(system)
   })
 })

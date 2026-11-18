@@ -1,12 +1,19 @@
 import { describe, expect, test } from 'bun:test'
 import type { PrismaClient } from '@/generated/prisma/client'
+import { outlineEntryHash } from '@/lib/novel/staleness'
+import type { Outline } from '@/schemas/novel.dto'
 import {
   findChapterVersion,
   getNovelWithChapters,
   listChapterVersions,
   parseStoredBible,
+  outlineStamps,
   parseStoredRecord,
   saveBible,
+  saveChapter,
+  saveOutlineWithStamps,
+  writtenChapterNumbers,
+  chapterStaleness,
   saveChapterRecord
 } from '@/lib/novel/repository'
 
@@ -28,6 +35,8 @@ type Row = {
   content: string
   prompt: string | null
   record: string | null
+  outline_hash: string | null
+  prev_chapter_id: string | null
   created_at: Date
 }
 
@@ -41,6 +50,8 @@ function row(chapterNumber: number, version: number, record: string | null = nul
     content: `第${chapterNumber}章 v${version}`,
     prompt: 'とても長いプロンプト',
     record,
+    outline_hash: null,
+    prev_chapter_id: null,
     created_at: new Date(0)
   }
 }
@@ -249,5 +260,151 @@ describe('bible and writing_notes', () => {
     })
     await saveBible(prisma, 'n1', stored)
     expect(updates).toEqual([{ where: { id: 'n1' }, data: { bible: JSON.stringify(stored) } }])
+  })
+})
+
+// ---------------------- 鮮度 (Phase 4) ----------------------
+
+function entry(n: number, summary = `概要${n}`) {
+  return {
+    chapter_number: n,
+    title: `題${n}`,
+    summary,
+    characters: [],
+    events: [],
+    time_place: '',
+    end_state: '',
+    setups: [],
+    payoffs: []
+  }
+}
+const outline: Outline = { chapters: [entry(1), entry(2), entry(3)] }
+const hashOf = (n: number, summary?: string) => outlineEntryHash(entry(n, summary))
+
+describe('chapterStaleness', () => {
+  test('a chapter whose outline entry changed is stale, and the chapters after it follow', () => {
+    const chapters = [
+      { id: 'v1', chapter_number: 1, outline_hash: hashOf(1), prev_chapter_id: null },
+      { id: 'v2', chapter_number: 2, outline_hash: hashOf(2, '前の概要'), prev_chapter_id: 'v1' },
+      { id: 'v3', chapter_number: 3, outline_hash: hashOf(3), prev_chapter_id: 'v2' }
+    ]
+    const result = chapterStaleness(chapters, outline)
+    expect(result.get(1)).toEqual({ stale: false, reasons: [] })
+    expect(result.get(2)).toEqual({ stale: true, reasons: ['outline_changed'] })
+    expect(result.get(3)).toEqual({ stale: true, reasons: ['previous_stale'] })
+  })
+
+  test('a chapter written from an older version of the previous chapter is stale', () => {
+    const chapters = [
+      { id: 'v1b', chapter_number: 1, outline_hash: hashOf(1), prev_chapter_id: null },
+      { id: 'v2', chapter_number: 2, outline_hash: hashOf(2), prev_chapter_id: 'v1a' }
+    ]
+    expect(chapterStaleness(chapters, outline).get(2)).toEqual({ stale: true, reasons: ['previous_regenerated'] })
+  })
+
+  test('chapters from before this feature (null) are not judged', () => {
+    const chapters = [
+      { id: 'v1', chapter_number: 1, outline_hash: null, prev_chapter_id: null },
+      { id: 'v2', chapter_number: 2, outline_hash: null, prev_chapter_id: null }
+    ]
+    const result = chapterStaleness(chapters, outline)
+    expect([...result.values()]).toEqual([
+      { stale: false, reasons: [] },
+      { stale: false, reasons: [] }
+    ])
+  })
+
+  test('an unreadable outline only skips the outline comparison', () => {
+    const chapters = [
+      { id: 'v1b', chapter_number: 1, outline_hash: 'x', prev_chapter_id: null },
+      { id: 'v2', chapter_number: 2, outline_hash: 'y', prev_chapter_id: 'v1a' }
+    ]
+    const result = chapterStaleness(chapters, null)
+    expect(result.get(1)).toEqual({ stale: false, reasons: [] })
+    expect(result.get(2)).toEqual({ stale: true, reasons: ['previous_regenerated'] })
+  })
+})
+
+describe('outlineStamps', () => {
+  const legacy = [
+    { id: 'v1', chapter_number: 1, outline_hash: null, prev_chapter_id: null },
+    { id: 'v2', chapter_number: 2, outline_hash: null, prev_chapter_id: null },
+    { id: 'v4', chapter_number: 4, outline_hash: null, prev_chapter_id: null },
+    { id: 'v3', chapter_number: 3, outline_hash: hashOf(3), prev_chapter_id: null }
+  ]
+
+  test('null hashes get the previous outline hash; chapters already stamped are left alone', () => {
+    const stamps = outlineStamps(legacy, outline)
+    expect(stamps).toEqual([
+      { id: 'v1', outlineHash: hashOf(1) },
+      { id: 'v2', outlineHash: hashOf(2) },
+      // 変更前の章立てに項目が無い章は、空の項目のハッシュ
+      { id: 'v4', outlineHash: outlineEntryHash({ title: '', summary: '', characters: [] }) }
+    ])
+    expect(outlineStamps(legacy, null).map((s) => s.id)).toEqual(['v1', 'v2', 'v4'])
+  })
+
+  test('after the outline changes, only the changed chapters become outline_changed', () => {
+    const stamped = legacy.map((chapter) => {
+      const stamp = outlineStamps(legacy, outline).find((s) => s.id === chapter.id)
+      return stamp === undefined ? chapter : { ...chapter, outline_hash: stamp.outlineHash }
+    })
+    const changed: Outline = { chapters: [entry(1), entry(2, '書き直した概要'), entry(3), entry(4)] }
+    const result = chapterStaleness(stamped, changed)
+    expect(result.get(1)).toEqual({ stale: false, reasons: [] })
+    expect(result.get(2)).toEqual({ stale: true, reasons: ['outline_changed'] })
+    // 第 4 章は、変更前の章立てに項目が無かったので、項目ができたら変わったとみなす
+    expect(result.get(4)?.reasons).toContain('outline_changed')
+  })
+})
+
+describe('lineage writes', () => {
+  test('saveChapter stores the outline hash and the previous chapter id', async () => {
+    const created: unknown[] = []
+    const prisma: PrismaClient = Object.assign(Object.create(null), {
+      chapter: {
+        findFirst: async () => ({ version: 2 }),
+        create: async (args: unknown) => {
+          created.push(args)
+          return { id: 'new' }
+        }
+      }
+    })
+    await saveChapter(prisma, 'n1', 3, '本文', '題', 'プロンプト', { outlineHash: 'h3', prevChapterId: 'v2' })
+    expect(created[0]).toMatchObject({
+      data: { chapter_number: 3, version: 3, outline_hash: 'h3', prev_chapter_id: 'v2' }
+    })
+  })
+
+  test('saveOutlineWithStamps writes the stamps and the outline in one transaction', async () => {
+    const ops: unknown[] = []
+    const batches: unknown[][] = []
+    const prisma: PrismaClient = Object.assign(Object.create(null), {
+      chapter: { update: (args: unknown) => ops.push({ chapter: args }) && { chapter: args } },
+      novel: { update: (args: unknown) => ops.push({ novel: args }) && { novel: args } },
+      $transaction: async (batch: unknown[]) => {
+        batches.push(batch)
+      }
+    })
+    await saveOutlineWithStamps(prisma, 'n1', '{"chapters":[]}', [{ id: 'v1', outlineHash: 'h1' }])
+    expect(batches).toHaveLength(1)
+    expect(batches[0]).toEqual([
+      { chapter: { where: { id: 'v1' }, data: { outline_hash: 'h1' } } },
+      { novel: { where: { id: 'n1' }, data: { outline: '{"chapters":[]}' } } }
+    ])
+  })
+
+  test('writtenChapterNumbers', async () => {
+    const prisma: PrismaClient = Object.assign(Object.create(null), {
+      chapter: { findMany: async () => [{ chapter_number: 1 }, { chapter_number: 3 }] }
+    })
+    expect(await writtenChapterNumbers(prisma, 'n1')).toEqual(new Set([1, 3]))
+  })
+
+  test('getNovelWithChapters reads the lineage columns', async () => {
+    const { prisma, findManyCalls } = fakePrisma([row(1, 1)])
+    await getNovelWithChapters(prisma, 'n1')
+    expect(findManyCalls[0].select.outline_hash).toBe(true)
+    expect(findManyCalls[0].select.prev_chapter_id).toBe(true)
   })
 })

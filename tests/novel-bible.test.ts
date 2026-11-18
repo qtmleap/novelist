@@ -13,8 +13,10 @@ import {
   isAddressPattern,
   isAdultRating,
   missingAddressPairs,
-  parseAge,
+  findMinorTerms,
+  parseExactAge,
   requiredAddressPairs,
+  validateAdultBibleText,
   validateAdultCast
 } from '@/lib/novel/bible'
 import { ADDRESS_STYLES } from '@/schemas/character.dto'
@@ -496,63 +498,217 @@ describe('isAdultRating', () => {
   })
 })
 
-describe('parseAge', () => {
-  test('reads a plain number and common suffixes', () => {
-    expect(parseAge('17')).toBe(17)
-    expect(parseAge('17歳')).toBe(17)
-    expect(parseAge('17才')).toBe(17)
-    expect(parseAge('17 歳')).toBe(17)
-    expect(parseAge('満17歳')).toBe(17)
-    expect(parseAge('  25歳 ')).toBe(25)
+describe('parseExactAge', () => {
+  test('reads a number with an optional 歳 / 才', () => {
+    expect(parseExactAge('18')).toBe(18)
+    expect(parseExactAge('18歳')).toBe(18)
+    expect(parseExactAge('18才')).toBe(18)
+    expect(parseExactAge('18 歳')).toBe(18)
+    expect(parseExactAge('17')).toBe(17)
+    expect(parseExactAge('120')).toBe(120)
+    expect(parseExactAge('300歳')).toBe(300)
   })
-  test('reads full-width digits', () => {
-    expect(parseAge('１７')).toBe(17)
-    expect(parseAge('１７才')).toBe(17)
-    expect(parseAge('満１８歳')).toBe(18)
+  test('reads full-width digits and ignores surrounding whitespace', () => {
+    expect(parseExactAge('１８才')).toBe(18)
+    expect(parseExactAge('１７')).toBe(17)
+    expect(parseExactAge('18　歳')).toBe(18)
+    expect(parseExactAge('  25歳\n')).toBe(25)
   })
-  test('reads three-digit ages', () => {
-    expect(parseAge('300歳')).toBe(300)
+  test('a word before or after the number is null (「18歳未満」 must not pass as 18)', () => {
+    const loopholes = [
+      '18歳未満',
+      '18歳以下',
+      '18に満たない',
+      '十四歳（設定上は18）',
+      '見た目は18歳、実年齢は十四',
+      '10代、18歳',
+      '満18歳',
+      '約18',
+      '18歳くらい',
+      '18歳（外見は14歳）'
+    ]
+    for (const value of loopholes) {
+      expect(parseExactAge(value)).toBeNull()
+    }
   })
-  test('a range gives the smallest number', () => {
-    expect(parseAge('17〜18歳')).toBe(17)
-    expect(parseAge('18～17歳')).toBe(17)
-    expect(parseAge('17-19')).toBe(17)
-    expect(parseAge('１７歳か１８歳')).toBe(17)
+  test('ranges and incomplete numbers are null', () => {
+    expect(parseExactAge('18-20')).toBeNull()
+    expect(parseExactAge('17〜18歳')).toBeNull()
+    expect(parseExactAge('18〜')).toBeNull()
+    expect(parseExactAge('18、20')).toBeNull()
+    expect(parseExactAge('17.5歳')).toBeNull()
   })
-  test('an age with a fraction is rounded down', () => {
-    expect(parseAge('17.5歳')).toBe(17)
+  test('kanji numerals, decades and non-numbers are null', () => {
+    for (const value of ['二十歳', '十七歳', '二十代', '20代', '10代後半', '成人', '大人', '不明', '', '   ']) {
+      expect(parseExactAge(value)).toBeNull()
+    }
   })
-  test('text without digits is null', () => {
-    expect(parseAge('二十代')).toBeNull()
-    expect(parseAge('不明')).toBeNull()
-    expect(parseAge('大人')).toBeNull()
-    expect(parseAge('')).toBeNull()
-    expect(parseAge('   ')).toBeNull()
+  test('four or more digits are null', () => {
+    expect(parseExactAge('1800')).toBeNull()
   })
-  test('a range of decades is null', () => {
-    expect(parseAge('20代')).toBeNull()
-    expect(parseAge('２０代')).toBeNull()
-    expect(parseAge('10代後半')).toBeNull()
-    expect(parseAge('30 代前半')).toBeNull()
+})
+
+describe('findMinorTerms', () => {
+  test('finds the words for a status', () => {
+    const words = [
+      '高校生',
+      '中学生',
+      '小学生',
+      '女子高生',
+      '男子高生',
+      '女子高校生',
+      '男子高校生',
+      '女子中学生',
+      '男子中学生',
+      '未成年',
+      '園児',
+      '幼女',
+      '美少女',
+      '美少年'
+    ]
+    for (const word of words) {
+      expect(findMinorTerms(`彼女は${word}だ`)).toEqual([word])
+    }
   })
-  test('a decade does not hide an exact age next to it', () => {
-    expect(parseAge('10代後半 (17歳)')).toBe(17)
-    expect(parseAge('20代 / 28歳')).toBe(28)
+  test('finds 児童 and 幼児 alone, and the Japanese slang', () => {
+    expect(findMinorTerms('児童を引率する')).toEqual(['児童'])
+    expect(findMinorTerms('幼児のような')).toEqual(['幼児'])
+    expect(findMinorTerms('ロリ系の顔立ち')).toEqual(['ロリ'])
+    expect(findMinorTerms('ショタっぽい')).toEqual(['ショタ'])
+  })
+  test('the longer word wins at the same position', () => {
+    expect(findMinorTerms('女子高校生')).toEqual(['女子高校生'])
+    expect(findMinorTerms('保育園児')).toEqual(['園児'])
+  })
+  test('finds JK, JC and JS in any case, only when not part of an English word', () => {
+    expect(findMinorTerms('現役JK')).toEqual(['JK'])
+    expect(findMinorTerms('jc と js')).toEqual(['JC', 'JS'])
+    expect(findMinorTerms('ＪＫ制服')).toEqual(['JK'])
+    expect(findMinorTerms('革のjacket')).toEqual([])
+    expect(findMinorTerms('JKL')).toEqual([])
+    expect(findMinorTerms('Vue.js の開発者')).toEqual([])
+  })
+  test('finds the grade expressions', () => {
+    expect(findMinorTerms('高校2年')).toEqual(['高校2年'])
+    expect(findMinorTerms('高校一年生')).toEqual(['高校一年'])
+    expect(findMinorTerms('高等学校3年')).toEqual(['高等学校3年'])
+    expect(findMinorTerms('中学3年生')).toEqual(['中学3年'])
+    expect(findMinorTerms('中学校二年')).toEqual(['中学校二年'])
+    expect(findMinorTerms('小学五年生')).toEqual(['小学五年'])
+    expect(findMinorTerms('小学校6年')).toEqual(['小学校6年'])
+  })
+  test('finds the short grade expressions', () => {
+    expect(findMinorTerms('高1')).toEqual(['高1'])
+    expect(findMinorTerms('中学の友人で、中1の弟がいる')).toEqual(['中1'])
+    expect(findMinorTerms('小3の妹')).toEqual(['小3'])
+    expect(findMinorTerms('彼女は高2だ')).toEqual(['高2'])
+    expect(findMinorTerms('高三の夏')).toEqual(['高三'])
+    expect(findMinorTerms('高2生')).toEqual(['高2'])
+    expect(findMinorTerms('(中2)')).toEqual(['中2'])
+  })
+  test('a short grade expression after a type of school is still a grade', () => {
+    expect(findMinorTerms('女子高2')).toEqual(['高2'])
+    expect(findMinorTerms('都立高3')).toEqual(['高3'])
+    expect(findMinorTerms('現役高3')).toEqual(['高3'])
+    expect(findMinorTerms('現中1')).toEqual(['中1'])
+  })
+  test('the short grade expression does not match inside other words', () => {
+    expect(findMinorTerms('途中1回だけ休んだ')).toEqual([])
+    expect(findMinorTerms('標高2000mの山')).toEqual([])
+    expect(findMinorTerms('最高3位')).toEqual([])
+    expect(findMinorTerms('夢中2時間')).toEqual([])
+    expect(findMinorTerms('中1日で登板')).toEqual([])
+    expect(findMinorTerms('小1時間ほど')).toEqual([])
+    expect(findMinorTerms('高3度の傾き')).toEqual([])
+    expect(findMinorTerms('家の中一面に')).toEqual([])
+    expect(findMinorTerms('中二病')).toEqual([])
+    expect(findMinorTerms('中10人')).toEqual([])
+    expect(findMinorTerms('高2m')).toEqual([])
+  })
+  test('a duration of years at school is not a grade', () => {
+    expect(findMinorTerms('高校3年間は野球漬けだった')).toEqual([])
+    expect(findMinorTerms('中学2年間')).toEqual([])
+  })
+  test('finds 十代, 10代 and ティーン, but not 二十代 or 10代目', () => {
+    expect(findMinorTerms('十代の頃')).toEqual(['十代'])
+    expect(findMinorTerms('10代後半')).toEqual(['10代'])
+    expect(findMinorTerms('１０代')).toEqual(['10代'])
+    expect(findMinorTerms('ティーンエイジャー')).toEqual(['ティーン'])
+    expect(findMinorTerms('二十代')).toEqual([])
+    expect(findMinorTerms('三十代')).toEqual([])
+    expect(findMinorTerms('20代')).toEqual([])
+    expect(findMinorTerms('十代目当主')).toEqual([])
+    expect(findMinorTerms('10代目社長')).toEqual([])
+    expect(findMinorTerms('第10代当主')).toEqual([])
+  })
+  test('少女 and 少年 are found only for the appearance', () => {
+    expect(findMinorTerms('少女のような顔立ち')).toEqual([])
+    expect(findMinorTerms('少年野球のコーチ')).toEqual([])
+    expect(findMinorTerms('少女のような顔立ち', { appearance: true })).toEqual(['少女'])
+    expect(findMinorTerms('少年のような体つき', { appearance: true })).toEqual(['少年'])
+    expect(findMinorTerms('少女のような顔立ち', { appearance: false })).toEqual([])
+    expect(findMinorTerms('少女のような顔立ち', {})).toEqual([])
+  })
+  test('美少女 is found even without the appearance option, and reported once', () => {
+    expect(findMinorTerms('美少女')).toEqual(['美少女'])
+    expect(findMinorTerms('美少女', { appearance: true })).toEqual(['美少女'])
+  })
+  test('does not match words that are normal for an adult', () => {
+    const adult = [
+      '高校教師',
+      '高校を卒業後、上京した',
+      '中学校の教諭',
+      '大学2年生',
+      '大学生',
+      '少女漫画家',
+      '高校生活は楽しかった',
+      '児童文学作家',
+      '児童福祉士',
+      '幼児教育の専門家',
+      '二十代半ば',
+      'カロリー計算が得意',
+      '学生時代はバスケ部',
+      '若い頃は旅をしていた'
+    ]
+    for (const text of adult) {
+      expect(findMinorTerms(text)).toEqual([])
+    }
+  })
+  test('reports each word once, in the order found', () => {
+    expect(findMinorTerms('女子高生。高2で、十代で、女子高生で、JK')).toEqual(['女子高生', '高2', '十代', 'JK'])
+  })
+  test('normalizes full-width alphanumerics and half-width katakana', () => {
+    expect(findMinorTerms('高２')).toEqual(['高2'])
+    expect(findMinorTerms('１０代')).toEqual(['10代'])
+    expect(findMinorTerms('ﾛﾘ')).toEqual(['ロリ'])
+  })
+  test('empty text finds nothing', () => {
+    expect(findMinorTerms('')).toEqual([])
+    expect(findMinorTerms('', { appearance: true })).toEqual([])
+  })
+  test('can be called repeatedly (no state is kept between calls)', () => {
+    for (const text of ['女子高生', '女子高生', '女子高生']) {
+      expect(findMinorTerms(text)).toEqual(['女子高生'])
+    }
   })
 })
 
 describe('validateAdultCast', () => {
-  const row = (name: string, age: string): BibleCast => ({
+  const row = (name: string, age: string, overrides: Partial<BibleCast> = {}): BibleCast => ({
     name,
     age,
     occupation: '会社員',
     appearance: '黒髪',
-    background: '都内で働く'
+    background: '都内で働く',
+    ...overrides
   })
+  const ageProblem = (name: string, value: string): string =>
+    `${name} の年齢は、18 以上の数字だけで書いてください（今の値:「${value}」）`
 
   test('is always empty for an all-ages work', () => {
     expect(validateAdultCast('全年齢', [], ['かぐや', '翁'])).toEqual([])
     expect(validateAdultCast('全年齢', [row('かぐや', '12')], ['かぐや'])).toEqual([])
+    expect(validateAdultCast('全年齢', [row('かぐや', '二十代', { occupation: '女子高生' })], ['かぐや'])).toEqual([])
     expect(validateAdultCast('', [], ['かぐや'])).toEqual([])
   })
   test('reports a person without a row', () => {
@@ -568,30 +724,85 @@ describe('validateAdultCast', () => {
     expect(validateAdultCast('R15', [row('かぐや', '１０才')], ['かぐや'])).toEqual([
       'かぐや の年齢が 10 歳です（18 歳以上にしてください）'
     ])
+    expect(validateAdultCast('R18', [row('かぐや', '0')], ['かぐや'])).toEqual([
+      'かぐや の年齢が 0 歳です（18 歳以上にしてください）'
+    ])
   })
-  test('an age of exactly 18 is fine', () => {
-    expect(validateAdultCast('R18', [row('かぐや', '18')], ['かぐや'])).toEqual([])
-    expect(validateAdultCast('R15', [row('かぐや', '18歳')], ['かぐや'])).toEqual([])
+  test('18 and older are fine', () => {
+    for (const age of ['18', '18歳', '１８才', '20歳', '19', '300歳']) {
+      expect(validateAdultCast('R18', [row('かぐや', age)], ['かぐや'])).toEqual([])
+      expect(validateAdultCast('R15', [row('かぐや', age)], ['かぐや'])).toEqual([])
+    }
   })
-  test('an age that cannot be read as a number is a problem', () => {
-    const unreadable = ['二十代', '十七歳', '二十歳', '成人', '不明', '', '20代']
-    for (const age of unreadable) {
-      expect(validateAdultCast('R18', [row('かぐや', age)], ['かぐや'])).toEqual([
-        'かぐや の年齢が数字で書かれていません（18 以上の数字にしてください）'
-      ])
+  test('every loophole in the age field is a problem', () => {
+    const loopholes = [
+      '18歳未満',
+      '18歳以下',
+      '18に満たない',
+      '十四歳（設定上は18）',
+      '見た目は18歳、実年齢は十四',
+      '10代、18歳',
+      '17〜19歳',
+      '二十代',
+      '二十歳',
+      '20代',
+      '成人',
+      '不明',
+      ''
+    ]
+    for (const age of loopholes) {
+      expect(validateAdultCast('R18', [row('かぐや', age)], ['かぐや'])).toEqual([ageProblem('かぐや', age)])
       expect(validateAdultCast('R15', [row('かぐや', age)], ['かぐや'])).toHaveLength(1)
     }
   })
-  test('an unreadable age is fine for an all-ages work', () => {
-    expect(validateAdultCast('全年齢', [row('かぐや', '二十代'), row('翁', '')], ['かぐや', '翁'])).toEqual([])
-  })
-  test('ages above 18 are fine', () => {
-    expect(validateAdultCast('R18', [row('かぐや', '19'), row('翁', '300歳')], ['かぐや', '翁'])).toEqual([])
-  })
-  test('a range that starts below 18 is reported', () => {
-    expect(validateAdultCast('R18', [row('かぐや', '17〜19歳')], ['かぐや'])).toEqual([
-      'かぐや の年齢が 17 歳です（18 歳以上にしてください）'
+  test('the current value in the message is cut at 30 characters, on one line', () => {
+    const long = 'あ'.repeat(40)
+    expect(validateAdultCast('R18', [row('かぐや', long)], ['かぐや'])).toEqual([
+      `かぐや の年齢は、18 以上の数字だけで書いてください（今の値:「${'あ'.repeat(30)}…」）`
     ])
+    const exactly = 'い'.repeat(30)
+    expect(validateAdultCast('R18', [row('かぐや', exactly)], ['かぐや'])).toEqual([ageProblem('かぐや', exactly)])
+    expect(validateAdultCast('R18', [row('かぐや', ' 18歳\n未満 ')], ['かぐや'])).toEqual([
+      ageProblem('かぐや', '18歳 未満')
+    ])
+  })
+  test('a minor term left in the occupation, appearance or background is a problem', () => {
+    expect(validateAdultCast('R18', [row('かぐや', '18', { occupation: '女子高生' })], ['かぐや'])).toEqual([
+      'かぐや の職業に、未成年を指す語（「女子高生」）が残っています'
+    ])
+    expect(validateAdultCast('R18', [row('かぐや', '18', { appearance: '中学の制服の少女' })], ['かぐや'])).toEqual([
+      'かぐや の外見に、未成年を指す語（「少女」）が残っています'
+    ])
+    expect(
+      validateAdultCast('R15', [row('かぐや', '18', { background: '高校3年生の秋に出会った' })], ['かぐや'])
+    ).toEqual(['かぐや の背景に、未成年を指す語（「高校3年」）が残っています'])
+  })
+  test('lists every minor term of a field, and every field, after the age problem', () => {
+    const bad = row('かぐや', '17', { occupation: '高2のJK', appearance: '少年のような美少女', background: '十代の頃' })
+    expect(validateAdultCast('R18', [bad], ['かぐや'])).toEqual([
+      'かぐや の年齢が 17 歳です（18 歳以上にしてください）',
+      'かぐや の職業に、未成年を指す語（「高2」「JK」）が残っています',
+      'かぐや の外見に、未成年を指す語（「少年」「美少女」）が残っています',
+      'かぐや の背景に、未成年を指す語（「十代」）が残っています'
+    ])
+  })
+  test('words that are normal for an adult pass', () => {
+    const adult = row('かぐや', '25', {
+      occupation: '高校教師',
+      appearance: '黒髪の女性',
+      background: '高校を卒業後、上京した。大学2年生のときに留学した'
+    })
+    expect(validateAdultCast('R18', [adult], ['かぐや'])).toEqual([])
+    expect(validateAdultCast('R18', [row('翁', '60', { occupation: '少女漫画家' })], ['翁'])).toEqual([])
+    expect(validateAdultCast('R18', [row('翁', '60', { occupation: '少年野球のコーチ' })], ['翁'])).toEqual([])
+  })
+  test('少女 and 少年 are a problem in the appearance only', () => {
+    expect(validateAdultCast('R18', [row('かぐや', '20', { appearance: '少女のような' })], ['かぐや'])).toEqual([
+      'かぐや の外見に、未成年を指す語（「少女」）が残っています'
+    ])
+    expect(
+      validateAdultCast('R18', [row('かぐや', '20', { background: '少女時代は田舎で育った' })], ['かぐや'])
+    ).toEqual([])
   })
   test('reports every problem, in the order of the cast names', () => {
     const rows = [row('翁', '15歳'), row('かぐや', '20歳'), row('帝', '16歳'), row('童', '子供')]
@@ -599,7 +810,7 @@ describe('validateAdultCast', () => {
       '帝 の年齢が 16 歳です（18 歳以上にしてください）',
       '嫗 の成人としての設定がありません',
       '翁 の年齢が 15 歳です（18 歳以上にしてください）',
-      '童 の年齢が数字で書かれていません（18 以上の数字にしてください）'
+      ageProblem('童', '子供')
     ])
   })
   test('an empty cast has nothing to report', () => {
@@ -613,6 +824,72 @@ describe('validateAdultCast', () => {
   })
   test('a person listed twice is reported once', () => {
     expect(validateAdultCast('R18', [], ['かぐや', 'かぐや'])).toEqual(['かぐや の成人としての設定がありません'])
+  })
+})
+
+describe('validateAdultBibleText', () => {
+  const clean = () => ({
+    premise: '竹取の翁が光る竹の中から女性を見つける。',
+    ending: 'かぐやは月へ帰る。',
+    arcs: [{ name: 'かぐや', start: '竹林で暮らす', end: '月へ帰る' }],
+    world: { rules: ['月の民は地上に長く居られない'], terms: [{ term: '月の都', note: '月の民の国' }] },
+    timeline: ['春: 竹から生まれる', '夏: 求婚が始まる']
+  })
+
+  test('is empty for a clean bible', () => {
+    expect(validateAdultBibleText('R18', clean())).toEqual([])
+    expect(validateAdultBibleText('R15', clean())).toEqual([])
+  })
+  test('is always empty for an all-ages work', () => {
+    const bad = { ...clean(), premise: '高校生の物語', ending: '女子高生が泣く' }
+    expect(validateAdultBibleText('全年齢', bad)).toEqual([])
+    expect(validateAdultBibleText('', bad)).toEqual([])
+  })
+  test('reports each item that has a minor term', () => {
+    const item = (override: Partial<ReturnType<typeof clean>>) =>
+      validateAdultBibleText('R18', { ...clean(), ...override })
+    expect(item({ premise: '高校生の主人公が旅に出る' })).toEqual([
+      '作品設計の物語の核に、未成年を指す語（「高校生」）が残っています'
+    ])
+    expect(item({ ending: '女子高生に戻る' })).toEqual([
+      '作品設計の結末に、未成年を指す語（「女子高生」）が残っています'
+    ])
+    expect(item({ arcs: [{ name: 'かぐや', start: '高2の少女', end: '大人になる' }] })).toEqual([
+      '作品設計の人物の変化に、未成年を指す語（「高2」）が残っています'
+    ])
+    expect(item({ arcs: [{ name: 'かぐや', start: '', end: '十代に戻る' }] })).toEqual([
+      '作品設計の人物の変化に、未成年を指す語（「十代」）が残っています'
+    ])
+    expect(item({ world: { rules: ['未成年は入れない'], terms: [] } })).toEqual([
+      '作品設計の世界のルールに、未成年を指す語（「未成年」）が残っています'
+    ])
+    expect(item({ world: { rules: [], terms: [{ term: '学園', note: '中学生が通う' }] } })).toEqual([
+      '作品設計の用語に、未成年を指す語（「中学生」）が残っています'
+    ])
+    expect(item({ timeline: ['春: 高校2年の春', '夏: 高校生活'] })).toEqual([
+      '作品設計の時系列に、未成年を指す語（「高校2年」）が残っています'
+    ])
+  })
+  test('reports several items in a fixed order, and several terms of one item together', () => {
+    const bad = {
+      premise: '美少女と高校生の物語',
+      ending: 'ティーンの旅',
+      arcs: [],
+      world: { rules: [], terms: [] },
+      timeline: ['JK の頃']
+    }
+    expect(validateAdultBibleText('R18', bad)).toEqual([
+      '作品設計の物語の核に、未成年を指す語（「美少女」「高校生」）が残っています',
+      '作品設計の結末に、未成年を指す語（「ティーン」）が残っています',
+      '作品設計の時系列に、未成年を指す語（「JK」）が残っています'
+    ])
+  })
+  test('少女 and 少年 are allowed in the bible text (they are only checked in the appearance)', () => {
+    expect(validateAdultBibleText('R18', { ...clean(), premise: '少年と少女の冒険' })).toEqual([])
+  })
+  test('works with a StoryBible-shaped object', () => {
+    const bible: Parameters<typeof validateAdultBibleText>[1] = { ...clean(), arcs: [] }
+    expect(validateAdultBibleText('R18', bible)).toEqual([])
   })
 })
 
