@@ -114,6 +114,8 @@ describe('getNovelWithChapters cost totals', () => {
       id: 'n1',
       chapters: [],
       character_links: [],
+      bible: null,
+      writing_notes: null,
       relations: [],
       generation_job: null,
       category: null,

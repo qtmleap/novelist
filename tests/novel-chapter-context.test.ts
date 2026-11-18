@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   type ContextChapter,
   type ContextSource,
+  contextBlocker,
   contextBudget,
   ledgerOf,
   outlineHasChapter,
@@ -12,13 +13,14 @@ import {
   recordStageAction,
   resolveChapterContext,
   restartState,
-  resumePoint
+  resumePoint,
+  setupsOf
 } from '@/lib/novel/chapter-context'
 import { renderLedger } from '@/lib/novel/ledger'
 import { RECORDED_CHAPTER_CHARS } from '@/lib/novel/memory'
 import { buildChapterPrompt, type CastMember, type StyleParams } from '@/lib/novel/prompts'
 import type { Outline } from '@/schemas/novel.dto'
-import type { ChapterRecord, StoryThread } from '@/schemas/story.dto'
+import type { ChapterRecord, StoryBible, StoryThread } from '@/schemas/story.dto'
 
 // 本文の大きさ (字)。予算の境目を作りやすいよう、どの章も同じにする。
 const SIZE = 3000
@@ -53,7 +55,12 @@ const outline: Outline = {
     chapter_number: n,
     title: `題${n}`,
     summary: `第${n}章の章立ての概要`,
-    characters: []
+    characters: [],
+    events: [],
+    time_place: '',
+    end_state: '',
+    setups: [{ id: `s${n}`, description: `第${n}章で張る伏線` }],
+    payoffs: []
   }))
 }
 
@@ -68,6 +75,8 @@ function source(chapters: ContextChapter[], chapterNumber = 5): ContextSource {
     style,
     cast: [],
     relations: [],
+    bible: null,
+    writingNotes: '',
     chapters
   }
 }
@@ -86,6 +95,8 @@ function reservedChars(src: ContextSource): number {
     cast: src.cast,
     relations: src.relations,
     ledgerText: renderLedger(ledgerOf(prior, new Map())),
+    bible: src.bible,
+    writingNotes: src.writingNotes,
     priorChapters: []
   })
   return skeleton.system.length + skeleton.user.length
@@ -195,13 +206,13 @@ describe('resolveChapterContext', () => {
   const tiny = { budgetTokens: 1, tokensPerChar: 1 }
 
   test('extracts missing records oldest first and falls back to the outline summary', async () => {
-    const seen: Array<{ number: number; openThreads: StoryThread[] }> = []
+    const seen: Array<{ number: number; openThreads: StoryThread[]; plannedSetups: StoryThread[] }> = []
     let progress = 0
     const result = await resolveChapterContext(
       source(nullChapters),
       tiny,
-      async (target, openThreads) => {
-        seen.push({ number: target.number, openThreads })
+      async (target, threads) => {
+        seen.push({ number: target.number, ...threads })
         return target.number === 1 ? record(1, { summary: '抽出した第1章', threads_opened: [thread] }) : null
       },
       () => {
@@ -212,6 +223,9 @@ describe('resolveChapterContext', () => {
     // 第 2 章の抽出には、第 1 章で張られた未回収の伏線が渡る
     expect(seen[0].openThreads).toEqual([])
     expect(seen[1].openThreads).toEqual([thread])
+    // 張る予定の伏線は、抽出する章の章立てから
+    expect(seen[0].plannedSetups).toEqual([{ id: 's1', description: '第1章で張る伏線' }])
+    expect(seen[1].plannedSetups).toEqual([{ id: 's2', description: '第2章で張る伏線' }])
     expect(result.extracted).toEqual([1])
     expect(result.provisional).toEqual([2])
     expect(progress).toBe(4)
@@ -298,11 +312,12 @@ describe('helpers', () => {
 
   test('recordMaterials takes open threads from the ledger', () => {
     const ledger = ledgerOf([chapter(1, record(1, { threads_opened: [{ id: 'c1-1', description: '鍵' }] }))], new Map())
-    expect(recordMaterials(cast, { pov: '一人称', tone: '', viewpointChar: vc }, ledger)).toEqual({
+    const planned = [{ id: 's3', description: '鍵の持ち主' }]
+    expect(recordMaterials(cast, { pov: '一人称', tone: '', viewpointChar: vc }, ledger, planned)).toEqual({
       castNames: ['酒寄彩葉', '月見ヤチヨ'],
       narrator: '酒寄彩葉',
       openThreads: [{ id: 'c1-1', description: '鍵' }],
-      plannedSetups: []
+      plannedSetups: planned
     })
   })
 
@@ -347,5 +362,77 @@ describe('resume', () => {
     expect(recordStageAction(null)).toBe('missing')
     expect(recordStageAction({ record: null })).toBe('extract')
     expect(recordStageAction({ record: record(1) })).toBe('skip')
+  })
+})
+
+describe('bible, writing notes and planned setups (Phase 3)', () => {
+  function castMember(name: string): CastMember {
+    return {
+      name,
+      role: '',
+      gender: '',
+      age: '17',
+      occupation: '星見台高校の二年生',
+      appearance: 'セーラー服',
+      first_person: '私',
+      address_others: '',
+      speech_examples: [],
+      description: '星見台高校に通う'
+    }
+  }
+  const adultCast = [castMember('酒寄彩葉'), castMember('月見ヤチヨ')]
+  const adultStyle: StyleParams = {
+    pov: '一人称',
+    tone: '一般文芸',
+    age_rating: 'R18',
+    viewpointChar: { name: '酒寄彩葉', first_person: '私' }
+  }
+  const bible: StoryBible = {
+    premise: '灯台の鍵を探す物語の核',
+    ending: '',
+    arcs: [],
+    world: { rules: [], terms: [] },
+    timeline: [],
+    addresses: [],
+    cast: [
+      { name: '酒寄彩葉', age: '20', occupation: '大学二年生', appearance: '短い髪', background: '港町の大学に通う' },
+      { name: '月見ヤチヨ', age: '22', occupation: '船乗り', appearance: '日に焼けた肌', background: '灯台守の娘' }
+    ]
+  }
+
+  test('the bible and the writing notes reach the chapter prompt', () => {
+    const src = { ...source(sixChapters), bible, writingNotes: '擬音語は使わない' }
+    const plan = planChapterContext(src, huge)
+    expect(plan.prompt.user).toContain('灯台の鍵を探す物語の核')
+    expect(plan.prompt.user).toContain('擬音語は使わない')
+    expect(plan.storagePrompt).toContain('擬音語は使わない')
+  })
+
+  test('an adult novel sends the bible cast, not the dictionary text', () => {
+    const src = { ...source(sixChapters), style: adultStyle, cast: adultCast, bible }
+    const plan = planChapterContext(src, huge)
+    const sent = `${plan.prompt.system}\n${plan.prompt.user}`
+    expect(sent).not.toContain('星見台')
+    expect(sent).not.toContain('セーラー服')
+    expect(sent).toContain('大学二年生')
+  })
+
+  test('contextBlocker stops a broken adult bible and lets the rest through', () => {
+    const adult = { style: adultStyle, cast: adultCast }
+    expect(contextBlocker({ ...adult, bible })).toBeNull()
+    // 作品設計が無い旧データは止めない
+    expect(contextBlocker({ ...adult, bible: null })).toBeNull()
+    const broken = { ...bible, cast: [{ ...bible.cast[0], age: '17' }, bible.cast[1]] }
+    const message = contextBlocker({ ...adult, bible: broken })
+    expect(message).toContain('酒寄彩葉 の年齢が 17 歳です')
+    expect(message).toContain('作品設計を作り直す')
+    // 全年齢では人物設定を問わない
+    expect(contextBlocker({ ...adult, style: { ...adultStyle, age_rating: '全年齢' }, bible: broken })).toBeNull()
+  })
+
+  test('the current chapter gets its planned setups for the record', async () => {
+    const result = await resolveChapterContext(source(sixChapters), huge, async () => null)
+    expect(result.record.plannedSetups).toEqual([{ id: 's5', description: '第5章で張る伏線' }])
+    expect(setupsOf(outline, 9)).toEqual([])
   })
 })

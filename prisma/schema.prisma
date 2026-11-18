@@ -23,9 +23,15 @@ model Novel {
   pov_character_id String                   @default("")
   ending           String                   @default("未指定")
   notes            String                   @default("")
+  // 執筆上の指示 (表記の決まり、避けたい展開など)。notes と違い、章立てと本文の両方に渡す。null は未入力 ('' と同じ)。
+  // null 許容にしているのは、NOT NULL の列を足すと Prisma の SQLite がテーブルを作り直す SQL を出すため。
+  // Novel を作り直すと DROP TABLE の暗黙の DELETE で ON DELETE CASCADE が動き、D1 では子の行 (本文など) が消える。
+  writing_notes    String?
   editor_model     String                   @default("gemini-3.1-flash-lite")
   writer_model     String                   @default("gemini-3.1-flash-lite")
   outline          String?
+  // 作品設計 (StoredBibleSchema の JSON)。章立ての前に 1 回作り、章立てと全章の本文に渡す。未作成は null。
+  bible            String?
   // ユーザーが作成するカテゴリ (フォルダ式)。未割り当て (= 未分類) は null。
   category_id      String?
   category         Category?                @relation(fields: [category_id], references: [id], onDelete: SetNull)

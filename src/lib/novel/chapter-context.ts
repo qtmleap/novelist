@@ -1,7 +1,15 @@
 import type { PrismaClient } from '@/generated/prisma/client'
 import type { Env } from '@/lib/db'
 import { generateJson } from '@/lib/gemini/client'
-import { extractRecordFlow, type JsonCaller, type RecordFlowInput, type RecordFlowResult } from '@/lib/novel/assist'
+import {
+  brokenBibleError,
+  castForPrompt,
+  extractRecordFlow,
+  type JsonCaller,
+  type RecordFlowInput,
+  type RecordFlowResult,
+  toStoryBible
+} from '@/lib/novel/assist'
 import { type GenerationCostInput, recordGenerationCost } from '@/lib/novel/cost'
 import { buildLedger, type Ledger, renderLedger } from '@/lib/novel/ledger'
 import { contextBudgetTokens, selectPriorChapters, TOKENS_PER_CHAR } from '@/lib/novel/memory'
@@ -21,7 +29,7 @@ import { getNovelWithChapters, saveChapterRecord } from '@/lib/novel/repository'
 import { findContextWindow } from '@/lib/openai/models'
 import type { UsageCounts } from '@/lib/openai/protocol'
 import { type ModelRef, type Outline, OutlineSchema, parseModelRef } from '@/schemas/novel.dto'
-import { type ChapterRecord, EMPTY_END_STATE, type StoryThread } from '@/schemas/story.dto'
+import { type ChapterRecord, EMPTY_END_STATE, type StoryBible, type StoryThread } from '@/schemas/story.dto'
 
 // 本文 1 章の生成の文脈 (送るプロンプト、保存用のプロンプト、記録の抽出の材料) を D1 から組み立てる。
 // 判断を含む部分 (既出の章の選び方、確定事項、記録の無い章の扱い、再開の段階) は純粋関数にして bun test で検証する。
@@ -171,10 +179,28 @@ export type ContextSource = {
   chapterNumber: number
   targetChars: number
   style: StyleParams
+  // 辞典の人物設定 (variant を反映したもの)。成人指定で作品設計があれば、プロンプトには作品設計の設定に差し替えて渡す
   cast: CastMember[]
   relations: CastRelation[]
+  // 作品設計。無い旧データでは null
+  bible: StoryBible | null
+  // 執筆上の指示 (Novel.writing_notes)。無ければ ''
+  writingNotes: string
   // 各章の最新 version。今回の章以降を含んでいてもよい (組み立てで除く)
   chapters: ContextChapter[]
+}
+
+// 生成を始めてはいけない理由 (無ければ null)。
+// 成人指定で、作品設計はあるのに人物設定が条件を満たさないとき (手で直して壊れた、年齢指定を後から変えた)。
+// 作品設計が無い旧データは止めない (辞典の原文と読み替えの指示で書く。prompts.ts が指示を出す)。
+export function contextBlocker(source: Pick<ContextSource, 'bible' | 'style' | 'cast'>): string | null {
+  return source.bible === null ? null : brokenBibleError(source.bible, source)
+}
+
+// 章立てでその章に張る予定の伏線。章立てにその章が無ければ空。
+export function setupsOf(outline: Outline, chapterNumber: number): StoryThread[] {
+  const entry = outline.chapters.find((chapter) => chapter.chapter_number === chapterNumber)
+  return entry === undefined ? [] : entry.setups.map((setup) => ({ id: setup.id, description: setup.description }))
 }
 
 export type ContextBudget = { budgetTokens: number; tokensPerChar: number }
@@ -238,9 +264,11 @@ export function planChapterContext(
     chapterNumber: source.chapterNumber,
     targetChars: source.targetChars,
     style: source.style,
-    cast: source.cast,
+    cast: castForPrompt(source.cast, source.style, source.bible),
     relations: source.relations,
-    ledgerText: renderLedger(ledger)
+    ledgerText: renderLedger(ledger),
+    bible: source.bible,
+    writingNotes: source.writingNotes
   }
   const skeleton = buildChapterPrompt({ ...base, priorChapters: [] })
   const selection = selectPriorChapters(
@@ -303,24 +331,34 @@ export function openThreadsOf(ledger: Ledger): StoryThread[] {
 }
 
 // ledger は、記録を作る章より前の章の記録を累積したもの。未回収の伏線をそこから取る。
-export function recordMaterials(cast: CastMember[], style: StyleParams, ledger: Ledger): RecordMaterials {
+// plannedSetups は、章立てでその章に張る予定の伏線 (setupsOf)。実際に書かれたものを記録に答えさせる。
+export function recordMaterials(
+  cast: CastMember[],
+  style: StyleParams,
+  ledger: Ledger,
+  plannedSetups: StoryThread[]
+): RecordMaterials {
   return {
     castNames: cast.map((member) => member.name),
     narrator: recordNarrator(style, cast),
     openThreads: openThreadsOf(ledger),
-    // 章立てから張る予定の伏線が渡るのは Phase 3 から
-    plannedSetups: []
+    plannedSetups
   }
 }
 
 // ---------------------- 記録の無い章の補い ----------------------
 
 // 章の記録をその場で作る。作れなければ null (呼び出し側が仮の記録で代用する)。
-// openThreads は、その章より前の章までに未回収の伏線。
-export type RecordExtractor = (chapter: ContextChapter, openThreads: StoryThread[]) => Promise<ChapterRecord | null>
+// openThreads は、その章より前の章までに未回収の伏線。plannedSetups は、章立てでその章に張る予定の伏線。
+export type RecordExtractor = (
+  chapter: ContextChapter,
+  threads: { openThreads: StoryThread[]; plannedSetups: StoryThread[] }
+) => Promise<ChapterRecord | null>
 
 export type ResolvedContext = {
   plan: ContextPlan
+  // 今回の章の記録の抽出の材料 (未回収の伏線は今回より前の章までの分、張る予定の伏線は今回の章の章立てから)
+  record: RecordMaterials
   // その場で記録を作れた章と、仮の記録で代用した章
   extracted: number[]
   provisional: number[]
@@ -336,10 +374,10 @@ type Settling = {
 async function extractSafely(
   extract: RecordExtractor,
   chapter: ContextChapter,
-  openThreads: StoryThread[]
+  threads: { openThreads: StoryThread[]; plannedSetups: StoryThread[] }
 ): Promise<ChapterRecord | null> {
   try {
-    return await extract(chapter, openThreads)
+    return await extract(chapter, threads)
   } catch (e) {
     console.warn(`record extraction for chapter ${chapter.number} failed`, e)
     return null
@@ -360,12 +398,20 @@ async function settleRecords(
   const next = plan.missing.find((number) => !state.attempted.has(number))
   const chapter = next === undefined ? undefined : source.chapters.find((candidate) => candidate.number === next)
   if (next === undefined || chapter === undefined) {
-    return { plan, extracted: state.extracted, provisional: state.provisional }
+    return {
+      plan,
+      record: recordMaterials(source.cast, source.style, plan.ledger, setupsOf(source.outline, source.chapterNumber)),
+      extracted: state.extracted,
+      provisional: state.provisional
+    }
   }
   const earlier = priorChaptersOf(source).filter((candidate) => candidate.number < next)
-  const openThreads = openThreadsOf(ledgerOf(earlier, state.extra))
+  const threads = {
+    openThreads: openThreadsOf(ledgerOf(earlier, state.extra)),
+    plannedSetups: setupsOf(source.outline, next)
+  }
   onProgress()
-  const record = await extractSafely(extract, chapter, openThreads)
+  const record = await extractSafely(extract, chapter, threads)
   onProgress()
   const fallback = record === null ? provisionalRecord(source.outline, next) : null
   const added = record !== null ? record : fallback
@@ -578,13 +624,18 @@ export async function buildChapterContext(
     style,
     cast,
     relations: buildRelationsForGemini(novel.relations),
+    bible: novel.bible === null ? null : toStoryBible(novel.bible),
+    writingNotes: novel.writing_notes,
     chapters: contextChapters(novel)
   }
+  // 記録の抽出 (費用がかかる) より前に止める。
+  const blocker = contextBlocker(source)
+  if (blocker !== null) return { ok: false, error: blocker }
   const contextWindow = payload.model === undefined ? null : await findContextWindow(env, payload.model)
   const editorModel = novel.editor_model
   const call = jsonCaller(env, editorModel)
   const narrator = recordNarrator(style, cast)
-  const extract: RecordExtractor = async (chapter, openThreads) => {
+  const extract: RecordExtractor = async (chapter, threads) => {
     const result = await extractAndSaveRecord(
       prisma,
       env,
@@ -596,7 +647,7 @@ export async function buildChapterContext(
         title: chapter.title,
         content: chapter.content
       },
-      { castNames: cast.map((member) => member.name), narrator, openThreads, plannedSetups: [] }
+      { castNames: cast.map((member) => member.name), narrator, ...threads }
     )
     return result.ok ? result.record : null
   }
@@ -613,7 +664,7 @@ export async function buildChapterContext(
       storagePrompt: resolved.plan.storagePrompt,
       title: entry.title,
       editorModel,
-      record: recordMaterials(cast, style, resolved.plan.ledger)
+      record: resolved.record
     }
   }
 }
@@ -627,9 +678,15 @@ export async function loadRecordMaterials(
   const novel = await getNovelWithChapters(prisma, payload.novelId)
   if (novel === null) return null
   const earlier = contextChapters(novel).filter((chapter) => chapter.number < payload.chapterNumber)
+  const outline = parseOutline(novel.outline)
   return {
     editorModel: novel.editor_model,
-    materials: recordMaterials(buildCastForGemini(novel.character_links), styleOf(novel), ledgerOf(earlier, new Map()))
+    materials: recordMaterials(
+      buildCastForGemini(novel.character_links),
+      styleOf(novel),
+      ledgerOf(earlier, new Map()),
+      outline === null ? [] : setupsOf(outline, payload.chapterNumber)
+    )
   }
 }
 

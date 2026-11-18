@@ -4,7 +4,9 @@ import {
   findChapterVersion,
   getNovelWithChapters,
   listChapterVersions,
+  parseStoredBible,
   parseStoredRecord,
+  saveBible,
   saveChapterRecord
 } from '@/lib/novel/repository'
 
@@ -58,6 +60,8 @@ function fakePrisma(rows: Row[]) {
           id: 'n1',
           chapters: sorted.map((r) => ({ id: r.id, chapter_number: r.chapter_number, version: r.version })),
           character_links: [],
+          bible: null,
+          writing_notes: null,
           relations: [],
           generation_costs: [],
           generation_job: null,
@@ -186,5 +190,64 @@ describe('parseStoredRecord', () => {
     expect(parseStoredRecord(null)).toBeNull()
     expect(parseStoredRecord('')).toBeNull()
     expect(parseStoredRecord('[]')).toBeNull()
+  })
+})
+
+describe('bible and writing_notes', () => {
+  const stored = {
+    premise: '核',
+    ending: '',
+    arcs: [],
+    world: { rules: [], terms: [] },
+    timeline: [],
+    addresses: [],
+    cast: [],
+    source_hash: 'abc'
+  }
+
+  function novelPrisma(fields: { bible: string | null; writing_notes: string | null }): PrismaClient {
+    return Object.assign(Object.create(null), {
+      novel: {
+        findUnique: async () => ({
+          id: 'n1',
+          chapters: [],
+          character_links: [],
+          relations: [],
+          generation_costs: [],
+          generation_job: null,
+          category: null,
+          ...fields
+        })
+      }
+    })
+  }
+
+  test('getNovelWithChapters reads a null writing_notes as empty and validates the bible', async () => {
+    const novel = await getNovelWithChapters(novelPrisma({ bible: JSON.stringify(stored), writing_notes: null }), 'n1')
+    expect(novel?.writing_notes).toBe('')
+    expect(novel?.bible).toEqual(stored)
+    const broken = await getNovelWithChapters(novelPrisma({ bible: '{oops', writing_notes: '擬音語なし' }), 'n1')
+    expect(broken?.bible).toBeNull()
+    expect(broken?.writing_notes).toBe('擬音語なし')
+  })
+
+  test('parseStoredBible fills defaults and rejects broken values', () => {
+    expect(parseStoredBible(JSON.stringify({ premise: 'だけ' }))).toMatchObject({ premise: 'だけ', source_hash: '' })
+    expect(parseStoredBible(null)).toBeNull()
+    expect(parseStoredBible('')).toBeNull()
+    expect(parseStoredBible(JSON.stringify({ addresses: [{ from: '', to: 'b', call: 'c' }] }))).toBeNull()
+  })
+
+  test('saveBible stores the JSON on the novel', async () => {
+    const updates: unknown[] = []
+    const prisma: PrismaClient = Object.assign(Object.create(null), {
+      novel: {
+        update: async (args: unknown) => {
+          updates.push(args)
+        }
+      }
+    })
+    await saveBible(prisma, 'n1', stored)
+    expect(updates).toEqual([{ where: { id: 'n1' }, data: { bible: JSON.stringify(stored) } }])
   })
 })

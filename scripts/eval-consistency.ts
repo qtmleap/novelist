@@ -140,7 +140,7 @@ type ChapterMetrics = {
 }
 
 // 小説の名簿の人物名 → 口調の例。バリエーションに口調の例があればそれ、無ければ本体のもの
-// (src/lib/novel/chapter-payload.ts の effectiveCharacter と同じ考え方)。
+// (src/lib/novel/chapter-context.ts の effectiveCharacter と同じ考え方)。
 function speechExamplesByName(novel: NovelWithChapters, characters: Character[]): Map<string, string[]> {
   return new Map(
     novel.cast.flatMap((member) => {

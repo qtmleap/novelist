@@ -1,6 +1,22 @@
 import type { Prisma, PrismaClient } from '@/generated/prisma/client'
-import type { CreateNovelInput, SaveCastInput } from '@/schemas/novel.dto'
+import { type CreateNovelInput, type SaveCastInput, type StoredBible, StoredBibleSchema } from '@/schemas/novel.dto'
 import { type ChapterRecord, ChapterRecordSchema } from '@/schemas/story.dto'
+
+// Novel.writing_notes は null 許容の列 (理由は schema.prisma の注記)。読むときはここで '' にそろえる。
+function withWritingNotes<T extends { writing_notes: string | null }>(row: T): T & { writing_notes: string } {
+  return { ...row, writing_notes: row.writing_notes === null ? '' : row.writing_notes }
+}
+
+// Novel.bible (JSON 文字列 | null) を検証して返す。未作成 (null) や壊れた値は null。
+export function parseStoredBible(raw: string | null): StoredBible | null {
+  if (raw === null || raw.length === 0) return null
+  try {
+    const result = StoredBibleSchema.safeParse(JSON.parse(raw))
+    return result.success ? result.data : null
+  } catch {
+    return null
+  }
+}
 
 // Chapter.record (JSON 文字列 | null) を検証して返す。未抽出 (null) や壊れた値は null。
 // 壊れた記録を後の章の【確定事項】に混ぜないため、ここで弾く。
@@ -16,7 +32,7 @@ export function parseStoredRecord(raw: string | null): ChapterRecord | null {
 
 // キャスト・関係・語り手は専用ページ (saveNovelCast) で管理するので本体作成では触らない。
 export async function createNovel(prisma: PrismaClient, input: CreateNovelInput) {
-  return prisma.novel.create({
+  const created = await prisma.novel.create({
     data: {
       title: input.title,
       genre: input.genre,
@@ -29,12 +45,14 @@ export async function createNovel(prisma: PrismaClient, input: CreateNovelInput)
       age_rating: input.age_rating,
       ending: input.ending,
       notes: input.notes,
+      writing_notes: input.writing_notes,
       editor_model: input.editor_model,
       writer_model: input.writer_model,
       category_id: input.category_id
     },
     include: { category: { select: { name: true } } }
   })
+  return withWritingNotes(created)
 }
 
 // 小説のキャスト (character_links) + 関係 + 語り手をまとめて置き換える。
@@ -74,6 +92,11 @@ export async function saveOutline(prisma: PrismaClient, id: string, outlineJson:
     where: { id },
     data: { outline: outlineJson }
   })
+}
+
+// 作品設計を保存する (作り直しも手動の編集も上書き)。章立てや本文には触れない。
+export async function saveBible(prisma: PrismaClient, id: string, stored: StoredBible) {
+  await prisma.novel.update({ where: { id }, data: { bible: JSON.stringify(stored) } })
 }
 
 // Chapter は append-only。再生成のたびに version をインクリメントして INSERT する。
@@ -241,7 +264,9 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
     .reduce((sum, row) => sum + row.cost_usd, 0)
 
   return {
-    ...novel,
+    ...withWritingNotes(novel),
+    // 作品設計 (検証済み。source_hash を含む)。未作成や壊れた値は null
+    bible: parseStoredBible(novel.bible),
     chapters,
     cast: novel.character_links.map((l) => ({
       character_id: l.character_id,
@@ -287,7 +312,7 @@ export async function stopGenerationJob(prisma: PrismaClient, novelId: string) {
 export async function listNovels(prisma: PrismaClient) {
   // position 昇順 (ユーザー手動並び)。未設定はすべて 0 なので created_at 新しい順でタイブレーク。
   // 一覧はカテゴリでグループ化して表示するが、グループ化はこの順序を各カテゴリ内で保つ。
-  return prisma.novel.findMany({
+  const novels = await prisma.novel.findMany({
     orderBy: [{ position: 'asc' }, { created_at: 'desc' }],
     select: {
       id: true,
@@ -303,6 +328,7 @@ export async function listNovels(prisma: PrismaClient) {
       pov_character_id: true,
       ending: true,
       notes: true,
+      writing_notes: true,
       editor_model: true,
       writer_model: true,
       outline: true,
@@ -312,6 +338,7 @@ export async function listNovels(prisma: PrismaClient) {
       updated_at: true
     }
   })
+  return novels.map(withWritingNotes)
 }
 
 // 小説ごとの生成済み本文の合計文字数 (各 chapter_number の最新 version のみ集計)。
@@ -400,7 +427,7 @@ export async function deleteCategory(prisma: PrismaClient, id: string) {
 
 // キャスト・関係・語り手は saveNovelCast で管理するので本体更新では触らない。
 export async function updateNovel(prisma: PrismaClient, id: string, input: CreateNovelInput) {
-  return prisma.novel.update({
+  const updated = await prisma.novel.update({
     where: { id },
     data: {
       title: input.title,
@@ -414,12 +441,14 @@ export async function updateNovel(prisma: PrismaClient, id: string, input: Creat
       age_rating: input.age_rating,
       ending: input.ending,
       notes: input.notes,
+      writing_notes: input.writing_notes,
       editor_model: input.editor_model,
       writer_model: input.writer_model,
       category_id: input.category_id
     },
     include: { category: { select: { name: true } } }
   })
+  return withWritingNotes(updated)
 }
 
 export async function deleteNovel(prisma: PrismaClient, id: string) {
