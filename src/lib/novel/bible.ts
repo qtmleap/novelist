@@ -188,13 +188,18 @@ const VARIANTS = new Map([
   ['歲', '歳']
 ])
 
-// 照合に使う文字列。NFKC (全角の英数字は半角、半角カタカナは全角) → 見えない文字の除去 → 異体字の置き換え。
-// 見えない文字を取り除くので、長さは元の文と変わりうる。locateMinorTerms の位置はこの文字列の中の位置。
+// 数字の桁区切りのカンマ (「1,000歳」「1,500歳」)。残すと「000歳」「500歳」と別の数字に読めて、0歳・1歳などと誤検出する。
+const THOUSANDS_COMMA = /(\d),(?=\d{3}(?!\d))/g
+
+// 照合に使う文字列。NFKC (全角の英数字は半角、半角カタカナは全角) → 見えない文字の除去 → 異体字の置き換え → 桁区切りのカンマの除去。
+// 取り除く文字があるので、長さは元の文と変わりうる。locateMinorTerms の位置はこの文字列の中の位置。
 export function normalizeForMinorScan(text: string): string {
   return Array.from(text.normalize('NFKC').replace(INVISIBLE, ''), (char) => {
     const variant = VARIANTS.get(char)
     return variant === undefined ? char : variant
-  }).join('')
+  })
+    .join('')
+    .replace(THOUSANDS_COMMA, '$1')
 }
 
 // 2 段目で取り除く文字: 空白 (NFKC で全角の空白も半角になっている)、中点、ハイフン類。
@@ -236,7 +241,8 @@ const MINOR_TERM_SOURCES = [
   '園児',
   '幼女',
   '女児',
-  '男児',
+  // 「九州男児」「日本男児」のように大人を指す決まった言い方は除く
+  '(?<!九州|日本|薩摩|土佐|江戸|博多|会津|大和|長州|浪速)男児',
   '美少女',
   '美少年',
   '高等部',
@@ -245,7 +251,10 @@ const MINOR_TERM_SOURCES = [
   '低学年',
   '高学年',
   '未就学',
-  '学童',
+  // 「学童保育の指導員」は職業・分野の語なので除く
+  '学童(?!保育|クラブ|指導)',
+  // 背景や職業にも「セーラー服」と書けば、制服姿の未成年を持ち込む (外見の欄だけでは見逃す)
+  'セーラー服',
   // 「児童文学作家」「幼児教育」「児童福祉士」のような職業・分野の語は成人の設定として普通にあるので除く
   '(?:児童|幼児)(?!文学|書|館|福祉|養護|相談|心理|指導|発達|向け|文庫|図書|手当|劇|雑誌|教育|教室|クラブ|デイ|ケア|施設|保育|精神|支援|自立|番組|用品)',
   // かな書き
@@ -265,6 +274,9 @@ const MINOR_TERM_SOURCES = [
   '高(?:校|等学校)の?[1-3一二三]年(?!間)',
   '中学校?の?[1-3一二三]年(?!間)',
   '小学校?の?[1-6一二三四五六]年(?!間)',
+  // 学校名の無い学年と、子供を指す語の組み合わせ (「5年生の女の子」「6年生の少女」)。
+  // 「大学3年生の女の子」「専門学校2年生の男子」は成人なので、直前が大学・大学院・専門学校・短大のときは除く
+  '(?<![\\d十百])(?<!(?:大学院?|専門学校|短期大学|短大)の?)[1-6一二三四五六]年生の?(?:女の子|男の子|少女|少年|女子|男子|子供|子ども|女児|男児)',
   // 学年: 短い書き方
   `${GRADE_BEFORE}(?:高[1-3一二三]|中[1-3一二三]|小[1-6一二三四五六])${GRADE_AFTER}`,
   // 年代の語。「二十代」「三十代」「第10代」「十代目」は十代ではない
@@ -272,7 +284,7 @@ const MINOR_TERM_SOURCES = [
   'ティーン'
 ]
 
-// 外見の欄だけで見る語。職業や背景では「少女漫画家」「少年野球のコーチ」「幼い頃」のような語があるため。
+// 外見の欄 (と、指示の欄) だけで見る語。職業や背景では「少女漫画家」「少年野球のコーチ」「幼い頃」のような語があるため。
 // 「制服」単独は入れない (成人の職業の制服がある)。長い語を先に並べる (「幼児体型」を「幼児」より先に当てる)。
 const MINOR_APPEARANCE_SOURCES = [
   '幼児体型',
@@ -292,9 +304,12 @@ const MINOR_APPEARANCE_SOURCES = [
   '子供みたい',
   '子どもみたい',
   'こどもみたい',
-  'セーラー服',
   '学ラン',
   '学生服',
+  // 学校の制服 (「高校の制服姿にする」)。「制服」単独、「警察官の制服」「会社の制服」は通す。
+  // 背景では見ない (「高校の制服を着ていた頃」のような経歴を落とさない)。
+  // 「警察学校」「看護学校」「専門学校」「大学校」「自衛隊学校」などの成人の学校は除く
+  '(?:高等学校|高校|中学校?|小学校?|(?<!警察|消防|看護|専門|大|自衛隊|養成|訓練|職業)(?:学校|学園))の?制服',
   'ランドセル',
   'スクール水着',
   'ブルマ(?!ン)',
@@ -304,12 +319,17 @@ const MINOR_APPEARANCE_SOURCES = [
 
 // 英字の語。英単語の一部 (jacket、fourteen) や拡張子 (.js) に当たらないよう、前後が英字でないときだけ。大文字・小文字は区別しない。
 // 「high school」単独は入れない (日本語の「高校」単独と同じ扱い)。
+//   JK は常に拾う。JS と JC は「JavaScript」「JS/TS」「JSエンジニア」の略と紛れるので、後ろが数字 (JS5) のとき、
+//   または前後がひらがな・漢字のとき (「彼女はJSだ」) だけ拾う。カタカナは技術用語 (エンジニア、フロント) と続くので、前後に数えない。
+//   「minor」単独は「Minor Arcana」のような語があるので外し、minors、a minor、underage だけ拾う。
 const MINOR_LATIN_SOURCES = [
-  '(?<![A-Za-z.])(?:JK|JC|JS)(?![A-Za-z])',
+  '(?<![A-Za-z.])JK(?![A-Za-z])',
+  '(?<![A-Za-z.])(?:JS|JC)(?=\\d)',
+  '(?<=[\\p{Script=Hiragana}\\p{Script=Han}])(?:JS|JC)(?=[\\p{Script=Hiragana}\\p{Script=Han}])',
   '(?<![A-Za-z])teen(?:s|age|agers?)?(?![A-Za-z])',
   '(?<![A-Za-z])school(?:girl|boy)s?(?![A-Za-z])',
   '(?<![A-Za-z])(?:high|middle)[ \\t]+school(?:er|[ \\t]+student)s?(?![A-Za-z])',
-  '(?<![A-Za-z])(?:underage|minors?)(?![A-Za-z])',
+  '(?<![A-Za-z])(?:underage|minors|a[ \\t]+minor)(?![A-Za-z])',
   '(?<![A-Za-z])(?:loli(?:ta)?|shota)s?(?![A-Za-z])'
 ]
 
@@ -321,13 +341,16 @@ const MINOR_LATIN_TERMS = new RegExp(MINOR_LATIN_SOURCES.join('|'), 'giu')
 //   数字は最長で読む (「118歳」は 118、「二十歳」は 20。「十歳」とは読まない)。
 //   数字の途中に空白がある (「十 四 歳」) と「四 歳」だけを読むが、18 未満として拾う側に倒れるので許す。
 //   空白を直前の数字とつなげて読むと、番号つきの一覧 (「1 14歳の春」) の 14 歳を読み落とす。範囲や並び (「17〜18歳」「14、15歳」) は最小値で見る。
-//   18 未満なら未成年を指す表現。「18歳未満」「20歳以下」のように未満・以下が付く 18〜20 も (未成年を含むので) 拾う。
+//   18 未満なら未成年を指す表現。「18歳未満」「20歳以下」のように、18 歳に届かないことを表す語 (未満、以下、に満たない、
+//   を迎えていない、になる前、に届かない、まで) が付く 18〜20 も (未成年を含むので) 拾う。
+//   「25、6歳」のように、「、」の後ろが 1 桁で前の数が 2 桁以上なら、前の数の十の位を補って読む (25 と 26)。
+//   「ちゃい」は「歳」の幼児語 (「14ちゃい」)。
 //   年齢そのものではない表現は除く: 年齢差 (「3歳年上」「5歳年下」「2歳上」「10歳差」「3歳違い」「5歳離れた」「3歳若い」)。
 const AGE_NUMBER = '(?:\\d+(?:\\.\\d+)?|[〇零一二三四五六七八九十百千万]+)'
 const AGE_JOINER = '(?:[〜~\\-–−]|から|か|、|,|または|もしくは)'
 const AGE_EXPRESSION = new RegExp(
-  `(?<![\\d.〇零一二三四五六七八九十百千万])(${AGE_NUMBER}(?:[ \\t]*${AGE_JOINER}[ \\t]*${AGE_NUMBER})*)[ \\t]*(?:歳|才|さい)` +
-    '(未満|以下|に満たない)?' +
+  `(?<![\\d.〇零一二三四五六七八九十百千万])(${AGE_NUMBER}(?:[ \\t]*${AGE_JOINER}[ \\t]*${AGE_NUMBER})*)[ \\t]*(?:歳|才|さい|ちゃい)` +
+    '(未満|以下|に満たない|を迎えていない|になる前|に届かない|まで)?' +
     '(?!(?:ほど|くらい|ぐらい|程度)?(?:年上|年下|年長|年少|上|下|差|の差|違|離れ|若|老))',
   'gu'
 )
@@ -368,11 +391,38 @@ export type MinorMatch = { term: string; start: number; end: number }
 const MINOR_AGE_LIMIT = 18
 const MINOR_QUALIFIED_AGE_LIMIT = 20
 
+// 「25、6」の「6」のように、前の数の十の位を補う対象 (直前の数との間が「、」か「,」だけで、1 桁)。
+const SINGLE_DIGIT = /^[1-9一二三四五六七八九]$/
+const LIST_COMMA = /^[ \t]*[、,][ \t]*$/
+
+type AgeReading = { ages: number[]; last: { value: number; end: number } | null }
+
+// 数字の並び (「25、6」「17〜18」) を、それぞれの年齢に読む。読めない表記 (百以上、万) は飛ばす。
+function readAges(list: string): number[] {
+  const numbers = Array.from(list.matchAll(AGE_NUMBER_ONLY))
+  return numbers.reduce<AgeReading>(
+    (reading, found) => {
+      const parsed = parseCount(found[0])
+      if (parsed === null) {
+        return { ages: reading.ages, last: null }
+      }
+      const last = reading.last
+      const value =
+        last !== null &&
+        last.value >= 10 &&
+        SINGLE_DIGIT.test(found[0]) &&
+        LIST_COMMA.test(list.slice(last.end, found.index))
+          ? Math.floor(last.value / 10) * 10 + parsed
+          : parsed
+      return { ages: [...reading.ages, value], last: { value, end: found.index + found[0].length } }
+    },
+    { ages: [], last: null }
+  ).ages
+}
+
 function scanAges(text: string): MinorMatch[] {
   return Array.from(text.matchAll(AGE_EXPRESSION)).flatMap((match) => {
-    const ages = Array.from(match[1].matchAll(AGE_NUMBER_ONLY), (found) => parseCount(found[0])).filter(
-      (age): age is number => age !== null
-    )
+    const ages = readAges(match[1])
     if (ages.length === 0) {
       return []
     }
@@ -390,15 +440,33 @@ const scanPattern = (text: string, pattern: RegExp, format: (matched: string) =>
     end: match.index + match[0].length
   }))
 
-// 英字の語は大文字にそろえる (JK、TEENAGER。空白は 1 つにする)。
+// 英字の語は大文字にそろえる (JK、TEENAGER、14 YEARS OLD。空白は 1 つにする)。
 const formatLatin = (matched: string): string => matched.toUpperCase().replace(/[ \t]+/g, ' ')
+
+// 年齢の英語表記: 「14yo」「14 y/o」「14 years old」「14-year-old」「age 14」「aged 14」。18 未満だけ拾う。
+const ENGLISH_AGE = new RegExp(
+  '(?<![A-Za-z\\d.])(\\d{1,3})[ \\t]*-?[ \\t]*(?:y/o|yo|(?:years?|yrs?)[ \\t-]*old)(?![A-Za-z])' +
+    '|(?<![A-Za-z])aged?[ \\t:]*(\\d{1,3})(?!\\d)',
+  'giu'
+)
+
+function scanEnglishAges(text: string): MinorMatch[] {
+  return Array.from(text.matchAll(ENGLISH_AGE)).flatMap((match) => {
+    const digits = match[1] === undefined ? match[2] : match[1]
+    return Number(digits) < MINOR_AGE_LIMIT
+      ? [{ term: formatLatin(match[0]), start: match.index, end: match.index + match[0].length }]
+      : []
+  })
+}
 
 const byStart = (a: MinorMatch, b: MinorMatch): number => a.start - b.start
 
 // normalized (normalizeForMinorScan 済み) の中の語と年齢の表現。latin が false なら英字の語は見ない。
 function scanMinor(normalized: string, appearance: boolean, latin: boolean): MinorMatch[] {
   const terms = scanPattern(normalized, appearance ? MINOR_TERMS_WITH_APPEARANCE : MINOR_TERMS, (matched) => matched)
-  const latinTerms = latin ? scanPattern(normalized, MINOR_LATIN_TERMS, formatLatin) : []
+  const latinTerms = latin
+    ? [...scanPattern(normalized, MINOR_LATIN_TERMS, formatLatin), ...scanEnglishAges(normalized)]
+    : []
   return [...terms, ...latinTerms, ...scanAges(normalized)].sort(byStart)
 }
 

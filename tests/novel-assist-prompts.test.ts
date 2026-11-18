@@ -956,6 +956,8 @@ describe('buildBiblePrompt: 成人指定', () => {
       '生徒会',
       '高等部',
       '中等部',
+      // 背景や職業に書いても落ちる (外見の欄だけの語ではない)
+      'セーラー服',
       '十代',
       '10代',
       'ティーン',
@@ -979,10 +981,14 @@ describe('buildBiblePrompt: 成人指定', () => {
   test('18 歳未満の年齢の書き方は、すべて検証で不合格になる', () => {
     const line = ruleLine('成人指定', '書かない書き方: ')
     expect(line).toBe(
-      '- 18歳未満の年齢も、どの項目にも書かない。書かない書き方: 「14歳」「十四才」「8歳で」「18歳未満」「20歳以下」。過去の出来事は、年齢ではなく時期で書く。'
+      '- 18歳未満の年齢も、どの項目にも書かない。書かない書き方: 「14歳」「十四才」「8歳で」「18歳未満」「20歳以下」「20歳になる前」。過去の出来事は、何歳まで・何歳になる前のように年齢で区切らず、時期で書く。'
     )
     for (const term of quoted(line)) {
       expect(findMinorTerms(term)).not.toEqual([])
+    }
+    // 18〜20 歳で区切る言い方は、未成年を含むので落ちる
+    for (const phrase of ['20歳まで施設で育った', '18歳になる前に上京した', '18歳を迎えていない', '18歳に届かない']) {
+      expect(findMinorTerms(phrase)).not.toEqual([])
     }
     // レビューで見つかった、年齢の欄と別に年齢を書く形
     expect(findMinorTerms('見た目は12歳ほど', { appearance: true })).not.toEqual([])
@@ -1043,7 +1049,6 @@ describe('buildBiblePrompt: 成人指定', () => {
       'あどけない',
       '童顔',
       '子供っぽい',
-      'セーラー服',
       '学ラン',
       '学生服',
       'ランドセル'
@@ -1060,8 +1065,18 @@ describe('buildBiblePrompt: 成人指定', () => {
     for (const word of ['体操服', 'スクール水着', 'ブルマ', '通学帽']) {
       expect(buildBiblePrompt(bibleInput({ style: adultStyle('R18') })).system).not.toContain(word)
     }
-    // 「制服」単独は通る (成人の職業の制服がある)
-    expect(findMinorTerms('制服', { appearance: true })).toEqual([])
+    // 規則の「学校の制服」は、検証が外見の欄で落とす形と合っている。「制服」単独や成人の学校・職業の制服は通る
+    for (const phrase of ['学校の制服', '高校の制服', '中学の制服']) {
+      expect(findMinorTerms(phrase, { appearance: true })).not.toEqual([])
+    }
+    for (const phrase of ['制服', '警察学校の制服', '会社の制服']) {
+      expect(findMinorTerms(phrase, { appearance: true })).toEqual([])
+    }
+    // 背景の欄では、学校の制服の経歴は通る (外見の欄だけの形)
+    expect(findMinorTerms('高校の制服を着ていた頃')).toEqual([])
+    // 「セーラー服」は外見の行には置かない (どの欄でも落ちるので、【成人指定】の書かない語にある)
+    expect(line).not.toContain('セーラー服')
+    expect(findMinorTerms('セーラー服を着て通っていた')).not.toEqual([])
     // 「幼い頃」は背景では通るが、外見の欄では落ちる。「子供の頃」はどちらも通る
     expect(ruleLine('成人の人物設定（cast）', '「幼い頃」')).toBe(
       '- appearance では「幼い頃」も使えない。過去のことは「子供の頃」と書く。'
