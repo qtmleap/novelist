@@ -318,17 +318,27 @@ function bibleSkeleton(flags: BibleFlags): string {
 const BIBLE_ROLE =
   'あなたは小説の編集者として、執筆の前に作品全体の設計を作る。この設計は章立てと全ての章の執筆に同じものが渡され、設定・呼称・時系列を章をまたいで揃える基準になる。'
 
-// 成人指定 (R15 / R18) の作品の原則。名簿が無くても出す。
-const BIBLE_ADULT_PRINCIPLE =
-  'この作品の登場人物は全員18歳以上の成人である。設計のどの項目にも未成年の人物を置かない。設定に高校以下の学校や学年が出てくる場合は大学か職場に置き換え、premise、world、timeline もそれに合わせて書く。'
+// 成人指定 (R15 / R18) の作品の規則。名簿が無くても出す。
+// 作品設計のプロンプトには、利用者が書いた原文 (世界観・設定、人物の設定、関係、口調の例) がそのまま渡る。
+// 読み替えの指示は、その全部にかける。
+// 後処理 (bible.ts の validateAdultCast / validateAdultBibleText) は、未成年を指す語が残った設計を保存しない
+// (1 回やり直し、それでも残れば作品設計の生成が失敗する)。どう書けば通るかが分かるよう、語を具体的に挙げる。
+// 語を並べると出力に写される危険もあるが、ここでは検証に落ちる書き方を示すほうを取る。
+// 「書かない語」の行の「」の語はすべて bible.ts の findMinorTerms に当たり、「書いてよい」行の語は当たらない (テストで確かめる)。
+const BIBLE_ADULT_RULES = [
+  'この作品の登場人物は全員18歳以上の成人である。資料のどこか（世界観・設定、登場人物、関係、口調の例）に未成年を連想させる記述があっても、成人（大学生または社会人）として読み替えて設計する。設計のどの項目にも、未成年の人物を置かない。',
+  '設定に高校以下の学校や学年が出てくるときは、大学か職場に置き換える。学校の試験、行事、部活動なども、大学や職場のものに置き換えて書く。',
+  '出力のどの項目にも、未成年であることを指す語を書かない（1つでも残ると、この設計は採用されない）。書かない語: 人を指す「高校生」「中学生」「小学生」「女子高生」「未成年」「児童」「幼児」「美少女」「美少年」、年代を指す「十代」「10代」「ティーン」、学年の書き方（「高校2年」「中学3年生」「高2」「中1」など）、これらの略語や俗語。',
+  '過去の経歴に触れるときも、上の語は使わない。書いてよい言い方: 「学生時代」「高校時代」「中学時代」「若い頃」「子供の頃」「大学に入る前」。「高校教師」「高校を卒業後」のように、「高校」「中学」という語そのものは使ってよい。'
+]
 
 // 成人としての人物設定の書き方。cast は出力の先頭に置く (成人としての年齢と職業を先に決めさせ、後の項目をそれに合わせさせる)。
 // ここで書かせた文面は、章立てと本文のプロンプトで辞典の原文の代わりに使われる (bible.ts の applyBibleCast)。
 const BIBLE_ADULT_CAST_RULES = [
   '【登場人物】の全員について、年齢（age）、職業（occupation）、外見（appearance）、背景（background）を、18歳以上の成人として書き直す。',
-  // bible.ts の validateAdultCast は、年齢が数字で読めて 18 以上でなければ作品設計を保存しない。
-  'age は18以上の年齢を、算用数字だけで書く。「歳」などの単位や説明を付けず、漢数字や「成人」のような言葉でも書かない。',
-  '未成年を連想させる記述（学年、制服、「少女」「少年」のように十代以下を指す語、幼さを強調する描写）を残さない。年齢相応の大人として書く。',
+  // bible.ts の parseExactAge は「数字と、任意の 歳 / 才」だけを年齢として読む。説明つきの値は不合格になる。
+  'age は18以上の年齢を、算用数字だけで書く。「18歳以上」「20代」「二十歳」「約20」のように、数字以外の語を足したり、幅のある書き方をしたりしない。',
+  'occupation、appearance、background にも、【成人指定】の書かない語を使わない。appearance には「少女」「少年」も書かない。制服や、幼さを強調する描写を残さず、年齢相応の大人として書く。',
   'appearance と background は、本文を書くときに元の設定の代わりに使われる。未成年を連想させる部分だけを直し、性格、能力、経歴、他の人物との関わりは元の内容を落とさずに書く。',
   '口調と一人称は元の設定をそのまま使うので、ここには書かない。'
 ]
@@ -339,8 +349,7 @@ function bibleSystem(flags: BibleFlags): string {
     '入力に無い固有名詞や設定は、物語に欠かせないものだけを最小限決める。',
     '曖昧な書き方で残さず、1つに決めて書く。後の章はここに書かれたとおりに書く。',
     '三人称の常体で、事実として書く。宣伝文のような煽りや、語り手の一人称では書かない。',
-    flags.hasRoster ? '人物の名前は名簿の表記で書く。' : '',
-    flags.adult ? BIBLE_ADULT_PRINCIPLE : ''
+    flags.hasRoster ? '人物の名前は名簿の表記で書く。' : ''
   ].filter((line) => line.length > 0)
   const fields = [
     'premise: 物語の核。誰が何を求め、何がそれを妨げるかを書く。',
@@ -362,6 +371,7 @@ function bibleSystem(flags: BibleFlags): string {
   ]
   const sections = renderSections([
     { heading: '設計の原則', body: bullets(principles) },
+    { heading: '成人指定', body: flags.adult ? bullets(BIBLE_ADULT_RULES) : '' },
     { heading: '成人の人物設定（cast）', body: flags.adultCast ? bullets(BIBLE_ADULT_CAST_RULES) : '' },
     { heading: '各項目の書き方', body: bullets(fields) },
     { heading: '呼称表（addresses）', body: flags.hasPairs ? bullets(addresses) : '' },
@@ -491,6 +501,8 @@ type ReviewFlags = {
   hasAddressPatterns: boolean
   // この章の計画に「張る伏線」がある
   hasSetups: boolean
+  // 成人指定 (R15 / R18) の作品
+  adult: boolean
 }
 
 const REVIEW_ROLE =
@@ -520,7 +532,15 @@ function reviewPrinciples(flags: ReviewFlags): string[] {
     flags.hasLedger
       ? '【確定事項】の「直前の章の終わり」から時間や場所が移っていること自体は、食い違いではない（章の間で時間は進む）。'
       : '',
-    '【この章の計画】は、この章で書く予定だった内容である。本文に計画に無い細部があることは、食い違いではない。'
+    '【この章の計画】は、この章で書く予定だった内容である。本文に計画に無い細部があることは、食い違いではない。',
+    // 成人指定の作品では、資料 (成人指定に変える前に書かれた章の記録、原文のままの設定) に未成年を連想させる記述が
+    // 残っていることがある。本文が成人として書いているのを、資料との食い違いとして挙げさせない。
+    flags.adult
+      ? 'この作品の登場人物は全員18歳以上の成人である。資料のどこかに未成年を連想させる記述（高校生、学年、制服、十代など）があっても、成人（大学生または社会人）として読み替える。本文が人物を成人として書いていることは、食い違いではない。'
+      : '',
+    flags.adult
+      ? '本文が人物を未成年として書いている箇所（18歳未満の年齢、学年、未成年を指す語）は、setting として挙げる。'
+      : ''
   ].filter((rule) => rule.length > 0)
 }
 
@@ -618,7 +638,8 @@ export function buildReviewPrompt(input: ReviewPromptInput): Prompt {
       hasAddresses: addresses.length > 0,
       hasAddressPatterns: cast.some((member) => member.address_others.length > 0),
       // 計画の節に実際に「張る伏線」の行が出ているか (種別の説明が指す小見出しと揃える)
-      hasSetups: plan.includes('\n  張る伏線:\n')
+      hasSetups: plan.includes('\n  張る伏線:\n'),
+      adult: input.style.age_rating !== undefined && isAdultRating(input.style.age_rating)
     }),
     user: renderSections(sections)
   }

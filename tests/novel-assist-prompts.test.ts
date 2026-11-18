@@ -11,7 +11,7 @@ import {
   type RecordPromptInput,
   type ReviewPromptInput
 } from '@/lib/novel/assist-prompts'
-import { requiredAddressPairs } from '@/lib/novel/bible'
+import { findMinorTerms, parseExactAge, requiredAddressPairs } from '@/lib/novel/bible'
 import {
   bibleJsonSchema,
   hasAddressPairs,
@@ -893,10 +893,12 @@ describe('buildBiblePrompt: 呼び方の指定', () => {
 describe('buildBiblePrompt: 成人指定', () => {
   const adultStyle = (age_rating: string): StyleParams => ({ ...style, age_rating })
 
-  test('全年齢では cast を求めない', () => {
+  test('全年齢では cast を求めず、成人指定の規則も入れない', () => {
     const { system, user } = buildBiblePrompt(bibleInput())
     expect(system).not.toContain('cast')
     expect(system).not.toContain('成人')
+    expect(system).not.toContain('読み替え')
+    expect(system).not.toContain('高校生')
     expect(user).not.toContain('cast')
     expect(keysOf(skeletonOf(system))).toEqual(['premise', 'ending', 'arcs', 'world', 'timeline', 'addresses'])
   })
@@ -904,12 +906,11 @@ describe('buildBiblePrompt: 成人指定', () => {
   test('R15 / R18 では、全員を 18 歳以上の成人として書き直させる', () => {
     for (const rating of ['R15', 'R18']) {
       const { system, user } = buildBiblePrompt(bibleInput({ style: adultStyle(rating) }))
+      expect(headings(system)).toContain('成人指定')
       expect(headings(system)).toContain('成人の人物設定（cast）')
       expect(system).toContain('この作品の登場人物は全員18歳以上の成人である')
       expect(system).toContain('【登場人物】の全員について')
       expect(system).toContain('age は18以上の年齢を、算用数字だけで書く')
-      expect(system).toContain('「歳」などの単位や説明を付けず、漢数字や「成人」のような言葉でも書かない')
-      expect(system).toContain('未成年を連想させる記述')
       expect(system).toContain('口調と一人称は元の設定をそのまま使うので、ここには書かない')
       expect(keysOf(skeletonOf(system))[0]).toBe('cast')
       expect(section(user, '作品情報')).toContain(`年齢指定: ${rating}（`)
@@ -918,10 +919,89 @@ describe('buildBiblePrompt: 成人指定', () => {
     }
   })
 
-  test('成人指定で名簿が空なら、cast は求めず、成人の原則だけ残す', () => {
+  test('読み替えの指示を、渡した資料の全部にかける', () => {
+    const body = section(buildBiblePrompt(bibleInput({ style: adultStyle('R15') })).system, '成人指定')
+    expect(body.split('\n')[1]).toBe(
+      '- この作品の登場人物は全員18歳以上の成人である。資料のどこか（世界観・設定、登場人物、関係、口調の例）に未成年を連想させる記述があっても、成人（大学生または社会人）として読み替えて設計する。設計のどの項目にも、未成年の人物を置かない。'
+    )
+    // あらすじの学校の設定を、物語の核や時系列にそのまま写させない
+    expect(body).toContain('設定に高校以下の学校や学年が出てくるときは、大学か職場に置き換える。')
+    expect(body).toContain('学校の試験、行事、部活動なども、大学や職場のものに置き換えて書く。')
+  })
+
+  // 後処理 (bible.ts) は、未成年を指す語が残った設計を保存しない。規則に挙げる語を、実際の検証と突き合わせる。
+  test('書かない語はすべて検証で不合格になる語、書いてよい言い方はすべて検証を通る', () => {
+    const lines = section(buildBiblePrompt(bibleInput({ style: adultStyle('R18') })).system, '成人指定').split('\n')
+    const quoted = (line: string | undefined): string[] =>
+      line === undefined ? [] : [...line.matchAll(/「(.+?)」/g)].map((found) => found[1])
+    const ngLine = lines.find((line) => line.includes('書かない語: '))
+    const okLine = lines.find((line) => line.includes('書いてよい言い方: '))
+    const ng = quoted(ngLine)
+    const ok = quoted(okLine)
+    expect(ng).toEqual([
+      '高校生',
+      '中学生',
+      '小学生',
+      '女子高生',
+      '未成年',
+      '児童',
+      '幼児',
+      '美少女',
+      '美少年',
+      '十代',
+      '10代',
+      'ティーン',
+      '高校2年',
+      '中学3年生',
+      '高2',
+      '中1'
+    ])
+    for (const term of ng) {
+      expect(findMinorTerms(term)).not.toEqual([])
+    }
+    expect(ok).toEqual([
+      '学生時代',
+      '高校時代',
+      '中学時代',
+      '若い頃',
+      '子供の頃',
+      '大学に入る前',
+      '高校教師',
+      '高校を卒業後',
+      '高校',
+      '中学'
+    ])
+    for (const phrase of ok) {
+      expect(findMinorTerms(phrase, { appearance: true })).toEqual([])
+    }
+    expect(ngLine).toContain('1つでも残ると、この設計は採用されない')
+  })
+
+  test('年齢と人物設定の書式を、検証に合わせて具体的に示す', () => {
+    const body = section(buildBiblePrompt(bibleInput({ style: adultStyle('R15') })).system, '成人の人物設定（cast）')
+    const ageLine = body.split('\n').find((line) => line.startsWith('- age は'))
+    expect(ageLine).toBe(
+      '- age は18以上の年齢を、算用数字だけで書く。「18歳以上」「20代」「二十歳」「約20」のように、数字以外の語を足したり、幅のある書き方をしたりしない。'
+    )
+    // 例に挙げた書き方は、どれも検証で年齢として読めない
+    for (const bad of [...(ageLine === undefined ? '' : ageLine).matchAll(/「(.+?)」/g)].map((found) => found[1])) {
+      expect(parseExactAge(bad)).toBeNull()
+    }
+    expect(parseExactAge('20')).toBe(20)
+    expect(body).toContain('occupation、appearance、background にも、【成人指定】の書かない語を使わない。')
+    // 外見の欄だけ、検証が「少女」「少年」も見る
+    expect(body).toContain('appearance には「少女」「少年」も書かない。')
+    expect(findMinorTerms('少女', { appearance: true })).not.toEqual([])
+    expect(findMinorTerms('少年', { appearance: true })).not.toEqual([])
+    expect(body).toContain('性格、能力、経歴、他の人物との関わりは元の内容を落とさずに書く。')
+  })
+
+  test('成人指定で名簿が空なら、cast は求めず、成人指定の規則だけ残す', () => {
     const { system, user } = buildBiblePrompt(bibleInput({ style: adultStyle('R18'), cast: [], relations: [] }))
     expect(headings(system)).not.toContain('成人の人物設定（cast）')
+    expect(headings(system)).toContain('成人指定')
     expect(system).toContain('この作品の登場人物は全員18歳以上の成人である')
+    expect(system).toContain('書かない語: ')
     expect(keysOf(skeletonOf(system))).toEqual(['premise', 'ending', 'arcs', 'world', 'timeline'])
     expect(user).not.toContain('cast')
   })
@@ -1249,6 +1329,28 @@ describe('buildReviewPrompt: system の規則', () => {
     expect(withoutLedger).toContain(
       '【登場人物】の設定は、物語の始まりの時点のものである。この章の中で変わること（外見、持ち物、関係）は、食い違いではない。'
     )
+  })
+
+  test('成人指定: 資料を成人として読み替え、本文が未成年として書いている箇所は挙げさせる', () => {
+    for (const rating of ['R15', 'R18']) {
+      const adult = buildReviewPrompt(reviewInput({ style: { ...style, age_rating: rating } })).system
+      expect(adult).toContain(
+        'この作品の登場人物は全員18歳以上の成人である。資料のどこかに未成年を連想させる記述（高校生、学年、制服、十代など）があっても、成人（大学生または社会人）として読み替える。本文が人物を成人として書いていることは、食い違いではない。'
+      )
+      expect(adult).toContain(
+        '本文が人物を未成年として書いている箇所（18歳未満の年齢、学年、未成年を指す語）は、setting として挙げる。'
+      )
+      // 資料が無くても入る
+      expect(buildReviewPrompt({ ...bareReview(), style: { ...style, age_rating: rating } }).system).toContain(
+        'この作品の登場人物は全員18歳以上の成人である。'
+      )
+    }
+    // 全年齢、指定なしでは入れない
+    for (const age_rating of ['全年齢', undefined]) {
+      const plain = buildReviewPrompt(reviewInput({ style: { ...style, age_rating } })).system
+      expect(plain).not.toContain('成人')
+      expect(plain).not.toContain('読み替え')
+    }
   })
 
   test('quote は一字一句そのまま、reason はそれだけで直し方が分かる文', () => {

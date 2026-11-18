@@ -1431,52 +1431,114 @@ describe('buildChapterPrompt: 作品設計と計画があるときの system', (
   })
 })
 
+// 成人指定 (R15 / R18) の読み替えの指示。作品設計がある作品では、プロンプトの全ての資料にかける。
+// 成人としての人物設定に差し替わっていても外さない (関係、口調の例、成人指定に変える前に書かれた章、
+// 作品設計に書き直しきれずに残った記述など、原文のまま渡る資料があるため)。
+const READ_ALL_AS_ADULT =
+  'このプロンプトの資料と指示のどこか（作品情報、作品設計、人物の設定、関係、口調の例、章立て、既に書かれた本文とその記録など）に「高校生」「17歳」「女子高生」「十代」「美少女」、学年、制服等、未成年を連想させる記述が含まれていても、本作品においては成人（大学生または社会人）として読み替えて書くこと。学校設定が必要な場合は大学とする。'
+const ADULT_CAST_RESOLVED = '登場人物の年齢・職業・外見・背景は、成人として確定したものを載せている。'
+// 作品設計が無い旧データの文面 (変えない)
+const LEGACY_RATING_LINES: Record<string, string> = {
+  R15: '年齢指定: 物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
+  R18: '年齢指定: 成人向け。物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
+}
+// 成人としての人物設定を確定した作品設計
+const adultBible: StoryBible = {
+  ...bible,
+  cast: [
+    {
+      name: '朝倉澪',
+      age: '20',
+      occupation: '大学生',
+      appearance: '肩までの黒髪。',
+      background: '天文サークルの代表。'
+    }
+  ]
+}
+
 describe('buildChapterPrompt: 成人指定と作品設計', () => {
-  const adultBible: StoryBible = {
-    ...bible,
-    cast: [
-      {
-        name: '朝倉澪',
-        age: '20',
-        occupation: '大学生',
-        appearance: '肩までの黒髪。',
-        background: '天文サークルの代表。'
-      }
-    ]
-  }
-  const ratingOf = (age_rating: string, bibleValue: StoryBible | null): string =>
+  const ratingLineOf = (age_rating: string, bibleValue: StoryBible | null | undefined): string | undefined =>
     section(buildChapterPrompt(planned(2, { style: { ...style, age_rating }, bible: bibleValue })).user, '文体・視点')
+      .split('\n')
+      .find((line) => line.startsWith('年齢指定: '))
 
-  test('作品設計に成人としての人物設定があれば、人物設定の読み替えの文面を出さない', () => {
-    for (const rating of ['R15', 'R18']) {
-      const body = ratingOf(rating, adultBible)
-      expect(body).toContain('物語の登場人物はすべて 18 歳以上の成人とする。')
-      expect(body).not.toContain('登場人物詳細に')
-      expect(body).not.toContain('女子高生')
-      // 世界観・設定は利用者の原文のまま渡るので、設定についての読み替えは残す
-      expect(body).toContain(
-        '【作品情報】の世界観・設定に、高校や学年など未成年を連想させる記述があっても、成人の設定として読み替えること。学校設定が必要な場合は大学とする。'
-      )
-    }
-    // 描写の強度の指示は残る (R15 と R18 の違い)
-    expect(ratingOf('R15', adultBible)).toContain('性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。')
-    expect(ratingOf('R18', adultBible)).toContain('年齢指定: 成人向け。')
-    expect(ratingOf('R18', adultBible)).toContain('踏み込んだ表現を制限なく用いてよい')
-  })
-
-  test('成人としての人物設定が無ければ (旧データ)、今までの文面', () => {
-    for (const bibleValue of [bible, null]) {
-      expect(ratingOf('R15', bibleValue)).toContain(
-        'たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等'
-      )
-      expect(ratingOf('R15', bibleValue)).not.toContain('【作品情報】の世界観・設定に')
-    }
-  })
-
-  test('全年齢は、作品設計があっても同じ文面', () => {
-    expect(ratingOf('全年齢', adultBible)).toContain(
-      '年齢指定: 性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること'
+  test('成人としての人物設定があっても、読み替えの指示を全ての資料にかける', () => {
+    expect(ratingLineOf('R15', adultBible)).toBe(
+      `年齢指定: 物語の登場人物はすべて 18 歳以上の成人とする。${READ_ALL_AS_ADULT}${ADULT_CAST_RESOLVED}性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する`
     )
+    expect(ratingLineOf('R18', adultBible)).toBe(
+      `年齢指定: 成人向け。物語の登場人物はすべて 18 歳以上の成人とする。${READ_ALL_AS_ADULT}${ADULT_CAST_RESOLVED}性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい`
+    )
+    // 読み替えの対象に、人物、関係、作品設計、既に書かれた本文を名指しで含める
+    for (const material of [
+      '作品情報',
+      '作品設計',
+      '人物の設定',
+      '関係',
+      '口調の例',
+      '章立て',
+      '既に書かれた本文とその記録'
+    ]) {
+      expect(READ_ALL_AS_ADULT).toContain(material)
+    }
+  })
+
+  test('成人としての人物設定が無い作品設計でも、全ての資料にかける (確定済みの添え書きは付けない)', () => {
+    for (const rating of ['R15', 'R18']) {
+      const line = ratingLineOf(rating, bible)
+      expect(line).toContain(`物語の登場人物はすべて 18 歳以上の成人とする。${READ_ALL_AS_ADULT}`)
+      expect(line).not.toContain(ADULT_CAST_RESOLVED)
+      expect(line).not.toContain('後述の登場人物詳細に')
+    }
+  })
+
+  test('作品設計が無い旧データの文面は変えない', () => {
+    for (const rating of ['R15', 'R18']) {
+      for (const none of [null, undefined]) {
+        expect(ratingLineOf(rating, none)).toBe(LEGACY_RATING_LINES[rating])
+      }
+      // 計画も無い、Phase 2 までの入力でも同じ
+      const legacy = section(
+        buildChapterPrompt(input(2, { style: { ...style, age_rating: rating } })).user,
+        '文体・視点'
+      )
+      expect(legacy.split('\n').at(-1)).toBe(LEGACY_RATING_LINES[rating])
+    }
+  })
+
+  test('成人指定の行は、章をまたいで変わらない部分にある (全ての章のプロンプトに入る)', () => {
+    for (const n of [1, 3, 5]) {
+      const { user } = buildChapterPrompt(planned(n, { style: { ...style, age_rating: 'R18' }, bible: adultBible }))
+      expect(section(user, '文体・視点')).toContain(READ_ALL_AS_ADULT)
+      expect(user.indexOf(READ_ALL_AS_ADULT)).toBeLessThan(user.indexOf('【作品設計】'))
+    }
+    // 書き直しでも、次の章の冒頭つきでも入る
+    const revised = buildChapterPrompt(
+      planned(2, {
+        style: { ...style, age_rating: 'R15' },
+        bible: adultBible,
+        revision: { baseContent: chapterText(2), instruction: '口調を直す。' },
+        nextChapter: { opening: '　翌朝。', title: '', summary: '' }
+      })
+    )
+    expect(revised.user).toContain(READ_ALL_AS_ADULT)
+    expect(
+      buildChapterPromptForStorage(planned(2, { style: { ...style, age_rating: 'R15' }, bible: adultBible }))
+    ).toContain(READ_ALL_AS_ADULT)
+  })
+
+  test('全年齢では、読み替えの指示を入れない', () => {
+    for (const bibleValue of [adultBible, bible, null]) {
+      const { system, user } = buildChapterPrompt(planned(2, { bible: bibleValue }))
+      expect(ratingLineOf('全年齢', bibleValue)).toBe(
+        '年齢指定: 性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること'
+      )
+      for (const text of [system, user]) {
+        expect(text).not.toContain('読み替え')
+        expect(text).not.toContain('18 歳以上')
+        expect(text).not.toContain('成人として確定')
+      }
+    }
   })
 })
 
@@ -1900,27 +1962,55 @@ describe('buildOutlinePrompt', () => {
     expect(headings(empty.user)).toEqual(['作品情報', '今回の依頼'])
   })
 
-  test('成人指定: 作品設計に成人としての人物設定があれば、人物設定の読み替えの文面を出さない', () => {
-    const adultBible: StoryBible = {
-      ...bible,
-      cast: [{ name: '朝倉澪', age: '20', occupation: '大学生', appearance: '', background: '' }]
-    }
-    const adultStyle = { ...style, age_rating: 'R18' }
-    const resolved = section(
-      buildOutlinePrompt({ novel, style: adultStyle, cast, relations, bible: adultBible }).user,
-      '作品情報'
-    )
-    expect(resolved).toContain('年齢指定: 成人向け。物語の登場人物はすべて 18 歳以上の成人とする。')
-    expect(resolved).not.toContain('登場人物詳細に')
-    expect(resolved).toContain('【作品情報】の世界観・設定に、高校や学年など未成年を連想させる記述があっても')
-    // 作品設計が無い旧データ、成人としての人物設定が無い作品設計では、今までの文面
-    for (const bibleValue of [undefined, bible]) {
-      const legacy = section(
-        buildOutlinePrompt({ novel, style: adultStyle, cast, relations, bible: bibleValue }).user,
+  test('成人指定: 作品設計があれば、読み替えの指示を全ての資料にかける', () => {
+    const ratingLineOf = (age_rating: string, bibleValue: StoryBible | null | undefined): string | undefined =>
+      section(
+        buildOutlinePrompt({ novel, style: { ...style, age_rating }, cast, relations, bible: bibleValue }).user,
         '作品情報'
       )
-      expect(legacy).toContain('たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等')
+        .split('\n')
+        .find((line) => line.startsWith('年齢指定: '))
+    // 成人としての人物設定があっても、読み替えの指示は外さない
+    expect(ratingLineOf('R18', adultBible)).toBe(
+      `年齢指定: 成人向け。物語の登場人物はすべて 18 歳以上の成人とする。${READ_ALL_AS_ADULT}${ADULT_CAST_RESOLVED}性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい`
+    )
+    expect(ratingLineOf('R15', adultBible)).toContain(`${READ_ALL_AS_ADULT}${ADULT_CAST_RESOLVED}`)
+    // 成人としての人物設定が無い作品設計でも、全ての資料にかける
+    expect(ratingLineOf('R15', bible)).toContain(READ_ALL_AS_ADULT)
+    expect(ratingLineOf('R15', bible)).not.toContain(ADULT_CAST_RESOLVED)
+    // 作品設計が無い旧データの文面は変えない
+    for (const rating of ['R15', 'R18']) {
+      for (const none of [null, undefined]) {
+        expect(ratingLineOf(rating, none)).toBe(LEGACY_RATING_LINES[rating])
+      }
     }
+    // 全年齢では入れない
+    const plain = buildOutlinePrompt({ novel, style, cast, relations, bible: adultBible })
+    expect(plain.user).not.toContain('読み替え')
+    expect(plain.system).not.toContain('読み替え')
+  })
+
+  test('成人指定: 1 章の書き直しにも同じ指示が入る', () => {
+    const adultStyle = { ...style, age_rating: 'R18' }
+    const rewrite = buildOutlineChapterPrompt({
+      novel,
+      style: adultStyle,
+      cast,
+      relations,
+      bible: adultBible,
+      existing: plannedOutline,
+      chapterNumber: 2
+    })
+    expect(section(rewrite.user, '作品情報')).toContain(`${READ_ALL_AS_ADULT}${ADULT_CAST_RESOLVED}`)
+    const legacy = buildOutlineChapterPrompt({
+      novel,
+      style: adultStyle,
+      cast,
+      relations,
+      existing: outline,
+      chapterNumber: 2
+    })
+    expect(section(legacy.user, '作品情報').split('\n').at(-2)).toBe(LEGACY_RATING_LINES.R18)
   })
 
   test('system は作品の内容を含まない', () => {
