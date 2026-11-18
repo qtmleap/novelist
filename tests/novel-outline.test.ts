@@ -68,6 +68,32 @@ describe('matchCastName', () => {
     expect(matchCastName('ルナさんさん', ['ルナ'])).toBeNull()
     expect(matchCastName('ルナ（回想）の母', ['ルナ'])).toBeNull()
   })
+  test('名簿の名前の一部 + 敬称・注記なら、その名前に寄せる', () => {
+    const cast = ['酒寄彩葉', '月見八千代']
+    expect(matchCastName('彩葉ちゃん', cast)).toBe('酒寄彩葉')
+    expect(matchCastName('月見先輩', cast)).toBe('月見八千代')
+    expect(matchCastName('八千代さん（回想）', cast)).toBe('月見八千代')
+    expect(matchCastName('八千代 さん', cast)).toBe('月見八千代')
+    expect(matchCastName('・彩葉くん', cast)).toBe('酒寄彩葉')
+    expect(matchCastName('彩葉(声のみ)', cast)).toBe('酒寄彩葉')
+    expect(matchCastName('彩葉・', cast)).toBe('酒寄彩葉')
+  })
+  test('一部 + 敬称が名簿の 2 人に当たるときは null', () => {
+    expect(matchCastName('彩葉ちゃん', ['酒寄彩葉', '彩葉子'])).toBeNull()
+  })
+  test('一部 + 敬称でも、残りを含む名前が名簿に無ければ null', () => {
+    expect(matchCastName('神崎さん', CAST)).toBeNull()
+  })
+  test('一部 + 敬称で残りが 1 字になるときは null', () => {
+    expect(matchCastName('葉ちゃん', ['酒寄彩葉'])).toBeNull()
+    expect(matchCastName('彩さん', ['酒寄彩葉'])).toBeNull()
+  })
+  test('付け足しの後ろにさらに別の語が付くときは、一部でも寄せない', () => {
+    expect(matchCastName('ルナの母さん', ['ルナ'])).toBeNull()
+    expect(matchCastName('彩葉ちゃんの母', ['酒寄彩葉'])).toBeNull()
+    expect(matchCastName('彩葉たち', ['酒寄彩葉'])).toBeNull()
+    expect(matchCastName('彩葉ちゃん（回想', ['酒寄彩葉'])).toBeNull()
+  })
   test('名簿に名前の包含関係があるときは、いちばん長い名前を選ぶ', () => {
     const cast = ['八千代', '月見八千代']
     expect(matchCastName('月見八千代さん', cast)).toBe('月見八千代')

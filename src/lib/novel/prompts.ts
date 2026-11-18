@@ -57,15 +57,21 @@ export type NovelParams = {
   notes?: string
 }
 
-// 確定済みの本文として渡す章。呼び出し側が選んで番号順に渡す。
+// 既出の章。呼び出し側が選んで渡す (予算に収まる章は全文、超えた古い章は省略。memory.ts の selectPriorChapters)。
 // 今回の章以降の番号と、本文が空の章は渡されても載せない (書き直す章の古い版を確定扱いにしないため)。
+// 全文で渡す章。
 export type PriorChapterText = { chapter_number: number; title: string | null; content: string }
+// 予算を超えて本文を渡せない章。【確定済みの本文】には見出しだけを出す (内容は【確定事項】に入っている)。
+export type PriorChapterOmitted = { chapter_number: number; title: string | null; omitted: true }
+export type PriorChapterInput = PriorChapterText | PriorChapterOmitted
 
 export type ChapterPromptInput = {
   novel: NovelParams
   outline: Outline
   chapterNumber: number
-  priorChapters: PriorChapterText[]
+  priorChapters: PriorChapterInput[]
+  // ここまでの章の記録を累積した【確定事項】(ledger.ts の renderLedger の戻り値。見出しつき)。'' や未指定なら出さない。
+  ledgerText?: string
   targetChars: number
   style: StyleParams
   cast: CastMember[]
@@ -356,11 +362,21 @@ const CHAPTER_SCOPE_RULES = [
   '最終章は、結末まで書き切る。'
 ]
 
+// 【確定事項】が無い章 (第 1 章、記録の無い旧データ) でも同じ文面を使う (system を作品を通して変えないため)。
 const CHAPTER_CONSISTENCY_RULES = [
   '【確定済みの本文】は既に書き上がった章で、後から変えられない。そこに書かれた事実（外見、持ち物、場所、日時、約束、誰が何を知っているか）、呼称、時系列は確定している。矛盾させない。',
-  '【全体の章立て】の概要と確定済みの本文が食い違うときは、本文を正とする。',
+  '【確定事項】は、ここまでの本文から抜き出した記録である。本文と同じく確定していて、矛盾させない。本文を省略した章については、これが資料になる。',
+  // 記録は抽出を誤ることがあるので、全文がある章は全文を正とする。
+  '【全体の章立て】の概要や【確定事項】が確定済みの本文と食い違うときは、本文を正とする。概要と【確定事項】が食い違うときは、【確定事項】を正とする。',
   // 人物の設定 (辞典) は章が進んでも同じ文面で渡るので、本文で変わった状態 (変装、関係の進展) を巻き戻させない。
-  '人物の設定は物語の始まりの時点のものである。確定済みの本文の中で変わったこと（外見、関係、知っていること）は、変わった後の状態を引き継ぐ。'
+  '人物の設定は物語の始まりの時点のものである。ここまでの章で変わったこと（外見、関係、知っていること）は、変わった後の状態を引き継ぐ。',
+  // 「知っていること」は 1 章あたり数項目の抜粋。「一覧に無いことは知らない」とは読ませない
+  // (当然知っていることまで知らない扱いになるため)。防ぎたいのは次の 2 つ:
+  // 知っているはずのことを忘れている、居合わせていない出来事を知っている。
+  '【確定事項】の「知っていること」は、その人物が既に知っていることの抜粋で、全部ではない。挙がっていることは、知っている前提で書く（忘れていたり、初めて知ったように反応したりさせない）。',
+  '人物が居合わせていない場面の出来事は、誰かから聞く、自分で気づくといった描写なしに、その人物が知っている前提で書かない。',
+  // 伏線の回収の計画は Phase 3 で章立てに入る。それまでは、目に入った伏線を片端から回収させない。
+  '【確定事項】の「未回収の伏線」は、【今回の執筆】の概要に関わるものだけを扱う。関わらないものを、この章で無理に回収しない。'
 ]
 
 const CHAPTER_CHARACTER_RULES = [
@@ -418,22 +434,69 @@ export function novelInfoBody(novel: NovelParams, withChapterCount: boolean): st
     .join('\n')
 }
 
-// 章の見出しは「▼」で始める。本文の中の空行と、章の区切りを見分けられるようにするため。
-function priorChaptersBody(priorChapters: PriorChapterText[], chapterNumber: number): string {
+// send = モデルに送る文面。storage = 保存・表示用 (全文の章の本文を字数だけにする)。
+type PromptMode = 'send' | 'storage'
+
+// 既出の章 1 つぶん。載せない章 (本文が空) は ''。
+// 見出しは「▼」で始める。本文の中の空行と、章の区切りを見分けられるようにするため。
+function priorChapterBlock(chapter: PriorChapterInput, hasLedger: boolean, mode: PromptMode): string {
+  const heading = `▼ ${chapterLabel(chapter.chapter_number, chapter.title)}`
+  if ('content' in chapter) {
+    const text = trimChapterText(chapter.content)
+    if (text.length === 0) return ''
+    if (mode === 'send') return `${heading}\n${text}`
+    // 保存用には本文を入れない。全文つきで保存すると 1 版あたり数百 KB になり、D1 を圧迫する。
+    // モデルには全文を渡したことが、保存された文面を読む人に分かるように書く。
+    return `${heading}\n（本文${formatNumber(text.length)}字。モデルには全文を渡し、保存では省略）`
+  }
+  // 本文を渡せない章は見出しの 1 行だけ。全文の章とは、この括弧書きで見分けがつく。
+  // 内容は【確定事項】に入っている。【確定事項】が無いとき (記録が 1 つも無い) は章立ての概要を指す。
+  return `${heading}（本文は省略。内容は${hasLedger ? '【確定事項】' : '【全体の章立て】の概要'}を参照）`
+}
+
+function priorChaptersBody(
+  priorChapters: PriorChapterInput[],
+  chapterNumber: number,
+  hasLedger: boolean,
+  mode: PromptMode
+): string {
   return priorChapters
     .filter((chapter) => chapter.chapter_number < chapterNumber)
-    .map((chapter) => ({ chapter, text: trimChapterText(chapter.content) }))
-    .filter(({ text }) => text.length > 0)
-    .sort((a, b) => a.chapter.chapter_number - b.chapter.chapter_number)
-    .map(({ chapter, text }) => `▼ ${chapterLabel(chapter.chapter_number, chapter.title)}\n${text}`)
+    .map((chapter) => ({ number: chapter.chapter_number, block: priorChapterBlock(chapter, hasLedger, mode) }))
+    .filter(({ block }) => block.length > 0)
+    .sort((a, b) => a.number - b.number)
+    .map(({ block }) => block)
     .join('\n\n')
+}
+
+// 直前の章を資料としてどう渡しているか。text = 全文、omitted = 本文は省略で【確定事項】がある、none = どちらも無い。
+type PreviousChapter = 'text' | 'omitted' | 'none'
+
+function previousChapterOf(
+  priorChapters: PriorChapterInput[],
+  chapterNumber: number,
+  hasLedger: boolean
+): PreviousChapter {
+  const previous = priorChapters.filter((chapter) => chapter.chapter_number === chapterNumber - 1)
+  if (previous.some((chapter) => 'content' in chapter && trimChapterText(chapter.content).length > 0)) return 'text'
+  return hasLedger && previous.some((chapter) => !('content' in chapter)) ? 'omitted' : 'none'
+}
+
+// 【確定事項】の中身 (見出しを除く)。renderLedger の戻り値は見出しつきなので、見出しを外して節の本文にする。
+// 見出しの無い文字列を渡されても、そのまま本文として扱う。どちらでも見出しは 1 つになる。
+const LEDGER_HEADING = '確定事項'
+
+function ledgerBody(ledgerText: string | undefined): string {
+  if (ledgerText === undefined) return ''
+  const text = ledgerText.replace(/\r\n|\r/g, '\n').trim()
+  const heading = `【${LEDGER_HEADING}】`
+  return text.startsWith(heading) ? text.slice(heading.length).trim() : text
 }
 
 type WritingBrief = {
   entry: OutlineChapter
   totalChapters: number
-  // 直前の章の本文を確定済みの本文として渡しているか
-  hasPreviousText: boolean
+  previous: PreviousChapter
   targetChars: number
 }
 
@@ -443,10 +506,12 @@ function writtenLine(brief: WritingBrief): string {
   if (n <= 1) return '執筆済み: なし（この章が物語の書き出し）'
   // 執筆済みが 1 章だけのときは、範囲と同じ章番号を繰り返さない。
   const previous = n === 2 ? 'その' : `第${n - 1}章の`
-  const start = brief.hasPreviousText
-    ? `${previous}終わりから続けて書く`
-    : `${previous}本文は資料に無い。概要の続きとして書き始める`
-  return `執筆済み: ${chapterRange(1, n - 1)}（${start}）`
+  const starts: Record<PreviousChapter, string> = {
+    text: `${previous}終わりから続けて書く`,
+    omitted: `${previous}本文は省略している。【確定事項】の内容の続きとして書き始める`,
+    none: `${previous}本文は資料に無い。概要の続きとして書き始める`
+  }
+  return `執筆済み: ${chapterRange(1, n - 1)}（${starts[brief.previous]}）`
 }
 
 // これからの範囲と、章末の扱い。最終章かどうかで変わる。
@@ -475,8 +540,8 @@ function writingBody(brief: WritingBrief): string {
   return `第${entry.chapter_number}章（全${totalChapters}章）の本文を書く。\n${bullets(items)}`
 }
 
-// 本文 1 章ぶんのプロンプト。章立てに chapterNumber が無ければ throw する。
-export function buildChapterPrompt(input: ChapterPromptInput): Prompt {
+// 本文 1 章ぶんのプロンプトを組み立てる。章立てに chapterNumber が無ければ throw する。
+function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Prompt {
   const { novel, outline, chapterNumber, priorChapters, targetChars, style, cast, relations } = input
   const chapters = sortedChapters(outline)
   const entry = chapters.find((chapter) => chapter.chapter_number === chapterNumber)
@@ -490,12 +555,14 @@ export function buildChapterPrompt(input: ChapterPromptInput): Prompt {
   const { present, absent, scoped } = splitCast(cast, entry, narrator)
   const presentNames = new Set(present.map((member) => member.name))
   const presentRelations = relations.filter((r) => presentNames.has(r.source_name) && presentNames.has(r.target_name))
-  const priorBody = priorChaptersBody(priorChapters, chapterNumber)
-  const hasPreviousText = priorChapters.some(
-    (chapter) => chapter.chapter_number === chapterNumber - 1 && trimChapterText(chapter.content).length > 0
-  )
+  const ledger = ledgerBody(input.ledgerText)
+  const hasLedger = ledger.length > 0
+  const priorBody = priorChaptersBody(priorChapters, chapterNumber, hasLedger, mode)
+  const previous = previousChapterOf(priorChapters, chapterNumber, hasLedger)
 
   // 章をまたいで変わらない部分。章番号や今回の登場人物を入れない (前半を 1 字も変えないため)。
+  // 全文の章が増えていく間は、前の章のプロンプトのここまでが、次の章のプロンプトの先頭と一致する
+  // (古い章が省略に回ったところでは変わる)。
   // Phase 3 で【作品設計】【呼称表】【執筆上の指示】を【全体の章立て】の前に足す。
   const stable: Section[] = [
     { heading: '作品情報', body: novelInfoBody(novel, false) },
@@ -503,9 +570,10 @@ export function buildChapterPrompt(input: ChapterPromptInput): Prompt {
     { heading: '全体の章立て', body: chapters.map(outlineLine).join('\n') },
     { heading: '確定済みの本文', body: priorBody }
   ]
-  // この章だけの部分。
-  // Phase 2 で【確定事項】を先頭に、Phase 4 / 5 で【次の章の冒頭】【元の版】【修正指示】を【今回の執筆】の前に足す。
+  // この章だけの部分。【確定事項】は章が進むたびに増えるので、変わらない部分の後に置く。
+  // Phase 4 / 5 で【次の章の冒頭】【元の版】【修正指示】を【今回の執筆】の前に足す。
   const perChapter: Section[] = [
+    { heading: LEDGER_HEADING, body: ledger },
     {
       heading: 'この章の登場人物',
       body: [
@@ -517,10 +585,21 @@ export function buildChapterPrompt(input: ChapterPromptInput): Prompt {
     },
     { heading: 'キャラクター間の関係', body: relationsBody(presentRelations) },
     { heading: 'この章に登場しない人物', body: absentBody(absent, present, relations) },
-    { heading: '今回の執筆', body: writingBody({ entry, totalChapters, hasPreviousText, targetChars }) }
+    { heading: '今回の執筆', body: writingBody({ entry, totalChapters, previous, targetChars }) }
   ]
 
   return { system: chapterSystem(cast.length > 0), user: renderSections([...stable, ...perChapter]) }
+}
+
+// 本文 1 章ぶんのプロンプト (モデルに送るもの)。章立てに chapterNumber が無ければ throw する。
+export function buildChapterPrompt(input: ChapterPromptInput): Prompt {
+  return assembleChapterPrompt(input, 'send')
+}
+
+// 保存・表示用 (Chapter.prompt)。buildChapterPrompt と同じ内容で、【確定済みの本文】の全文の章だけ、
+// 本文を字数の 1 行に置き換える (見出しは残す)。system と user を renderPromptForStorage で 1 つの文字列にして返す。
+export function buildChapterPromptForStorage(input: ChapterPromptInput): string {
+  return renderPromptForStorage(assembleChapterPrompt(input, 'storage'))
 }
 
 // ---------------------- 章立て ----------------------

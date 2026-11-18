@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { AvailableModel, Provider } from '@/schemas/provider.dto'
+import { ChapterRecordSchema, ChapterReviewSchema, ChapterStalenessSchema, StoryBibleSchema } from '@/schemas/story.dto'
 
 // 1 章あたりの目標文字数 (新規作成フォームのプリセット)。Novel ごとに保持し、
 // 本文生成時にサーバーがプロンプトと maxOutputTokens に反映する。
@@ -306,7 +307,13 @@ export const ChapterSchema = z.object({
   chapter_number: z.number().int().min(1),
   title: z.string().nullable(),
   content: z.string(),
-  created_at: z.string()
+  created_at: z.string(),
+  // 本文から抽出した記録。抽出の失敗や、この機能より前の章は null。
+  record: ChapterRecordSchema.nullable().default(null),
+  // 上流 (章立て、前の章) が変わって「要再生成」か。
+  staleness: ChapterStalenessSchema.default({ stale: false, reasons: [] }),
+  // 検査の結果。未検査は null。
+  review: ChapterReviewSchema.nullable().default(null)
 })
 export type Chapter = z.infer<typeof ChapterSchema>
 
@@ -318,7 +325,9 @@ export const ChapterVersionSchema = z.object({
   content: z.string(),
   // プロンプト保存機能より前に生成された version は null。
   prompt: z.string().nullable(),
-  created_at: z.string()
+  created_at: z.string(),
+  record: ChapterRecordSchema.nullable().default(null),
+  review: ChapterReviewSchema.nullable().default(null)
 })
 export type ChapterVersion = z.infer<typeof ChapterVersionSchema>
 
@@ -402,7 +411,11 @@ export const NovelWithChaptersSchema = NovelSchema.extend({
   total_cost_usd: z.number().default(0),
   // 本文以外 (章立て、作品設計、記録の抽出、検査) の合計。作り直した分も含めた全回数ぶん
   aux_cost_usd: z.number().default(0),
-  gen_job: NovelGenerationJobSchema.nullable().default(null)
+  gen_job: NovelGenerationJobSchema.nullable().default(null),
+  // 作品設計。未作成は null。
+  bible: StoryBibleSchema.nullable().default(null),
+  // 作品設計を作った後に、その入力 (あらすじ、登場人物、関係など) が変わったか。
+  bible_outdated: z.boolean().default(false)
 })
 export type NovelWithChapters = z.infer<typeof NovelWithChaptersSchema>
 
@@ -415,12 +428,23 @@ export type NovelSummary = Novel
 //   { delta: string }                                  生成テキストの増分
 //   { done: true, chapterId: string, title: string }   完了 (この時点で D1 保存済み)
 //   { error: string }                                  生成失敗
+//   { stage: ChapterStage }                            段階の切り替わり (接続の直後にも現在の段階を 1 回送る)
 // フロントの src/lib/stream.ts がこれをパースする。
+
+// 章の生成の段階。本文が流れてくるのは writing の間だけなので、その前後に何をしているかを画面に出すために送る。
+//   context    資料の準備 (既出の章の読み込み、古い章の記録の抽出)
+//   writing    本文の執筆
+//   recording  書いた章の記録の抽出
+//   reviewing  検査 (done の後に走る。購読を続けている画面だけが受け取る)
+export const CHAPTER_STAGES = ['context', 'writing', 'recording', 'reviewing'] as const
+export const ChapterStageSchema = z.enum(CHAPTER_STAGES)
+export type ChapterStage = z.infer<typeof ChapterStageSchema>
 
 export const ChapterStreamEventSchema = z.union([
   z.object({ delta: z.string() }),
   z.object({ done: z.literal(true), chapterId: z.string(), title: z.string() }),
-  z.object({ error: z.string() })
+  z.object({ error: z.string() }),
+  z.object({ stage: ChapterStageSchema })
 ])
 export type ChapterStreamEvent = z.infer<typeof ChapterStreamEventSchema>
 
@@ -429,6 +453,20 @@ export const GenerateOptionsSchema = z.object({
   model: ModelRefSchema.optional()
 })
 export type GenerateOptions = z.infer<typeof GenerateOptionsSchema>
+
+// 本文の生成の body。instruction が空でなければ「指示つきの書き直し」:
+// base_version_id の版 (空なら最新の版) を元に、指示された箇所だけを直した全文を新しい version として作る。
+export const GenerateChapterOptionsSchema = GenerateOptionsSchema.extend({
+  instruction: z.string().max(2000).default(''),
+  base_version_id: z.string().max(64).default('')
+})
+export type GenerateChapterOptions = z.infer<typeof GenerateChapterOptionsSchema>
+
+// Novel.bible に保存する形。source_hash は作った時点の入力のハッシュ (API には出さず、bible_outdated の判定に使う)。
+export const StoredBibleSchema = StoryBibleSchema.extend({
+  source_hash: z.string().max(64).default('')
+})
+export type StoredBible = z.infer<typeof StoredBibleSchema>
 
 // outline 生成時のみ使える追加オプション: 章の指定セットだけ (既存 outline ありの場合のみ意味を持つ)。
 export const GenerateOutlineOptionsSchema = GenerateOptionsSchema.extend({

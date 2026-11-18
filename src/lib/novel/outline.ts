@@ -42,10 +42,16 @@ const HONORIFICS = ['さん', 'ちゃん', 'くん', '君', '様', 'さま', '�
 const SEPARATORS = '\\s・･＝=、，,'
 // 名前の前: 空か、空白・区切りだけ。
 const LEADING_PATTERN = new RegExp(`^[${SEPARATORS}]*$`)
-// 名前の後: 空白・区切り、敬称、丸括弧の注記 (全角・半角)。敬称の後に注記が続く形も可。
-const TRAILING_PATTERN = new RegExp(
-  `^[${SEPARATORS}]*(?:(?:${HONORIFICS.join('|')})[${SEPARATORS}]*)?(?:[（(][^（）()]*[）)][${SEPARATORS}]*)*$`
-)
+// 名前の後ろに付いてよいもの (付け足し): 空白・区切り、敬称、丸括弧の注記 (全角・半角)。敬称の後に注記が続く形も可。
+const SEPARATORS_PATTERN = `[${SEPARATORS}]*`
+const NOTE_PATTERN = `[（(][^（）()]*[）)]${SEPARATORS_PATTERN}`
+const ADDITION_SOURCE = `${SEPARATORS_PATTERN}(?:(?:${HONORIFICS.join('|')})${SEPARATORS_PATTERN})?(?:${NOTE_PATTERN})*`
+// 名前の後が付け足しだけか。
+const TRAILING_PATTERN = new RegExp(`^${ADDITION_SOURCE}$`)
+// 文字列の末尾の付け足し。全部が省略可なので必ず一致し、いちばん左から始まる (= 最も長い) 付け足しを拾う。
+const TRAILING_ADDITION_PATTERN = new RegExp(`${ADDITION_SOURCE}$`)
+// 名前の前の空白・区切り (先頭から)。
+const LEADING_SEPARATORS_PATTERN = new RegExp(`^[${SEPARATORS}]+`)
 
 // raw が「名簿の名前 + 付け足し」だけで出来ているときの、名簿の名前。
 // 付け足しが敬称・注記・区切りなら同じ人物。「ルナの母」「ルナたち」のように別の語が付けば別人 (または複数人) なので外す。
@@ -62,12 +68,26 @@ function matchAnnotatedCastName(raw: string, cast: string[]): string | null {
   return longestCandidates.length === 1 ? longestCandidates[0] : null
 }
 
+// raw の末尾の付け足しを取り除いた残りが、名簿の名前のちょうど 1 人の一部なら、その名前。
+// 「彩葉ちゃん」→「彩葉」→「酒寄彩葉」。付け足しが無い raw は扱わない (「ルナの母」は別人)。
+// 残りが 1 字になるときは、他の名前に紛れやすいので寄せない。2 人以上に当たるときも決められないので null。
+function matchStrippedCastName(raw: string, cast: string[]): string | null {
+  const addition = TRAILING_ADDITION_PATTERN.exec(raw)
+  if (addition === null || addition[0].length === 0) return null
+  const base = raw.slice(0, addition.index).replace(LEADING_SEPARATORS_PATTERN, '')
+  if ([...base].length < MIN_PARTIAL_MATCH_CHARS) return null
+  const candidates = cast.filter((castName) => castName.includes(base))
+  return candidates.length === 1 ? candidates[0] : null
+}
+
 // モデルが書いた名前を、名簿の正式名に寄せる。上から順に試す。
 //   1. 前後の空白を除いて完全一致。
 //   2. raw が 2 字以上で、raw を含む(raw より長い)名簿の名前がちょうど 1 人ならその名前 (「彩葉」→「酒寄彩葉」)。
 //      2 人以上はどちらか決められないので、次へ進まず null。
 //   3. raw が名簿の名前に敬称・注記・区切りを足しただけなら、その名簿の名前 (「ルナさん」「ルナ（回想）」)。
-//   4. どれにも当たらなければ null。名簿の名前を含むだけの別人 (「ルナの母」) は寄せない。
+//   4. raw の末尾の付け足しを取り除いた残りが、名簿のちょうど 1 人の名前の一部なら、その名前
+//      (「彩葉ちゃん」「月見先輩」「八千代さん（回想）」)。残りが 1 字、または 0 人・2 人以上に当たるときは null。
+//   5. どれにも当たらなければ null。名簿の名前を含むだけの別人 (「ルナの母」) は寄せない。
 export function matchCastName(raw: string, castNames: string[]): string | null {
   // String.prototype.trim は全角空白 (U+3000) も除く。
   const name = raw.trim()
@@ -79,7 +99,8 @@ export function matchCastName(raw: string, castNames: string[]): string | null {
     const longer = cast.filter((castName) => castName.includes(name))
     if (longer.length > 0) return longer.length === 1 ? longer[0] : null
   }
-  return matchAnnotatedCastName(name, cast)
+  const annotated = matchAnnotatedCastName(name, cast)
+  return annotated === null ? matchStrippedCastName(name, cast) : annotated
 }
 
 function droppedCharacterWarning(chapterNumber: number, name: string): OutlineWarning {

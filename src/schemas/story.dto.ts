@@ -23,12 +23,19 @@ export type StoryThread = z.infer<typeof StoryThreadSchema>
 // ---------------------- 章の記録 (Phase 2) ----------------------
 // 本文を書いた結果として決まったこと。Chapter.record に version ごとに 1:1 で保存する。
 
-export const CharacterStateSchema = z.object({
+// 記録の人物 1 人ぶん。「したこと」と「知ったこと」を分けて持つ。
+// 全章ぶんを累積すると、人物ごとの行動の履歴と、その時点で知っていることの一覧になる (ledger.ts)。
+// 自由記述 1 本にまとめると、累積するときに最新の章の分しか残せず、前の章で知ったことが落ちるため。
+export const CharacterRecordSchema = z.object({
   name: z.string().nonempty().max(100),
-  // 章末の状態 (居場所、知っていること、関係の変化)
-  state: z.string().nonempty().max(600)
+  // この章でしたこと (起きた順。1 項目に 1 つの行動)
+  actions: z.array(z.string().nonempty().max(300)).max(12).default([]),
+  // この章で新しく知ったこと・気づいたこと (1 項目に 1 つ)
+  learned: z.array(z.string().nonempty().max(300)).max(12).default([]),
+  // 章末の状態 (居場所、外見や持ち物の変化、他の人物との関係の変化)。書くことが無ければ空
+  state: z.string().max(600).default('')
 })
-export type CharacterState = z.infer<typeof CharacterStateSchema>
+export type CharacterRecord = z.infer<typeof CharacterRecordSchema>
 
 export const EndStateSchema = z.object({
   time: z.string().max(200).default(''),
@@ -41,11 +48,12 @@ export type EndState = z.infer<typeof EndStateSchema>
 export const EMPTY_END_STATE: EndState = { time: '', place: '', present: [] }
 
 export const ChapterRecordSchema = z.object({
-  // 実際に起きたこと (300 字程度、三人称の常体)
+  // この章の流れ。実際に起きたことを起きた順に (300 字程度、三人称の常体)
   summary: z.string().nonempty().max(4000),
   // 新しく確定した事実 (外見、持ち物、約束、場所、日付)
   facts: z.array(z.string().nonempty().max(400)).max(60).default([]),
-  character_states: z.array(CharacterStateSchema).max(50).default([]),
+  // この章に登場した人物ごとの、したこと・知ったこと・章末の状態
+  characters: z.array(CharacterRecordSchema).max(50).default([]),
   // この章で張られた伏線
   threads_opened: z.array(StoryThreadSchema).max(30).default([]),
   // この章で回収された伏線の id
@@ -58,19 +66,33 @@ export type ChapterRecord = z.infer<typeof ChapterRecordSchema>
 //   new_threads          計画に無く、この章で新しく生まれた伏線 (説明文だけ。id はコードが振る)
 //   resolved_thread_ids  渡した「未回収の伏線」のうち、この章で回収されたものの id
 //   written_setup_ids    渡した「この章で張る予定の伏線」のうち、実際に書かれたものの id
-// 長さの上限は付けない (超えた分はコードが切り詰める)。
+// 中身の検査はここではしない (空の項目、長すぎる文、名簿に無い名前は、ledger.ts の finalizeRecord が整える)。
+// 空文字 1 つで応答全体を不合格にして呼び直すのは割に合わないため。上限は暴走した応答を弾くためだけのもの。
+const DraftTextSchema = z.string().max(20000)
+const DraftListSchema = z.array(DraftTextSchema).max(500).default([])
+
 export const ChapterRecordDraftSchema = z.object({
-  summary: z.string().nonempty(),
-  facts: z.array(z.string().nonempty()).default([]),
-  character_states: z.array(z.object({ name: z.string().nonempty(), state: z.string().nonempty() })).default([]),
-  new_threads: z.array(z.string().nonempty()).default([]),
-  resolved_thread_ids: z.array(z.string().nonempty()).default([]),
-  written_setup_ids: z.array(z.string().nonempty()).default([]),
+  summary: DraftTextSchema,
+  facts: DraftListSchema,
+  characters: z
+    .array(
+      z.object({
+        name: DraftTextSchema,
+        actions: DraftListSchema,
+        learned: DraftListSchema,
+        state: DraftTextSchema.default('')
+      })
+    )
+    .max(500)
+    .default([]),
+  new_threads: DraftListSchema,
+  resolved_thread_ids: DraftListSchema,
+  written_setup_ids: DraftListSchema,
   end_state: z
     .object({
-      time: z.string().max(2000).default(''),
-      place: z.string().max(2000).default(''),
-      present: z.array(z.string().nonempty()).default([])
+      time: DraftTextSchema.default(''),
+      place: DraftTextSchema.default(''),
+      present: DraftListSchema
     })
     .default(EMPTY_END_STATE)
 })
@@ -139,7 +161,8 @@ export type StoryBible = z.infer<typeof StoryBibleSchema>
 // 章立ての生成結果と一緒に返す。chapter_number = 0 は章立て全体への警告。
 //   dropped_character  名簿と照合できず捨てた登場人物名
 //   unresolved_setup   どの章でも回収されない伏線
-export const OUTLINE_WARNING_KINDS = ['dropped_character', 'unresolved_setup'] as const
+//   dropped_payoff     前の章で張られていないため外した「回収する伏線」
+export const OUTLINE_WARNING_KINDS = ['dropped_character', 'unresolved_setup', 'dropped_payoff'] as const
 export const OutlineWarningSchema = z.object({
   chapter_number: z.number().int().min(0),
   kind: z.enum(OUTLINE_WARNING_KINDS),

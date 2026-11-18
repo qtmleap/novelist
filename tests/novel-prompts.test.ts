@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test'
+import { buildLedger, renderLedger } from '@/lib/novel/ledger'
 import {
   buildChapterPrompt,
+  buildChapterPromptForStorage,
   buildOutlineChapterPrompt,
   buildOutlinePrompt,
   type CastMember,
   type CastRelation,
   type ChapterPromptInput,
   type NovelParams,
+  type PriorChapterInput,
   type PriorChapterText,
   renderPromptForStorage,
   type StyleParams,
@@ -311,6 +314,241 @@ describe('buildChapterPrompt: 確定済みの本文', () => {
   })
 })
 
+// ---------------------- 本文: 省略した章と確定事項 (Phase 2) ----------------------
+
+// ledger.ts の renderLedger が返す形 (見出しつき、小見出しの間は空行 1 つ)。
+const ledgerText = [
+  '【確定事項】',
+  'ここまでの本文から抜き出した記録である。',
+  '',
+  '■ これまでの流れ',
+  '- 第1章: 澪が屋上でルナと出会った。',
+  '',
+  '■ 人物ごとの記録',
+  '● 朝倉澪',
+  '  知っていること:',
+  '  - 第1章: ルナから、流れ星を数えに来たと聞いた'
+].join('\n')
+
+// user の中で、行がちょうど見出しになっている数。
+const headingCount = (text: string, heading: string): number =>
+  text.split('\n').filter((line) => line === `【${heading}】`).length
+
+describe('buildChapterPrompt: 省略した章', () => {
+  // 第 1・2 章は本文を渡せない (予算を超えた古い章)、第 3 章は全文。順不同で渡す。
+  const mixed: PriorChapterInput[] = [
+    { chapter_number: 3, title: '保存済みの題3', content: chapterText(3) },
+    { chapter_number: 1, title: '保存済みの題1', omitted: true },
+    { chapter_number: 2, title: null, omitted: true }
+  ]
+
+  test('見出しの 1 行だけを、番号順の位置に出す (全文の章と混ざってよい)', () => {
+    const { user } = buildChapterPrompt(input(4, { priorChapters: mixed, ledgerText }))
+    expect(section(user, '確定済みの本文')).toBe(
+      [
+        '【確定済みの本文】',
+        '▼ 第1章「保存済みの題1」（本文は省略。内容は【確定事項】を参照）',
+        '',
+        '▼ 第2章（本文は省略。内容は【確定事項】を参照）',
+        '',
+        `▼ 第3章「保存済みの題3」\n${chapterText(3)}`
+      ].join('\n')
+    )
+    expect(user).not.toContain('\n\n\n')
+  })
+
+  test('確定事項が無いときは、章立ての概要を指す', () => {
+    const { user } = buildChapterPrompt(input(4, { priorChapters: mixed }))
+    expect(section(user, '確定済みの本文')).toContain(
+      '▼ 第1章「保存済みの題1」（本文は省略。内容は【全体の章立て】の概要を参照）'
+    )
+    expect(user).not.toContain('確定事項')
+  })
+
+  test('今回の章以降の番号は載せない', () => {
+    const { user } = buildChapterPrompt(
+      input(2, {
+        priorChapters: [
+          { chapter_number: 1, title: '保存済みの題1', omitted: true },
+          { chapter_number: 2, title: '書き直す前の題', omitted: true },
+          { chapter_number: 3, title: '後の章の題', omitted: true }
+        ],
+        ledgerText
+      })
+    )
+    expect(section(user, '確定済みの本文')).toBe(
+      '【確定済みの本文】\n▼ 第1章「保存済みの題1」（本文は省略。内容は【確定事項】を参照）'
+    )
+  })
+
+  test('直前の章が省略なら、確定事項の続きとして書き始めさせる', () => {
+    const omittedAll: PriorChapterInput[] = [
+      { chapter_number: 1, title: null, omitted: true },
+      { chapter_number: 2, title: null, omitted: true }
+    ]
+    const withLedger = section(
+      buildChapterPrompt(input(3, { priorChapters: omittedAll, ledgerText })).user,
+      '今回の執筆'
+    )
+    expect(withLedger).toContain(
+      '執筆済み: 第1〜2章（第2章の本文は省略している。【確定事項】の内容の続きとして書き始める）'
+    )
+    // 確定事項も無ければ、資料は章立ての概要だけ
+    const withoutLedger = section(buildChapterPrompt(input(3, { priorChapters: omittedAll })).user, '今回の執筆')
+    expect(withoutLedger).toContain('執筆済み: 第1〜2章（第2章の本文は資料に無い。概要の続きとして書き始める）')
+    // 直前の章が全文なら、それより前が省略でも、終わりから続けて書かせる
+    const previousFull = section(buildChapterPrompt(input(4, { priorChapters: mixed, ledgerText })).user, '今回の執筆')
+    expect(previousFull).toContain('執筆済み: 第1〜3章（第3章の終わりから続けて書く）')
+  })
+})
+
+describe('buildChapterPrompt: 確定事項', () => {
+  test('確定済みの本文の後、この章の登場人物の前に、渡された文面のまま置く', () => {
+    const { user } = buildChapterPrompt(input(3, { ledgerText }))
+    expect(headings(user)).toEqual([
+      '作品情報',
+      '文体・視点',
+      '全体の章立て',
+      '確定済みの本文',
+      '確定事項',
+      'この章の登場人物',
+      'キャラクター間の関係',
+      '今回の執筆'
+    ])
+    expect(user).toContain(`${chapterText(2)}\n\n${ledgerText}\n\n【この章の登場人物】\n`)
+    expect(user).not.toContain('\n\n\n')
+  })
+
+  test('見出しは 1 つ (見出しつきで渡しても、見出し無しで渡しても)', () => {
+    const withHeading = buildChapterPrompt(input(3, { ledgerText })).user
+    const withoutHeading = buildChapterPrompt(input(3, { ledgerText: ledgerText.slice('【確定事項】\n'.length) })).user
+    expect(headingCount(withHeading, '確定事項')).toBe(1)
+    expect(withoutHeading).toBe(withHeading)
+    // 前後の空行や CRLF があっても同じ
+    expect(buildChapterPrompt(input(3, { ledgerText: `\n\n${ledgerText.replace(/\n/g, '\r\n')}\n\n` })).user).toBe(
+      withHeading
+    )
+  })
+
+  test("'' や空白だけ、未指定なら出さない", () => {
+    const base = buildChapterPrompt(input(3)).user
+    expect(headings(base)).not.toContain('確定事項')
+    for (const empty of ['', '  \n\n', '【確定事項】', '【確定事項】\n\n']) {
+      expect(buildChapterPrompt(input(3, { ledgerText: empty })).user).toBe(base)
+    }
+  })
+
+  test('ledger.ts の renderLedger の出力をそのまま置ける', () => {
+    const rendered = renderLedger(
+      buildLedger([
+        {
+          number: 1,
+          record: {
+            summary: '澪が屋上でルナと出会った。',
+            facts: ['屋上の鍵は朝倉澪が預かっている。'],
+            characters: [
+              {
+                name: '朝倉澪',
+                actions: ['屋上でルナに声をかけた'],
+                learned: ['ルナから名前を聞いた'],
+                state: '屋上にいる。'
+              }
+            ],
+            threads_opened: [{ id: 'c1-1', description: '望遠鏡の持ち主が分からない。' }],
+            threads_resolved: [],
+            end_state: { time: '夜', place: '屋上', present: ['朝倉澪', 'ルナ'] }
+          }
+        }
+      ])
+    )
+    expect(rendered).toStartWith('【確定事項】\n')
+    const { user } = buildChapterPrompt(input(2, { ledgerText: rendered }))
+    expect(headingCount(user, '確定事項')).toBe(1)
+    expect(user).toContain(`\n\n${rendered}\n\n【この章の登場人物】\n`)
+    expect(user).not.toContain('\n\n\n')
+    // system の規則は、確定事項の中の小見出しを名前で指している。ledger.ts の文面が変わったら、規則の側も直す
+    const { system } = buildChapterPrompt(input(2, { ledgerText: rendered }))
+    for (const label of ['知っていること', '未回収の伏線']) {
+      expect(system).toContain(`【確定事項】の「${label}」`)
+      expect(rendered).toContain(label)
+    }
+    // renderLedger は何も無ければ '' を返す。その場合は節を出さない
+    expect(headings(buildChapterPrompt(input(2, { ledgerText: renderLedger(buildLedger([])) })).user)).not.toContain(
+      '確定事項'
+    )
+  })
+
+  test('system は確定事項の有無で変わらない', () => {
+    expect(buildChapterPrompt(input(3, { ledgerText })).system).toBe(buildChapterPrompt(input(3)).system)
+    expect(buildChapterPrompt(input(1)).system).toBe(buildChapterPrompt(input(5, { ledgerText })).system)
+  })
+
+  test('前半の安定性: 確定事項が章ごとに変わっても、前の章の本文の終わりまでが次の章の先頭と一致する', () => {
+    const ledgerOf = (n: number): string => `${ledgerText}\n\n■ 直前の章の終わり（第${n}章）\n- 場所: 屋上`
+    for (const n of [2, 3, 4]) {
+      const current = buildChapterPrompt(input(n, { ledgerText: ledgerOf(n - 1) })).user
+      const next = buildChapterPrompt(input(n + 1, { ledgerText: ledgerOf(n) })).user
+      const lastText = chapterText(n - 1)
+      const end = current.indexOf(lastText) + lastText.length
+      expect(next.startsWith(current.slice(0, end))).toBe(true)
+      // 確定事項は、変わらない部分より後にある
+      expect(current.indexOf('【確定事項】\n')).toBeGreaterThan(end)
+    }
+  })
+})
+
+describe('buildChapterPromptForStorage', () => {
+  // 第 1 章は省略、第 2・3 章は全文。
+  const priorChapters: PriorChapterInput[] = [
+    { chapter_number: 1, title: '保存済みの題1', omitted: true },
+    { chapter_number: 2, title: '保存済みの題2', content: chapterText(2) },
+    { chapter_number: 3, title: null, content: `\n\n${'あ'.repeat(2254)}\n\n` }
+  ]
+  const storageInput = input(4, { priorChapters, ledgerText })
+  const stored = buildChapterPromptForStorage(storageInput)
+
+  test('全文の章は見出しを残し、本文を字数の 1 行に置き換える', () => {
+    expect(section(stored, '確定済みの本文')).toBe(
+      [
+        '【確定済みの本文】',
+        '▼ 第1章「保存済みの題1」（本文は省略。内容は【確定事項】を参照）',
+        '',
+        '▼ 第2章「保存済みの題2」',
+        `（本文${chapterText(2).length}字。モデルには全文を渡し、保存では省略）`,
+        '',
+        '▼ 第3章',
+        // 字数は前後の空行を除いて数え、3 桁で区切る
+        '（本文2,254字。モデルには全文を渡し、保存では省略）'
+      ].join('\n')
+    )
+    expect(stored).not.toContain('第2章の地の文')
+    expect(stored).not.toContain('ああああ')
+  })
+
+  test('それ以外は、送るプロンプトを renderPromptForStorage したものと同じ', () => {
+    const sent = renderPromptForStorage(buildChapterPrompt(storageInput))
+    const replaced = sent
+      .replace(chapterText(2), `（本文${chapterText(2).length}字。モデルには全文を渡し、保存では省略）`)
+      .replace('あ'.repeat(2254), '（本文2,254字。モデルには全文を渡し、保存では省略）')
+    expect(stored).toBe(replaced)
+    // system と user の両方、確定事項、人物、今回の執筆が入っている
+    expect(stored).toStartWith('===== system =====\n')
+    expect(stored).toContain('\n\n===== user =====\n【作品情報】\n')
+    expect(stored).toContain(`\n\n${ledgerText}\n\n【この章の登場人物】\n`)
+    expect(stored).toContain('【今回の執筆】\n第4章（全5章）の本文を書く。')
+    expect(stored.length).toBeLessThan(sent.length)
+  })
+
+  test('既出の章が無ければ、送るプロンプトと同じ', () => {
+    const first = input(1)
+    expect(buildChapterPromptForStorage(first)).toBe(renderPromptForStorage(buildChapterPrompt(first)))
+  })
+
+  test('章立てに無い章番号は throw する', () => {
+    expect(() => buildChapterPromptForStorage(input(6))).toThrow('Chapter 6 not found in outline')
+  })
+})
+
 // ---------------------- 本文: 登場人物 ----------------------
 
 describe('buildChapterPrompt: 登場人物の絞り込み', () => {
@@ -610,6 +848,30 @@ describe('buildChapterPrompt: system の規則', () => {
     expect(system).toContain('物語全体を総括したり、決意や希望の独白で締めくくったりしない')
     expect(system).toContain('前の章と同じ言い回しで締めない')
     expect(system).toContain('最終章は、結末まで書き切る')
+  })
+
+  test('確定事項: 本文と同じく確定している。食い違うときは 本文 > 確定事項 > 概要', () => {
+    expect(system).toContain(
+      '【確定事項】は、ここまでの本文から抜き出した記録である。本文と同じく確定していて、矛盾させない'
+    )
+    expect(system).toContain('本文を省略した章については、これが資料になる')
+    expect(system).toContain('【全体の章立て】の概要や【確定事項】が確定済みの本文と食い違うときは、本文を正とする')
+    expect(system).toContain('概要と【確定事項】が食い違うときは、【確定事項】を正とする')
+  })
+
+  test('確定事項: 知っていることは抜粋。知っているはずのことを忘れさせず、居合わせていない出来事を知らせない', () => {
+    expect(system).toContain('その人物が既に知っていることの抜粋で、全部ではない')
+    expect(system).toContain('挙がっていることは、知っている前提で書く')
+    expect(system).toContain(
+      '人物が居合わせていない場面の出来事は、誰かから聞く、自分で気づくといった描写なしに、その人物が知っている前提で書かない'
+    )
+    // 「一覧に無いことは知らない」とは読ませない (当然知っていることまで知らない扱いになる)
+    expect(system).not.toMatch(/(?:挙がっていない|一覧に無い|書かれていない)ことは[^。]*知らない/)
+  })
+
+  test('確定事項: 未回収の伏線は、概要に関わるものだけ', () => {
+    expect(system).toContain('「未回収の伏線」は、【今回の執筆】の概要に関わるものだけを扱う')
+    expect(system).toContain('関わらないものを、この章で無理に回収しない')
   })
 
   test('人物', () => {
