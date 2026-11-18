@@ -357,19 +357,31 @@ const renderWithOmission = (ledger: Ledger, omitted: number[]): string => {
 // 全人物のいちばん古い章の行をまとめて省き、収まるまで、または「したこと」が無くなるまで続ける。
 // 「したこと」は「これまでの流れ」と重なるので先に削る。流れ、事実、知っていること、状態、未回収の伏線、
 // 直前の章の終わりは、後の章が矛盾させてはいけない情報なので削らない。省いても超えるなら、超えたまま返す。
-export const renderLedger = (ledger: Ledger, options: { maxChars?: number } = {}): string => {
+//
+// previousChapter (これから書く章の直前の章番号) を渡すと、ledger.endState がその章のものでないときは
+// 「直前の章の終わり」の節を出さない。渡さなければ、endState を章番号つきでそのまま出す。
+export const renderLedger = (ledger: Ledger, options: { maxChars?: number; previousChapter?: number } = {}): string => {
   const limit = options.maxChars === undefined ? LEDGER_MAX_CHARS : options.maxChars
+  // 直前の章の記録が無い (抽出に失敗した) と、buildLedger の endState はもっと前の章のものになる。
+  // それを「直前の章の終わり」として載せると書き出しの位置を誤らせるので、章が違うときは節ごと出さない。
+  // 長さの判定も、この節を除いた台帳で行う。
+  const shown =
+    options.previousChapter === undefined ||
+    ledger.endState === null ||
+    ledger.endState.chapter === options.previousChapter
+      ? ledger
+      : { ...ledger, endState: null }
   // 省く候補は、「したこと」が実際にある章 (昇順)
   const candidates = [
     ...new Set(
-      ledger.characters.flatMap((character) =>
+      shown.characters.flatMap((character) =>
         character.actions.filter((entry) => entry.items.length > 0).map((entry) => entry.chapter)
       )
     )
   ].sort((a, b) => a - b)
   // 古い章から 1 つずつ増やして、収まる最初のものを採る (再帰の深さは章数まで)
   const fit = (count: number): string => {
-    const text = renderWithOmission(ledger, candidates.slice(0, count))
+    const text = renderWithOmission(shown, candidates.slice(0, count))
     return text.length <= limit || count >= candidates.length ? text : fit(count + 1)
   }
   return fit(0)

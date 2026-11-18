@@ -7,17 +7,19 @@ import {
   type CastRelation,
   castBody,
   chapterLabel,
-  compactText,
   ENDING_LINES,
+  inlineJson,
   JSON_ONLY_REQUEST,
   type NovelParams,
   narratorName,
   narratorTag,
   novelInfoBody,
+  oneLine,
   type Prompt,
   relationsBody,
   renderSections,
   type Section,
+  type SkeletonValue,
   type StyleParams,
   trimChapterText
 } from '@/lib/novel/prompts'
@@ -30,25 +32,6 @@ import type { StoryThread } from '@/schemas/story.dto'
 //   schema を使えない呼び出し (OpenAI 互換の json_object) でも同じ形が返るよう、出力の見本を system に書く。
 // - 規則の例に、入力の人物名や本文の内容を使わない (例をそのまま答えに写されないようにする)。
 // - user の【今回の依頼】に「JSON」の語を必ず入れる (JSON_ONLY_REQUEST。理由は prompts.ts の定義にある)。
-
-// 自由記述を 1 行にする (箇条書きの 1 項目に収めるため)。
-function oneLine(text: string): string {
-  return compactText(text)
-    .split('\n')
-    .map((line) => line.trim())
-    .join(' ')
-}
-
-// 見本の値。文字列、配列、オブジェクトだけで組む。
-type SkeletonValue = string | SkeletonValue[] | { [key: string]: SkeletonValue }
-
-// 1 行の JSON。JSON.stringify は区切りの空白を入れないので、読みやすいよう空白つきで書く。
-function inlineJson(value: SkeletonValue): string {
-  if (typeof value === 'string') return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(inlineJson).join(', ')}]`
-  const members = Object.entries(value).map(([key, member]) => `${JSON.stringify(key)}: ${inlineJson(member)}`)
-  return `{ ${members.join(', ')} }`
-}
 
 // 出力の形の見本。キーの有無と順序は json-schemas.ts の schema と同じにする (テストで突き合わせる)。
 // 値は項目の意味を表す仮の文字列で、全体は JSON として読める形にしておく。

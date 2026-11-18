@@ -1,6 +1,8 @@
 import { isMentioned } from '@/lib/novel/checks'
+import { OUTLINE_PLAN_LIMITS } from '@/lib/novel/outline'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
 import { FOCAL_POVS, type Outline, type OutlineChapter } from '@/schemas/novel.dto'
+import type { AddressEntry, StoryBible, StoryThread } from '@/schemas/story.dto'
 
 // LLM に渡すプロンプトの組み立て (純粋関数)。cloudflare:workers、Prisma、fetch に依存させない。
 //
@@ -9,11 +11,13 @@ import { FOCAL_POVS, type Outline, type OutlineChapter } from '@/schemas/novel.d
 // - 本文プロンプトの user は「章をまたいで変わらない資料 → 確定済みの本文 → この章だけの資料 → 今回の執筆」の順。
 //   前半が章ごとに変わらないので、プロンプトキャッシュに乗る。章番号など章ごとに変わる情報は後半にだけ置く。
 // - 避けたい言い回しを例として引用しない (モデルが例文を本文に写すため)。
+// - 作品設計 (bible) も章の計画 (出来事など) も無い旧データでは、それらが入る前と同じ文面を返す。
 
 // system = LLM の system 指示 (Gemini の systemInstruction、OpenAI 互換の system ロール)。user = 資料と今回の指示。
 export type Prompt = { system: string; user: string }
 
 // 小説に登場するキャラの詳細。辞典 (Character) とその小説での役割 (NovelCharacter.role) を合わせたもの。
+// 成人指定の作品では、呼び出し側が年齢・職業・外見・背景を作品設計の文面に差し替えて渡す (bible.ts の applyBibleCast)。
 export type CastMember = {
   name: string
   role: string
@@ -72,11 +76,26 @@ export type ChapterPromptInput = {
   priorChapters: PriorChapterInput[]
   // ここまでの章の記録を累積した【確定事項】(ledger.ts の renderLedger の戻り値。見出しつき)。'' や未指定なら出さない。
   ledgerText?: string
+  // 作品設計。無い旧データでは null か未指定。
+  bible?: StoryBible | null
+  // 本文にも渡る執筆上の指示 (Novel.writing_notes)。'' や未指定なら出さない。
+  writingNotes?: string
   targetChars: number
   style: StyleParams
   cast: CastMember[]
   relations: CastRelation[]
 }
+
+export type OutlinePromptInput = {
+  novel: NovelParams
+  style: StyleParams
+  cast: CastMember[]
+  relations: CastRelation[]
+  // 作品設計。無い旧データでは null か未指定。
+  bible?: StoryBible | null
+}
+
+export type OutlineChapterPromptInput = OutlinePromptInput & { existing: Outline; chapterNumber: number }
 
 // ---------------------- 文面の部品 ----------------------
 
@@ -98,6 +117,14 @@ export function compactText(text: string): string {
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0)
     .join('\n')
+}
+
+// 自由記述を 1 行にする (箇条書きの 1 項目に収めるため)。
+export function oneLine(text: string): string {
+  return compactText(text)
+    .split('\n')
+    .map((line) => line.trim())
+    .join(' ')
 }
 
 // 複数行の値の 2 行目以降を字下げして、ラベルつきの 1 項目に見えるようにする。
@@ -132,13 +159,91 @@ function sortedChapters(outline: Outline): OutlineChapter[] {
   return [...outline.chapters].sort((a, b) => a.chapter_number - b.chapter_number)
 }
 
-function outlineLine(chapter: OutlineChapter): string {
-  const summary = hang(chapter.summary, '  ')
-  const label = chapterLabel(chapter.chapter_number, chapter.title)
-  return summary.length > 0 ? `${label}: ${summary}` : label
+export function bullets(lines: string[]): string {
+  return lines.map((line) => `- ${line}`).join('\n')
 }
 
-// ---------------------- 視点・文体 ----------------------
+// JSON の見本の値。文字列、配列、オブジェクトだけで組む。
+export type SkeletonValue = string | SkeletonValue[] | { [key: string]: SkeletonValue }
+
+// 1 行の JSON。JSON.stringify は区切りの空白を入れないので、読みやすいよう空白つきで書く。
+export function inlineJson(value: SkeletonValue): string {
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(inlineJson).join(', ')}]`
+  const members = Object.entries(value).map(([key, member]) => `${JSON.stringify(key)}: ${inlineJson(member)}`)
+  return `{ ${members.join(', ')} }`
+}
+
+// ---------------------- 章の計画 ----------------------
+
+// 章の計画 (章立てに後から足した項目)。この項目より前に作られた章立てには無い。
+type ChapterPlan = {
+  timePlace: string
+  events: string[]
+  endState: string
+  setups: StoryThread[]
+  payoffs: string[]
+}
+
+// 型の上では必須だが、Zod を通っていない章立て (DO ストレージに残った旧形式の payload など) には項目そのものが無い。
+// 無い項目は空として読む。
+type PlanFields = Partial<Pick<OutlineChapter, 'time_place' | 'events' | 'end_state' | 'setups' | 'payoffs'>>
+
+function planOf(entry: PlanFields): ChapterPlan {
+  const setups = entry.setups === undefined ? [] : entry.setups
+  const payoffs = entry.payoffs === undefined ? [] : entry.payoffs
+  return {
+    timePlace: entry.time_place === undefined ? '' : oneLine(entry.time_place),
+    events: (entry.events === undefined ? [] : entry.events).map(oneLine).filter((event) => event.length > 0),
+    endState: entry.end_state === undefined ? '' : oneLine(entry.end_state),
+    setups: setups
+      .map((setup) => ({ id: setup.id.trim(), description: oneLine(setup.description) }))
+      .filter((setup) => setup.id.length > 0),
+    payoffs: [...new Set(payoffs.map((id) => id.trim()).filter((id) => id.length > 0))]
+  }
+}
+
+function hasPlan(plan: ChapterPlan): boolean {
+  return (
+    plan.events.length > 0 ||
+    plan.timePlace.length > 0 ||
+    plan.endState.length > 0 ||
+    plan.setups.length > 0 ||
+    plan.payoffs.length > 0
+  )
+}
+
+function threadLine(id: string, description: string): string {
+  return description.length > 0 ? `[${id}] ${description}` : `[${id}]`
+}
+
+// 伏線の id → 説明 (章立ての全章の setups から)。同じ id は最初のもの。
+function setupDescriptions(chapters: OutlineChapter[]): Map<string, string> {
+  const found = new Map<string, string>()
+  for (const setup of chapters.flatMap((chapter) => planOf(chapter).setups)) {
+    if (!found.has(setup.id)) found.set(setup.id, setup.description)
+  }
+  return found
+}
+
+// 今回の章より前の章が張り、今回の章より後の章が回収する伏線。この章では決着させない。
+// 【確定事項】の「未回収の伏線」に並ぶので、どれを先送りするかをコードで決めて渡す (章ごとにモデルに判断させない)。
+function deferredSetups(chapters: OutlineChapter[], chapterNumber: number): StoryThread[] {
+  const paidLater = new Set(
+    chapters.filter((chapter) => chapter.chapter_number > chapterNumber).flatMap((chapter) => planOf(chapter).payoffs)
+  )
+  const seen = new Set<string>()
+  return chapters
+    .filter((chapter) => chapter.chapter_number < chapterNumber)
+    .flatMap((chapter) => planOf(chapter).setups)
+    .filter((setup) => {
+      if (!paidLater.has(setup.id) || seen.has(setup.id)) return false
+      seen.add(setup.id)
+      return true
+    })
+}
+
+// ---------------------- 視点・文体・年齢指定・結末 ----------------------
 
 function povLine(style: StyleParams): string {
   const { pov, viewpointChar: vc } = style
@@ -167,11 +272,28 @@ const TONE_LINES: Record<string, string | undefined> = {
   やさしい文体: '平易でやさしい童話風の文体'
 }
 
-// 年齢指定は描写の踏み込み度合いを決める (文体とは独立)。
-const RATING_LINES: Record<string, string | undefined> = {
-  全年齢: '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること',
-  R15: '物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
-  R18: '成人向け。物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
+const ADULT_ONLY = '物語の登場人物はすべて 18 歳以上の成人とする。'
+// 人物設定の原文 (辞典) に未成年を連想させる記述が残っているときの読み替え。
+const READ_AS_ADULT =
+  'たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。'
+// 作品設計が成人としての人物設定を確定しているとき。人物設定は差し替わって渡るので、上の読み替えは要らない。
+// ただし【作品情報】の世界観・設定は利用者が書いた原文のまま渡る (「高校二年生の編入試験」など)。
+// 成人指定の作品で未成年として描写させないよう、設定の原文についての読み替えだけを残す。
+const READ_SETTING_AS_ADULT =
+  '【作品情報】の世界観・設定に、高校や学年など未成年を連想させる記述があっても、成人の設定として読み替えること。学校設定が必要な場合は大学とする。'
+
+// 年齢指定は描写の踏み込み度合いを決める (文体とは独立)。知らない値なら undefined。
+// castResolved = 作品設計が成人としての人物設定 (cast) を確定していて、渡される人物設定がそれに差し替わっている。
+function ratingLine(ageRating: string | undefined, castResolved: boolean): string | undefined {
+  const reading = castResolved ? READ_SETTING_AS_ADULT : READ_AS_ADULT
+  if (ageRating === '全年齢') return '性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること'
+  if (ageRating === 'R15') {
+    return `${ADULT_ONLY}${reading}性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する`
+  }
+  if (ageRating === 'R18') {
+    return `成人向け。${ADULT_ONLY}${reading}性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい`
+  }
+  return undefined
 }
 
 export const ENDING_LINES: Record<string, string | undefined> = {
@@ -183,19 +305,109 @@ export const ENDING_LINES: Record<string, string | undefined> = {
   オープンエンド: '物語の結末を断定せず、複数の解釈の余地を残して幕を引くこと'
 }
 
-// 結末は章立てにだけ渡す。本文は章立ての概要を通して結末へ向かうので、渡し直さない。
-function styleBody(style: StyleParams, includeEnding: boolean): string {
+// 本文の【文体・視点】。結末の方向は渡さない (本文は章立てと作品設計を通して結末へ向かう)。
+function styleBody(style: StyleParams, castResolved: boolean): string {
   const tone = TONE_LINES[style.tone]
-  const rating = style.age_rating === undefined ? undefined : RATING_LINES[style.age_rating]
-  const ending = includeEnding && style.ending !== undefined ? ENDING_LINES[style.ending] : undefined
+  const rating = ratingLine(style.age_rating, castResolved)
   return [
     `視点: ${povLine(style)}`,
     `文体: ${tone === undefined ? DEFAULT_TONE_LINE : tone}`,
-    rating === undefined ? '' : `年齢指定: ${rating}`,
-    ending === undefined ? '' : `結末: ${ending}`
+    rating === undefined ? '' : `年齢指定: ${rating}`
   ]
     .filter((line) => line.length > 0)
     .join('\n')
+}
+
+// ---------------------- 作品設計・呼称表 ----------------------
+
+// 作品設計が成人としての人物設定を確定しているか。
+function castResolvedBy(bible: StoryBible | null | undefined): boolean {
+  return bible !== null && bible !== undefined && bible.cast.length > 0
+}
+
+function labeledList(label: string, items: string[]): string {
+  const lines = items.map(oneLine).filter((item) => item.length > 0)
+  return lines.length > 0 ? [`${label}:`, ...lines.map((item) => `- ${item}`)].join('\n') : ''
+}
+
+// 【作品設計】の中身。物語の核、結末、人物の変化、世界のルールと用語、時系列。空の項目は出さない。
+// 呼称表は【呼称表】の節に分ける (本文だけに渡す)。成人としての人物設定 (cast) は人物設定に差し替えて渡るので、ここには出さない。
+// 小見出しの語 (「結末」「人物の変化」など) は system の規則が名前で指している。
+function bibleBody(bible: StoryBible | null | undefined): string {
+  if (bible === null || bible === undefined) return ''
+  const arcs = bible.arcs
+    .map((arc) => ({ name: arc.name.trim(), start: oneLine(arc.start), end: oneLine(arc.end) }))
+    .filter((arc) => arc.name.length > 0 && (arc.start.length > 0 || arc.end.length > 0))
+    .map((arc) =>
+      [
+        `- ${arc.name}`,
+        arc.start.length > 0 ? `  始まり: ${arc.start}` : '',
+        arc.end.length > 0 ? `  終わり: ${arc.end}` : ''
+      ]
+        .filter((line) => line.length > 0)
+        .join('\n')
+    )
+  const terms = bible.world.terms
+    .map((entry) => ({ term: entry.term.trim(), note: oneLine(entry.note) }))
+    .filter((entry) => entry.term.length > 0)
+    .map((entry) => (entry.note.length > 0 ? `${entry.term}: ${entry.note}` : entry.term))
+  return [
+    bible.premise.trim().length > 0 ? `物語の核: ${hang(bible.premise, '  ')}` : '',
+    bible.ending.trim().length > 0 ? `結末: ${hang(bible.ending, '  ')}` : '',
+    arcs.length > 0 ? ['人物の変化:', ...arcs].join('\n') : '',
+    labeledList('世界のルール', bible.world.rules),
+    labeledList('用語', terms),
+    labeledList('時系列', bible.timeline)
+  ]
+    .filter((part) => part.length > 0)
+    .join('\n')
+}
+
+// 呼称表。from が to を call と呼ぶ。
+type AddressTable = { rows: AddressEntry[]; calls: Map<string, string> }
+
+const pairKey = (from: string, to: string): string => `${from}\u0000${to}`
+
+// 空の行を除き、同じ組は最初の 1 行だけにする。並びは作品設計のまま。
+function addressTableOf(bible: StoryBible | null | undefined): AddressTable {
+  const entries = bible === null || bible === undefined ? [] : bible.addresses
+  const rows: AddressEntry[] = []
+  const calls = new Map<string, string>()
+  for (const entry of entries) {
+    const row = { from: entry.from.trim(), to: entry.to.trim(), call: oneLine(entry.call) }
+    const key = pairKey(row.from, row.to)
+    if (row.from.length > 0 && row.to.length > 0 && row.call.length > 0 && !calls.has(key)) {
+      rows.push(row)
+      calls.set(key, row.call)
+    }
+  }
+  return { rows, calls }
+}
+
+// 【呼称表】の中身。全ての組を載せる (章ごとに絞ると、章をまたいで変わらない部分が章で変わってしまう)。
+function addressBody(table: AddressTable): string {
+  if (table.rows.length === 0) return ''
+  return [
+    '「呼ぶ人 → 呼ばれる人: 呼び方」の表。',
+    ...table.rows.map((row) => `- ${row.from} → ${row.to}: ${row.call}`)
+  ].join('\n')
+}
+
+// 呼称表が名簿の全ての組 (A→B と B→A) を持っているか。人物が多い作品では、関係を定義した組と語り手との組だけになる。
+function coversAllPairs(cast: CastMember[], table: AddressTable): boolean {
+  const names = [...new Set(cast.map((member) => member.name))]
+  return names.every((from) => names.every((to) => from === to || table.calls.has(pairKey(from, to))))
+}
+
+// 呼び方の資料がどうなっているか (作品単位で決まる。system の【人物】の規則をこれで選ぶ)。
+//   none     呼称表が無い。人物ごとの「他者の呼び方」と、関係の呼び方の指定を使う
+//   table    呼称表が全ての組を持つ
+//   partial  呼称表はあるが、無い組が残る。その組は「他者の呼び方」で補う
+type AddressMode = 'none' | 'table' | 'partial'
+
+function addressModeOf(cast: CastMember[], table: AddressTable): AddressMode {
+  if (table.rows.length === 0) return 'none'
+  return coversAllPairs(cast, table) ? 'table' : 'partial'
 }
 
 // ---------------------- 登場人物 ----------------------
@@ -271,12 +483,12 @@ type ChapterCast = { present: CastMember[]; absent: CastMember[]; scoped: boolea
 
 const KANJI_ONLY = /^\p{Script=Han}+$/u
 
-// 章の題と概要に人物の名前が出てくるか。見逃しを避ける側に倒す。拾いすぎても人物設定が 1 人ぶん増えるだけだが、
-// 漏らすと、概要に出てくる人物を「登場しない人物」として禁じてしまう。
+// 章の計画の文面 (題、概要、出来事、章末の状況) に人物の名前が出てくるか。見逃しを避ける側に倒す。
+// 拾いすぎても人物設定が 1 人ぶん増えるだけだが、漏らすと、計画に出てくる人物を「登場しない人物」として禁じてしまう。
 // checks.ts の loose の判定 (名前そのもの、区切りで分けた各部、4 字以上の名前の先頭・末尾の 2 字) に加えて、
 // 漢字だけの 3 字の名前は先頭・末尾の 2 字でも拾う (「朝倉澪」を「朝倉」で)。
 // かなの名前に広げないのは、「かぐや」が「かぐわしい」に一致するのを避けるため。
-// 1 字の姓や名 (「澪」「柊」) は一般の語と見分けられないので拾わない (漏れた分は ABSENT_LEAD の文面で概要を優先させる)。
+// 1 字の姓や名 (「澪」「柊」) は一般の語と見分けられないので拾わない (漏れた分は absentLead の文面で概要を優先させる)。
 function mentionedInPlan(planText: string, name: string): boolean {
   if (isMentioned(planText, name, { loose: true })) return true
   const chars = [...name.trim()]
@@ -287,15 +499,16 @@ function mentionedInPlan(planText: string, name: string): boolean {
 // その章に登場する人物と、しない人物に分ける。
 // - characters が空 (旧データ) なら全員が登場する扱い。
 // - 語り手は characters に無くても登場する扱い (章立てから漏れても口調・一人称・関係を渡すため)。
-// - 章の題か概要に名前が出てくる人物も、characters に無くても登場する扱い。
-//   characters はモデルが取りこぼすことがあり、概要に出てくる人物を禁じると指示どうしがぶつかる。
+// - 章の題、概要、出来事、章末の状況に名前が出てくる人物も、characters に無くても登場する扱い。
+//   characters はモデルが取りこぼすことがあり、計画に出てくる人物を禁じると指示どうしがぶつかる。
+//   張る伏線・回収する伏線は対象にしない (その場に居ない人物についての伏線がありうる)。
 // - characters が名簿の誰とも一致しないとき (名前を変えた後など) も全員にする。
 //   語り手だけを登場させ、残りを「登場しない人物」として締め出してしまうのを避ける。
 function splitCast(cast: CastMember[], entry: OutlineChapter, narrator: string | undefined): ChapterCast {
   const listed = new Set(entry.characters)
   if (!cast.some((member) => listed.has(member.name))) return { present: cast, absent: [], scoped: false }
-  // Phase 3 で章立てに events (出来事) が増えたら、ここに含める。
-  const planText = `${entry.title}\n${entry.summary}`
+  const plan = planOf(entry)
+  const planText = [entry.title, entry.summary, ...plan.events, plan.endState].join('\n')
   const present = cast.filter(
     (member) => listed.has(member.name) || member.name === narrator || mentionedInPlan(planText, member.name)
   )
@@ -307,25 +520,69 @@ function splitCast(cast: CastMember[], entry: OutlineChapter, narrator: string |
 const UNSCOPED_CAST_LEAD =
   '章立てにこの章の登場人物の指定が無いので、名簿の全員を載せる。誰が登場するかは概要から判断し、出番の無い人物を無理に登場させない。'
 
-// 登場しない人物の 1 行。名前、役割、登場する人物からの呼び方の上書き。
-function absentLine(member: CastMember, presentNames: Set<string>, relations: CastRelation[]): string {
-  const calls = relations
-    .filter((r) => r.target_name === member.name && presentNames.has(r.source_name) && r.address_override.length > 0)
-    .map((r) => `${r.source_name}からの呼び方は「${r.address_override}」`)
+// 呼称表があるとき、登場する相手への呼び方が全部表にある人物は「他者の呼び方」の行を出さない (呼称表に 1 本化する)。
+// 表に無い相手が残る人物だけ、その相手への呼び方として行を残す。
+function castForChapter(present: CastMember[], table: AddressTable): CastMember[] {
+  if (table.rows.length === 0) return present
+  return present.map((member) => {
+    const uncovered = present.some(
+      (other) => other.name !== member.name && !table.calls.has(pairKey(member.name, other.name))
+    )
+    return uncovered ? member : { ...member, address_others: '' }
+  })
+}
+
+// 呼称表にある組は、関係の行の「呼び方は「…」」を出さない (型のままの指定と、表の具体的な呼び方を並べない)。
+function relationsForChapter(relations: CastRelation[], table: AddressTable): CastRelation[] {
+  return relations.map((relation) =>
+    table.calls.has(pairKey(relation.source_name, relation.target_name))
+      ? { ...relation, address_override: '' }
+      : relation
+  )
+}
+
+// 登場しない人物の 1 行。名前、役割、登場する人物からの呼び方。
+// 呼称表があれば表から引き、表に無い組は関係の呼び方の指定を使う。
+function absentLine(member: CastMember, present: CastMember[], relations: CastRelation[], table: AddressTable): string {
+  const presentNames = new Set(present.map((p) => p.name))
+  const overrides = relations.filter(
+    (r) => r.target_name === member.name && presentNames.has(r.source_name) && r.address_override.length > 0
+  )
+  const calls =
+    table.rows.length === 0
+      ? overrides.map((r) => ({ from: r.source_name, call: r.address_override }))
+      : present.flatMap((p) => {
+          const call = table.calls.get(pairKey(p.name, member.name))
+          if (call !== undefined) return [{ from: p.name, call }]
+          const override = overrides.find((r) => r.source_name === p.name)
+          return override === undefined ? [] : [{ from: p.name, call: override.address_override }]
+        })
   const head = member.role.length > 0 ? `- ${member.name}（${member.role}）` : `- ${member.name}`
-  return calls.length > 0 ? `${head}: ${calls.join('、')}` : head
+  const text = calls.map((entry) => `${entry.from}からの呼び方は「${entry.call}」`)
+  return text.length > 0 ? `${head}: ${text.join('、')}` : head
 }
 
 // 設定の詳細は渡さない。名前だけ話題に出る場面で、呼び方を間違えないための節。
-// 登場させない理由 (概要に出てこない) を添え、概要と食い違うときは概要を優先させる。
-// この一覧は章立ての characters と名前の照合から作るので、概要に出てくる人物が紛れることがあるため。
-const ABSENT_LEAD =
-  '次の人物は、この章の概要に出てこないので、場面に登場させない（概要に出てくる人物がいれば、概要に従う）。会話で話題に出るときは、下の呼び方（指定が無ければ話し手の「他者の呼び方」）で呼ぶ。'
+// 登場させない理由 (計画に出てこない) を添え、計画と食い違うときは計画を優先させる。
+// この一覧は章立ての characters と名前の照合から作るので、計画に出てくる人物が紛れることがあるため。
+function absentLead(hasEvents: boolean, hasTable: boolean): string {
+  const source = hasEvents ? '概要と出来事' : '概要'
+  const calls = hasTable ? '下の呼び方（【呼称表】のとおり）' : '下の呼び方（指定が無ければ話し手の「他者の呼び方」）'
+  return `次の人物は、この章の${source}に出てこないので、場面に登場させない（${source}に出てくる人物がいれば、${source}に従う）。会話で話題に出るときは、${calls}で呼ぶ。`
+}
 
-function absentBody(absent: CastMember[], present: CastMember[], relations: CastRelation[]): string {
+function absentBody(
+  absent: CastMember[],
+  present: CastMember[],
+  relations: CastRelation[],
+  table: AddressTable,
+  hasEvents: boolean
+): string {
   if (absent.length === 0) return ''
-  const presentNames = new Set(present.map((member) => member.name))
-  return [ABSENT_LEAD, ...absent.map((member) => absentLine(member, presentNames, relations))].join('\n')
+  return [
+    absentLead(hasEvents, table.rows.length > 0),
+    ...absent.map((member) => absentLine(member, present, relations, table))
+  ].join('\n')
 }
 
 // ---------------------- 保存用 ----------------------
@@ -342,10 +599,16 @@ const MAX_SCENES = 8
 const CHARS_PER_SCENE_BASE = 1000
 
 // 目標字数を場面数に直す。字数だけを指示すると短く切り上げられるので、場面の数と 1 場面の厚みで伝える。
+// 章立てに出来事が無い旧データで使う (出来事があるときは、出来事ごとに割り当てる)。
 export function sceneGuide(targetChars: number): { scenes: number; charsPerScene: number } {
   const scenes = Math.min(MAX_SCENES, Math.max(MIN_SCENES, Math.round(targetChars / CHARS_PER_SCENE_BASE)))
   const charsPerScene = Math.max(100, Math.round(targetChars / scenes / 100) * 100)
   return { scenes, charsPerScene }
+}
+
+// 出来事 1 つあたりの字数 (100 字単位)。
+export function charsPerEvent(targetChars: number, eventCount: number): number {
+  return Math.max(100, Math.round(targetChars / Math.max(1, eventCount) / 100) * 100)
 }
 
 // ---------------------- 本文 ----------------------
@@ -353,46 +616,119 @@ export function sceneGuide(targetChars: number): { scenes: number; charsPerScene
 const CHAPTER_ROLE =
   'あなたはプロの小説家として、1つの小説を1章ずつ書き継いでいる。渡された資料に従って、【今回の執筆】で指定された章の本文を日本語で書く。'
 
+// system の文面を決める条件。どれも作品単位で決まり、章では変わらない (system を作品を通して同じ文面にするため)。
+type ChapterSystemFlags = {
+  hasCast: boolean
+  addressMode: AddressMode
+  // 【作品設計】の節がある
+  hasBible: boolean
+  // 作品設計に結末の具体像がある
+  hasBibleEnding: boolean
+  // 章立てに章の計画 (出来事、章末の状況、伏線) がある
+  hasPlan: boolean
+  // 【執筆上の指示】の節がある
+  hasNotes: boolean
+}
+
 // 各章が完結した短編として書かれ、場面や締めの言い回しが章をまたいで重なるのを防ぐ。
-const CHAPTER_SCOPE_RULES = [
-  '書くのは【今回の執筆】の概要の範囲。【全体の章立て】で後の章に割り当てられた出来事には入らない。',
-  '最初の章でなければ、直前の章が終わったところから続けて書き始める。章の間で時間が進む場合も、前の章の出来事を要約し直さない（読者は続けて読んでいる）。',
-  '既に書かれた場面、説明、言い回しを繰り返さない。人物や状況の紹介も、済んでいるものはやり直さない。',
-  '最終章以外は物語の途中である。その章の最後の出来事を書いたところで止め、物語全体を総括したり、決意や希望の独白で締めくくったりしない。前の章と同じ言い回しで締めない。',
-  '最終章は、結末まで書き切る。'
-]
+function scopeRules(flags: ChapterSystemFlags): string[] {
+  return [
+    '書くのは【今回の執筆】の概要の範囲。【全体の章立て】で後の章に割り当てられた出来事には入らない。',
+    // 出来事が決まっていないと、本文を書くたびにモデルが出来事を決め直し、章をまたいで同じ場面が入る。
+    // 「あるときは」と条件にするのは、計画の無い章が混ざる章立て (1 章だけ書き直した旧データ) でも同じ system を使うため。
+    flags.hasPlan
+      ? '【今回の執筆】に「出来事」があるときは、挙がっている順に、すべてを場面として書く。1つの出来事を数行の説明で済ませず、挙がっていない大きな出来事を足さない。'
+      : '',
+    '最初の章でなければ、直前の章が終わったところから続けて書き始める。章の間で時間が進む場合も、前の章の出来事を要約し直さない（読者は続けて読んでいる）。',
+    '既に書かれた場面、説明、言い回しを繰り返さない。人物や状況の紹介も、済んでいるものはやり直さない。',
+    flags.hasPlan
+      ? '最終章以外は物語の途中である。【今回の執筆】に「章末の状況」があればその状況になったところで、無ければ最後の出来事を書いたところで止める。その先を書かず、物語全体を総括したり、決意や希望の独白で締めくくったりしない。前の章と同じ言い回しで締めない。'
+      : '最終章以外は物語の途中である。その章の最後の出来事を書いたところで止め、物語全体を総括したり、決意や希望の独白で締めくくったりしない。前の章と同じ言い回しで締めない。',
+    flags.hasPlan
+      ? '「張る伏線」は、この章の出来事の中で読者に見せる。後の章で回収するので、種明かしはしない。「回収する伏線」は、この章で読者に分かる形で決着させる。'
+      : '',
+    // 作品設計には結末の具体像が書いてある。途中の章で先取りさせない。
+    flags.hasBible
+      ? '【作品設計】の「結末」と、「人物の変化」の終わりの状態は、最終章で至るものである。最終章より前の章では、人物は変化の途中にあり、結末に先に到達させない。結末を明かす台詞や独白も入れない。'
+      : '',
+    flags.hasBibleEnding ? '最終章は、【作品設計】の「結末」まで書き切る。' : '最終章は、結末まで書き切る。'
+  ].filter((rule) => rule.length > 0)
+}
 
 // 【確定事項】が無い章 (第 1 章、記録の無い旧データ) でも同じ文面を使う (system を作品を通して変えないため)。
-const CHAPTER_CONSISTENCY_RULES = [
-  '【確定済みの本文】は既に書き上がった章で、後から変えられない。そこに書かれた事実（外見、持ち物、場所、日時、約束、誰が何を知っているか）、呼称、時系列は確定している。矛盾させない。',
-  '【確定事項】は、ここまでの本文から抜き出した記録である。本文と同じく確定していて、矛盾させない。本文を省略した章については、これが資料になる。',
-  // 記録は抽出を誤ることがあるので、全文がある章は全文を正とする。
-  '【全体の章立て】の概要や【確定事項】が確定済みの本文と食い違うときは、本文を正とする。概要と【確定事項】が食い違うときは、【確定事項】を正とする。',
-  // 人物の設定 (辞典) は章が進んでも同じ文面で渡るので、本文で変わった状態 (変装、関係の進展) を巻き戻させない。
-  '人物の設定は物語の始まりの時点のものである。ここまでの章で変わったこと（外見、関係、知っていること）は、変わった後の状態を引き継ぐ。',
-  // 「知っていること」は 1 章あたり数項目の抜粋。「一覧に無いことは知らない」とは読ませない
-  // (当然知っていることまで知らない扱いになるため)。防ぎたいのは次の 2 つ:
-  // 知っているはずのことを忘れている、居合わせていない出来事を知っている。
-  '【確定事項】の「知っていること」は、その人物が既に知っていることの抜粋で、全部ではない。挙がっていることは、知っている前提で書く（忘れていたり、初めて知ったように反応したりさせない）。',
-  '人物が居合わせていない場面の出来事は、誰かから聞く、自分で気づくといった描写なしに、その人物が知っている前提で書かない。',
-  // 伏線の回収の計画は Phase 3 で章立てに入る。それまでは、目に入った伏線を片端から回収させない。
-  '【確定事項】の「未回収の伏線」は、【今回の執筆】の概要に関わるものだけを扱う。関わらないものを、この章で無理に回収しない。'
-]
+function consistencyRules(flags: ChapterSystemFlags): string[] {
+  return [
+    '【確定済みの本文】は既に書き上がった章で、後から変えられない。そこに書かれた事実（外見、持ち物、場所、日時、約束、誰が何を知っているか）、呼称、時系列は確定している。矛盾させない。',
+    '【確定事項】は、ここまでの本文から抜き出した記録である。本文と同じく確定していて、矛盾させない。本文を省略した章については、これが資料になる。',
+    flags.hasBible
+      ? '【作品設計】は作品全体の設計で、全ての章で守る。世界のルールと時系列に反することを書かず、用語は【作品設計】の表記で書く。'
+      : '',
+    // 記録は抽出を誤ることがあるので、全文がある章は全文を正とする。作品設計と章立ては書く前の計画なので、書かれたものを正とする。
+    flags.hasBible
+      ? '【作品設計】、【全体の章立て】の概要、【確定事項】が確定済みの本文と食い違うときは、本文を正とする。【作品設計】や概要と【確定事項】が食い違うときは、【確定事項】を正とする。'
+      : '【全体の章立て】の概要や【確定事項】が確定済みの本文と食い違うときは、本文を正とする。概要と【確定事項】が食い違うときは、【確定事項】を正とする。',
+    // 人物の設定 (辞典) は章が進んでも同じ文面で渡るので、本文で変わった状態 (変装、関係の進展) を巻き戻させない。
+    '人物の設定は物語の始まりの時点のものである。ここまでの章で変わったこと（外見、関係、知っていること）は、変わった後の状態を引き継ぐ。',
+    // 「知っていること」は 1 章あたり数項目の抜粋。「一覧に無いことは知らない」とは読ませない
+    // (当然知っていることまで知らない扱いになるため)。防ぎたいのは次の 2 つ:
+    // 知っているはずのことを忘れている、居合わせていない出来事を知っている。
+    '【確定事項】の「知っていること」は、その人物が既に知っていることの抜粋で、全部ではない。挙がっていることは、知っている前提で書く（忘れていたり、初めて知ったように反応したりさせない）。',
+    '人物が居合わせていない場面の出来事は、誰かから聞く、自分で気づくといった描写なしに、その人物が知っている前提で書かない。',
+    // 回収の計画が章立てにあれば、どれを決着させ、どれを先送りするかは【今回の執筆】に書いてある。
+    // どちらにも無い伏線 (計画に無く、本文で生まれたもの) は、従来どおり概要に関わるものだけを扱わせる。
+    flags.hasPlan
+      ? '【確定事項】の「未回収の伏線」のうち、【今回の執筆】の「回収する伏線」はこの章で決着させ、「まだ回収しない伏線」は決着させない。どちらにも無いものは、この章の出来事に関わるものだけを扱い、無理に回収しない。'
+      : '【確定事項】の「未回収の伏線」は、【今回の執筆】の概要に関わるものだけを扱う。関わらないものを、この章で無理に回収しない。',
+    flags.hasNotes ? '【執筆上の指示】は、この作品についての依頼者の指示である。全ての章で守る。' : ''
+  ].filter((rule) => rule.length > 0)
+}
 
-const CHAPTER_CHARACTER_RULES = [
-  '台詞と行動は、各人物の設定（性格、背景、関係）に沿わせる。',
-  '「口調の例」は語尾・調子・口癖の見本である。台詞は見本の話し方で新しく書き、例文そのものは本文に使わない。',
-  '一人称は各人物の設定どおりにし、別の一人称に変えない。',
-  '相手の呼び方は、関係に呼び方の指定があればそれを使い、無ければその人物の「他者の呼び方」に従う。',
+const ADDRESS_PATTERN_RULE =
   '呼び方の「名前」「苗字」は型を表す。相手の名や姓に置き換えて呼ぶ（「苗字＋さん」なら、相手の姓に「さん」を付ける）。'
-]
+
+// 呼び方の規則。呼称表があれば表に 1 本化する。
+function addressRules(mode: AddressMode): string[] {
+  if (mode === 'table') {
+    return ['相手の呼び方は【呼称表】のとおりにする。表に無い相手は、関係と人物像に合わせて呼ぶ。']
+  }
+  if (mode === 'partial') {
+    return [
+      '相手の呼び方は【呼称表】のとおりにする。表に無い相手は、関係に呼び方の指定があればそれを使い、無ければその人物の「他者の呼び方」に従う。どちらも無ければ、関係と人物像に合わせて呼ぶ。',
+      ADDRESS_PATTERN_RULE
+    ]
+  }
+  return [
+    '相手の呼び方は、関係に呼び方の指定があればそれを使い、無ければその人物の「他者の呼び方」に従う。',
+    ADDRESS_PATTERN_RULE
+  ]
+}
+
+function characterRules(flags: ChapterSystemFlags): string[] {
+  return [
+    '台詞と行動は、各人物の設定（性格、背景、関係）に沿わせる。',
+    '「口調の例」は語尾・調子・口癖の見本である。台詞は見本の話し方で新しく書き、例文そのものは本文に使わない。',
+    '一人称は各人物の設定どおりにし、別の一人称に変えない。',
+    ...addressRules(flags.addressMode)
+  ]
+}
 
 // 分量の数字は【今回の執筆】に置く。ここには、分量と章の範囲がぶつかったときの決め方だけを書く。
-const CHAPTER_DEPTH_RULES = [
-  '出来事をあらすじのように要約して進めない。場面として、会話、動作、情景、心情を具体的に書く。',
-  '分量が足りないときは、概要の範囲の中で場面を書き込んで補う。',
-  '「場面」は出来事の一区切りを指す。時間や場所が変わらなくても、区切りごとに1場面と数える。'
-]
+function depthRules(flags: ChapterSystemFlags): string[] {
+  const depth = '出来事をあらすじのように要約して進めない。場面として、会話、動作、情景、心情を具体的に書く。'
+  // 計画があるときは、分量を出来事ごとに割り当てる。足りない分を、新しい出来事で埋めさせない。
+  // 「場面」の数え方の規則は出さない (章立ての「出来事」と紛れる。場面数の指示は出来事の無い章にしか出ない)。
+  if (flags.hasPlan) {
+    return [
+      depth,
+      '分量が足りないときは、【今回の執筆】の範囲の中で場面を書き込んで補う。新しい出来事を足して埋めない。'
+    ]
+  }
+  return [
+    depth,
+    '分量が足りないときは、概要の範囲の中で場面を書き込んで補う。',
+    '「場面」は出来事の一区切りを指す。時間や場所が変わらなくても、区切りごとに1場面と数える。'
+  ]
+}
 
 const CHAPTER_NOTATION_RULES = [
   '段落の頭は全角空白1つで字下げする。',
@@ -406,18 +742,14 @@ const CHAPTER_OUTPUT_RULES = [
   '本文だけをプレーンテキストで出力する。章番号、タイトル、場面の見出し、前書き、後書き、注釈は含めない。'
 ]
 
-export function bullets(lines: string[]): string {
-  return lines.map((line) => `- ${line}`).join('\n')
-}
-
 // 作品を通して同じ文面にする (章番号など章ごとに変わる情報を入れない)。
 // 人物の規則は名簿が空の作品では出さない。
-function chapterSystem(hasCast: boolean): string {
+function chapterSystem(flags: ChapterSystemFlags): string {
   const rules = renderSections([
-    { heading: '章の範囲', body: bullets(CHAPTER_SCOPE_RULES) },
-    { heading: '整合性', body: bullets(CHAPTER_CONSISTENCY_RULES) },
-    { heading: '人物', body: hasCast ? bullets(CHAPTER_CHARACTER_RULES) : '' },
-    { heading: '描写と分量', body: bullets(CHAPTER_DEPTH_RULES) },
+    { heading: '章の範囲', body: bullets(scopeRules(flags)) },
+    { heading: '整合性', body: bullets(consistencyRules(flags)) },
+    { heading: '人物', body: flags.hasCast ? bullets(characterRules(flags)) : '' },
+    { heading: '描写と分量', body: bullets(depthRules(flags)) },
     { heading: '表記', body: bullets(CHAPTER_NOTATION_RULES) },
     { heading: '出力', body: bullets(CHAPTER_OUTPUT_RULES) }
   ])
@@ -430,6 +762,17 @@ export function novelInfoBody(novel: NovelParams, withChapterCount: boolean): st
     novel.setting.trim().length > 0 ? `世界観・設定: ${hang(novel.setting, '  ')}` : '',
     withChapterCount ? `章数: ${novel.num_chapters}` : ''
   ]
+    .filter((line) => line.length > 0)
+    .join('\n')
+}
+
+// 【全体の章立て】の 1 章ぶん。題と概要に、章末の状況を 1 行添える (前後の章との繋がりが分かるように)。
+// 出来事の一覧は載せない (全章ぶんを並べると長くなり、後の章の出来事を先取りさせやすい。今回の章の分は【今回の執筆】に出す)。
+function outlineLine(chapter: OutlineChapter): string {
+  const summary = hang(chapter.summary, '  ')
+  const label = chapterLabel(chapter.chapter_number, chapter.title)
+  const endState = planOf(chapter).endState
+  return [summary.length > 0 ? `${label}: ${summary}` : label, endState.length > 0 ? `  章末の状況: ${endState}` : '']
     .filter((line) => line.length > 0)
     .join('\n')
 }
@@ -495,6 +838,11 @@ function ledgerBody(ledgerText: string | undefined): string {
 
 type WritingBrief = {
   entry: OutlineChapter
+  plan: ChapterPlan
+  // 伏線の id → 説明 (回収する伏線の説明を引く)
+  setups: Map<string, string>
+  // 前の章が張り、後の章が回収する伏線
+  deferred: StoryThread[]
   totalChapters: number
   previous: PreviousChapter
   targetChars: number
@@ -521,28 +869,67 @@ function upcomingLine(brief: WritingBrief): string {
   return `この後の章: ${chapterRange(n + 1, brief.totalChapters)}（この章では書かない。物語は途中なので、章末で締めくくらない）`
 }
 
-function lengthLine(targetChars: number): string {
+// 分量。出来事があれば出来事ごとに割り当てる。無い旧データは場面数で指示する。
+function lengthLine(targetChars: number, eventCount: number): string {
+  if (eventCount > 0) {
+    return `分量: 約${formatNumber(targetChars)}字。出来事1つあたり約${formatNumber(charsPerEvent(targetChars, eventCount))}字を目安に書く。出来事を端折って短く終えない。`
+  }
   const { scenes, charsPerScene } = sceneGuide(targetChars)
   return `分量: 約${formatNumber(targetChars)}字。概要の範囲を${scenes}場面程度に分け、1場面あたり約${formatNumber(charsPerScene)}字を目安に書く。場面を端折って短く終えない。`
 }
 
+// 見出しの行と、字下げした項目の行。項目が無ければ ''。
+function nested(label: string, items: string[]): string {
+  return items.length > 0 ? [`${label}:`, ...items.map((item) => `  ${item}`)].join('\n') : ''
+}
+
+// 括弧書きは、system の規則のどれがこの章に当たるかを末尾で示すためのもの (規則そのものは system にある)。
 function writingBody(brief: WritingBrief): string {
-  const { entry, totalChapters } = brief
+  const { entry, plan, totalChapters } = brief
+  const isLast = entry.chapter_number >= totalChapters
   const title = entry.title.trim()
   const summary = hang(entry.summary, '  ')
+  // 最終章は結末まで書き切るので、章末の状況で止める注記は付けない。
+  const endState =
+    plan.endState.length === 0
+      ? ''
+      : isLast
+        ? `章末の状況: ${plan.endState}`
+        : `章末の状況: ${plan.endState.replace(/。+$/, '')}（この状況になったところで章を終える）`
   const items = [
     writtenLine(brief),
     upcomingLine(brief),
     title.length > 0 ? `題: ${title}` : '',
     summary.length > 0 ? `概要: ${summary}` : '',
-    lengthLine(brief.targetChars)
+    plan.timePlace.length > 0 ? `時と場所: ${plan.timePlace}` : '',
+    nested(
+      '出来事（この順に、すべてを場面として書く）',
+      plan.events.map((event, index) => `${index + 1}. ${event}`)
+    ),
+    endState,
+    nested(
+      '張る伏線（この章の中で書く。種明かしはしない）',
+      plan.setups.map((setup) => `- ${threadLine(setup.id, setup.description)}`)
+    ),
+    nested(
+      '回収する伏線（この章で決着させる）',
+      plan.payoffs.map((id) => {
+        const description = brief.setups.get(id)
+        return `- ${threadLine(id, description === undefined ? '' : description)}`
+      })
+    ),
+    nested(
+      'まだ回収しない伏線（後の章で回収する。この章では決着させない）',
+      brief.deferred.map((setup) => `- ${threadLine(setup.id, setup.description)}`)
+    ),
+    lengthLine(brief.targetChars, plan.events.length)
   ].filter((line) => line.length > 0)
   return `第${entry.chapter_number}章（全${totalChapters}章）の本文を書く。\n${bullets(items)}`
 }
 
 // 本文 1 章ぶんのプロンプトを組み立てる。章立てに chapterNumber が無ければ throw する。
 function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Prompt {
-  const { novel, outline, chapterNumber, priorChapters, targetChars, style, cast, relations } = input
+  const { novel, outline, chapterNumber, priorChapters, targetChars, style, cast, relations, bible } = input
   const chapters = sortedChapters(outline)
   const entry = chapters.find((chapter) => chapter.chapter_number === chapterNumber)
   if (entry === undefined) {
@@ -550,23 +937,29 @@ function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Pro
   }
   // 全章数は章立ての最後の章番号。最終章かどうかを、本文の計画である章立てで決める。
   const totalChapters = chapters.reduce((max, chapter) => Math.max(max, chapter.chapter_number), chapterNumber)
+  const plan = planOf(entry)
 
   const narrator = narratorName(style, cast)
   const { present, absent, scoped } = splitCast(cast, entry, narrator)
   const presentNames = new Set(present.map((member) => member.name))
   const presentRelations = relations.filter((r) => presentNames.has(r.source_name) && presentNames.has(r.target_name))
+  const table = addressTableOf(bible)
   const ledger = ledgerBody(input.ledgerText)
   const hasLedger = ledger.length > 0
   const priorBody = priorChaptersBody(priorChapters, chapterNumber, hasLedger, mode)
   const previous = previousChapterOf(priorChapters, chapterNumber, hasLedger)
+  const design = bibleBody(bible)
+  const notes = input.writingNotes === undefined ? '' : compactText(input.writingNotes)
 
   // 章をまたいで変わらない部分。章番号や今回の登場人物を入れない (前半を 1 字も変えないため)。
   // 全文の章が増えていく間は、前の章のプロンプトのここまでが、次の章のプロンプトの先頭と一致する
   // (古い章が省略に回ったところでは変わる)。
-  // Phase 3 で【作品設計】【呼称表】【執筆上の指示】を【全体の章立て】の前に足す。
   const stable: Section[] = [
     { heading: '作品情報', body: novelInfoBody(novel, false) },
-    { heading: '文体・視点', body: styleBody(style, false) },
+    { heading: '文体・視点', body: styleBody(style, castResolvedBy(bible)) },
+    { heading: '作品設計', body: design },
+    { heading: '呼称表', body: addressBody(table) },
+    { heading: '執筆上の指示', body: notes },
     { heading: '全体の章立て', body: chapters.map(outlineLine).join('\n') },
     { heading: '確定済みの本文', body: priorBody }
   ]
@@ -578,17 +971,39 @@ function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Pro
       heading: 'この章の登場人物',
       body: [
         scoped || present.length === 0 ? '' : UNSCOPED_CAST_LEAD,
-        castBody(present, (member) => (member.name === narrator ? narratorTag(style) : ''))
+        castBody(castForChapter(present, table), (member) => (member.name === narrator ? narratorTag(style) : ''))
       ]
         .filter((part) => part.length > 0)
         .join('\n')
     },
-    { heading: 'キャラクター間の関係', body: relationsBody(presentRelations) },
-    { heading: 'この章に登場しない人物', body: absentBody(absent, present, relations) },
-    { heading: '今回の執筆', body: writingBody({ entry, totalChapters, previous, targetChars }) }
+    { heading: 'キャラクター間の関係', body: relationsBody(relationsForChapter(presentRelations, table)) },
+    {
+      heading: 'この章に登場しない人物',
+      body: absentBody(absent, present, relations, table, plan.events.length > 0)
+    },
+    {
+      heading: '今回の執筆',
+      body: writingBody({
+        entry,
+        plan,
+        setups: setupDescriptions(chapters),
+        deferred: deferredSetups(chapters, chapterNumber),
+        totalChapters,
+        previous,
+        targetChars
+      })
+    }
   ]
 
-  return { system: chapterSystem(cast.length > 0), user: renderSections([...stable, ...perChapter]) }
+  const system = chapterSystem({
+    hasCast: cast.length > 0,
+    addressMode: addressModeOf(cast, table),
+    hasBible: design.length > 0,
+    hasBibleEnding: bible !== null && bible !== undefined && bible.ending.trim().length > 0,
+    hasPlan: chapters.some((chapter) => hasPlan(planOf(chapter))),
+    hasNotes: notes.length > 0
+  })
+  return { system, user: renderSections([...stable, ...perChapter]) }
 }
 
 // 本文 1 章ぶんのプロンプト (モデルに送るもの)。章立てに chapterNumber が無ければ throw する。
@@ -609,27 +1024,93 @@ export function buildChapterPromptForStorage(input: ChapterPromptInput): string 
 // system は instructions として送るので数えられない。chat 形式でも同じ制約を持つ互換サーバーがある。
 export const JSON_ONLY_REQUEST = '出力は JSON だけにする。'
 
-const CHARACTERS_RULE =
-  'characters には、その章に実際に登場する人物を入れる。名前は名簿の表記と完全に一致させる。関係に記載があるだけで、その章に登場しない人物は含めない。'
+// 1 章の出来事の数の目安。上限 (OUTLINE_PLAN_LIMITS.eventsMax) を超えた分は、保存の前に切り詰められる。
+export const OUTLINE_EVENTS_MIN = 3
+export const OUTLINE_EVENTS_MAX = Math.min(6, OUTLINE_PLAN_LIMITS.eventsMax)
 
-function outlineSystem(hasCast: boolean): string {
+type OutlineFlags = {
+  hasCast: boolean
+  hasBible: boolean
+  // 作品設計に結末の具体像がある
+  hasBibleEnding: boolean
+  // 語り手 (視点人物) がいる
+  hasNarrator: boolean
+}
+
+// 章立ての文章の書き方 (全章の生成と 1 章の書き直しで共通)。
+// 概要が宣伝文の調子や語り手の一人称で書かれると、本文を書くときに何が起きるかが決まらない。
+function outlineWritingRules(flags: OutlineFlags): string[] {
+  return [
+    'どの項目も三人称の常体で、事実として書く。宣伝文のような煽りや問いかけ、語り手の一人称では書かない。',
+    flags.hasCast ? '人物は名簿の名前で書く。登場人物の性格・背景・関係を踏まえた内容にする。' : '',
+    flags.hasBible ? '【作品設計】に従う。世界のルール、用語、時系列と矛盾させない。' : '',
+    // 視点の文面は章立てに渡さない (概要が語り手の一人称になるため)。
+    // 誰の視点で本文が書かれるかだけを渡し、その人物が居合わせない出来事を計画させない。
+    flags.hasNarrator
+      ? '本文は【今回の依頼】に示した語り手（視点人物）の視点で書かれる。その人物を必ず登場させ、その人物が居合わせない出来事を入れない。'
+      : ''
+  ].filter((rule) => rule.length > 0)
+}
+
+const CHARACTERS_RULE =
+  'characters: その章に実際に登場する人物。名前は名簿の表記と完全に一致させる。関係に記載があるだけで、その章に登場しない人物は含めない。'
+
+// 各項目の書き方 (全章の生成と 1 章の書き直しで共通)。項目の並びは、出力の見本と JSON Schema (outline.ts) と同じ。
+// setups と payoffs の書き方は、全章の生成と 1 章の書き直しで違うので引数で受ける。
+function outlineFieldRules(flags: OutlineFlags, setupsRule: string, payoffsRule: string): string[] {
+  return [
+    'title: 章のタイトル。空にしない。',
+    flags.hasCast ? CHARACTERS_RULE : '',
+    `time_place: その章がいつ、どこで起きるか。1文で書く。${flags.hasBible ? '【作品設計】の時系列と合わせる。' : ''}`,
+    `events: その章で起きる出来事を、起きる順に${OUTLINE_EVENTS_MIN}〜${OUTLINE_EVENTS_MAX}個。1項目に1つの出来事を、誰が何をするかが分かる1文で書く。心情や雰囲気ではなく、起きることを書く。`,
+    'end_state: 章末に、誰がどこにいて、どういう状況か。1〜2文で書く。次の章はここから続く。',
+    setupsRule,
+    payoffsRule,
+    'summary: events をまとめた章の概要。空にしない。'
+  ].filter((rule) => rule.length > 0)
+}
+
+// 章 1 件ぶんの出力の見本。キーの並びは outline.ts の JSON Schema と同じ (テストで突き合わせる)。
+function outlineChapterSkeleton(hasCast: boolean, chapterNumber: number): string {
+  const characters: Array<[string, string]> = hasCast ? [['characters', inlineJson(['登場する人物の名前'])]] : []
+  const entries: Array<[string, string]> = [
+    ['chapter_number', String(chapterNumber)],
+    ['title', inlineJson('章のタイトル')],
+    ...characters,
+    ['time_place', inlineJson('いつ、どこで')],
+    ['events', inlineJson(['出来事'])],
+    ['end_state', inlineJson('章末の状況')],
+    ['setups', inlineJson([{ id: '伏線の id', description: '伏線の内容' }])],
+    ['payoffs', inlineJson(['回収する伏線の id'])],
+    ['summary', inlineJson('章の概要')]
+  ]
+  return `{ ${entries.map(([key, value]) => `${JSON.stringify(key)}: ${value}`).join(', ')} }`
+}
+
+const OUTLINE_PURPOSE = '章立ては本文を書く前の計画で、各章で何が起きるかを具体的に決める。'
+
+function outlineSystem(flags: OutlineFlags): string {
   const rules = [
     '【今回の依頼】の章数ちょうどの章を作る。chapter_number は1から章数までの連番にする。',
-    '各章に title（章のタイトル）と summary（章の概要）を書く。どちらも空にしない。',
-    hasCast ? '登場人物の性格・背景・関係を踏まえた章立てにする。' : '',
-    hasCast ? CHARACTERS_RULE : ''
-  ].filter((line) => line.length > 0)
-  const example = hasCast
-    ? '{ "chapter_number": 1, "title": "章のタイトル", "summary": "章の概要", "characters": ["登場する人物の名前"] }'
-    : '{ "chapter_number": 1, "title": "章のタイトル", "summary": "章の概要" }'
+    ...outlineWritingRules(flags),
+    '隣り合う章で同じ出来事を書かない。各章の end_state と、次の章の time_place・最初の出来事が繋がるようにする。',
+    '張った伏線（setups）は、張った章より後の、最終章までのどこかの章で回収する（payoffs）。',
+    flags.hasBibleEnding ? '最終章の出来事は、【作品設計】の「結末」に至る。' : '最終章の出来事は、物語の結末に至る。'
+  ]
+  const fields = outlineFieldRules(
+    flags,
+    `setups: この章で張る伏線（後の章で回収するもの）。id は s1、s2…と章立て全体の通し番号にし、description に内容を1文で書く。1章に${OUTLINE_PLAN_LIMITS.setupsMax}個まで。無ければ空にする。`,
+    'payoffs: この章で回収する伏線の id。それより前の章の setups の id だけを書く。無ければ空にする。'
+  )
   const sections = renderSections([
     { heading: '章立ての規則', body: bullets(rules) },
+    { heading: '各項目の書き方', body: bullets(fields) },
     {
       heading: '出力',
-      body: `${bullets(['JSON だけを出力する。形式は次のとおり。'])}\n{\n  "chapters": [\n    ${example},\n    ...\n  ]\n}`
+      body: `${bullets(['JSON だけを出力する。形式は次のとおり。'])}\n{\n  "chapters": [\n    ${outlineChapterSkeleton(flags.hasCast, 1)},\n    ...\n  ]\n}`
     }
   ])
-  return `あなたはプロの小説家として、渡されたあらすじと設定に基づいて、小説の章立てを作る。\n\n${sections}`
+  return `あなたはプロの小説家として、渡されたあらすじと設定に基づいて、小説の章立てを作る。${OUTLINE_PURPOSE}\n\n${sections}`
 }
 
 // 備考欄 (物語に取り込みたい要素)。扱い方は資料のすぐ下に添える。
@@ -643,18 +1124,55 @@ function castNamesLine(cast: CastMember[]): string {
   return cast.length > 0 ? `名簿（characters に使える名前）: ${cast.map((member) => member.name).join('、')}` : ''
 }
 
-// 章立ての資料 (全体の生成と 1 章の書き直しで共通)。章立てには登場人物を全員渡す。
-function outlineMaterials(
-  input: { novel: NovelParams; style: StyleParams; cast: CastMember[]; relations: CastRelation[] },
-  notesInstruction: string
-): Section[] {
+// 章立ての【作品情報】。視点と文体は渡さない (概要が語り手の一人称や、本文の文体で書かれる原因になる)。
+// 年齢指定と結末の方向は残す。結末の具体像が作品設計にあれば、そちらを正とする。
+function outlineInfoBody(input: OutlinePromptInput): string {
+  const { novel, style, bible } = input
+  const rating = ratingLine(style.age_rating, castResolvedBy(bible))
+  const ending = style.ending === undefined ? undefined : ENDING_LINES[style.ending]
+  const hasBibleEnding = bible !== null && bible !== undefined && bible.ending.trim().length > 0
   return [
-    { heading: '作品情報', body: novelInfoBody(input.novel, true) },
-    { heading: '文体・視点', body: styleBody(input.style, true) },
-    { heading: '登場人物', body: castBody(input.cast, () => '') },
+    novelInfoBody(novel, true),
+    rating === undefined ? '' : `年齢指定: ${rating}`,
+    ending === undefined
+      ? ''
+      : hasBibleEnding
+        ? `結末の方向: ${ending}（具体的な結末は【作品設計】の「結末」に従う）`
+        : `結末: ${ending}`
+  ]
+    .filter((line) => line.length > 0)
+    .join('\n')
+}
+
+function narratorRequestLine(input: OutlinePromptInput, scope: string): string {
+  const narrator = narratorName(input.style, input.cast)
+  return narrator === undefined ? '' : `${narratorTag(input.style)}: ${narrator}（${scope}に登場させる）`
+}
+
+// 章立ての資料 (全体の生成と 1 章の書き直しで共通)。章立てには登場人物を全員渡す。
+// 呼称表は渡さない (章立ては台詞を書かない。呼び方で書かれると、名簿の名前との照合ができなくなる)。
+function outlineMaterials(input: OutlinePromptInput, notesInstruction: string): Section[] {
+  const narrator = narratorName(input.style, input.cast)
+  return [
+    { heading: '作品情報', body: outlineInfoBody(input) },
+    { heading: '作品設計', body: bibleBody(input.bible) },
+    {
+      heading: '登場人物',
+      body: castBody(input.cast, (member) => (member.name === narrator ? narratorTag(input.style) : ''))
+    },
     { heading: 'キャラクター間の関係', body: relationsBody(input.relations) },
     { heading: '物語に取り込みたい要素', body: notesBody(input.novel.notes, notesInstruction) }
   ]
+}
+
+function outlineFlags(input: OutlinePromptInput): OutlineFlags {
+  const { bible } = input
+  return {
+    hasCast: input.cast.length > 0,
+    hasBible: bibleBody(bible).length > 0,
+    hasBibleEnding: bible !== null && bible !== undefined && bible.ending.trim().length > 0,
+    hasNarrator: narratorName(input.style, input.cast) !== undefined
+  }
 }
 
 function chapterNumberSpan(numChapters: number): string {
@@ -662,75 +1180,145 @@ function chapterNumberSpan(numChapters: number): string {
 }
 
 // 章立て (全章) のプロンプト。
-export function buildOutlinePrompt(input: {
-  novel: NovelParams
-  style: StyleParams
-  cast: CastMember[]
-  relations: CastRelation[]
-}): Prompt {
+export function buildOutlinePrompt(input: OutlinePromptInput): Prompt {
   const { novel, cast } = input
   const request = [
     `全${novel.num_chapters}章の章立てを作る。chapter_number は${chapterNumberSpan(novel.num_chapters)}。`,
     `summary は各章${novel.outline_summary_chars}字程度。`,
     castNamesLine(cast),
+    narratorRequestLine(input, '全ての章'),
     JSON_ONLY_REQUEST
   ].filter((line) => line.length > 0)
   const sections: Section[] = [
     ...outlineMaterials(
       input,
-      '上の各項目を、物語のどこかに自然に組み込み、章立て（各章の概要）に反映する。配置や順序は任せる。'
+      '上の各項目を、物語のどこかに自然に組み込み、章立て（各章の出来事と概要）に反映する。配置や順序は任せる。'
     ),
     { heading: '今回の依頼', body: bullets(request) }
   ]
-  return { system: outlineSystem(cast.length > 0), user: renderSections(sections) }
+  return { system: outlineSystem(outlineFlags(input)), user: renderSections(sections) }
 }
 
-function outlineChapterSystem(hasCast: boolean, chapterNumber: number): string {
+function outlineChapterSystem(flags: OutlineFlags, chapterNumber: number): string {
   const rules = [
-    '物語全体の流れを壊さないように、前後の章と矛盾しない内容にする。【他の章】は固定で、書き換えない。',
+    '【他の章】は固定で、書き換えない。物語全体の流れを壊さないように、前後の章と矛盾しない内容にする。',
+    '前の章の章末の状況から続き、次の章の時と場所・最初の出来事へ繋がるようにする。前後の章と同じ出来事を書かない。',
     '元のタイトルや概要に固執せず、異なる切り口・展開を提案してよい。',
-    'title（章のタイトル）と summary（章の概要）は空にしない。',
-    hasCast ? CHARACTERS_RULE : ''
-  ].filter((line) => line.length > 0)
-  const example = hasCast
-    ? `{ "chapter_number": ${chapterNumber}, "title": "章のタイトル", "summary": "章の概要", "characters": ["登場する人物の名前"] }`
-    : `{ "chapter_number": ${chapterNumber}, "title": "章のタイトル", "summary": "章の概要" }`
+    ...outlineWritingRules(flags)
+  ]
+  const fields = outlineFieldRules(
+    flags,
+    'setups: この章で張る伏線（後の章で回収するもの）。id と、description に内容を1文で書く。どの伏線を書くかは【今回の依頼】に従う。無ければ空にする。',
+    'payoffs: この章で回収する伏線の id。【今回の依頼】に挙げた id だけを書く。無ければ空にする。'
+  )
   const sections = renderSections([
     { heading: '書き直しの規則', body: bullets(rules) },
-    { heading: '出力', body: `${bullets(['書き直した1章だけを、次の JSON 形式で出力する。'])}\n${example}` }
+    { heading: '各項目の書き方', body: bullets(fields) },
+    {
+      heading: '出力',
+      body: `${bullets(['書き直した1章だけを、次の JSON 形式で出力する。'])}\n${outlineChapterSkeleton(flags.hasCast, chapterNumber)}`
+    }
   ])
-  return `あなたはプロの小説家として、既存の章立てのうち、指定された1章だけを書き直す。\n\n${sections}`
+  return `あなたはプロの小説家として、既存の章立てのうち、指定された1章だけを書き直す。${OUTLINE_PURPOSE}\n\n${sections}`
 }
 
-// 章立てのうち 1 章だけを書き直すプロンプト。他の章は固定の資料として渡す。
+// 【他の章】【書き直す章】の 1 章ぶん。題と概要に、計画の項目を字下げして添える。
+function outlineChapterBlock(chapter: OutlineChapter): string {
+  const plan = planOf(chapter)
+  const summary = hang(chapter.summary, '  ')
+  const label = chapterLabel(chapter.chapter_number, chapter.title)
+  return [
+    summary.length > 0 ? `${label}: ${summary}` : label,
+    plan.timePlace.length > 0 ? `  時と場所: ${plan.timePlace}` : '',
+    ...(plan.events.length > 0
+      ? ['  出来事:', ...plan.events.map((event, index) => `    ${index + 1}. ${event}`)]
+      : []),
+    plan.endState.length > 0 ? `  章末の状況: ${plan.endState}` : '',
+    ...(plan.setups.length > 0
+      ? ['  張る伏線:', ...plan.setups.map((setup) => `    - ${threadLine(setup.id, setup.description)}`)]
+      : []),
+    plan.payoffs.length > 0 ? `  回収する伏線: ${plan.payoffs.join('、')}` : ''
+  ]
+    .filter((line) => line.length > 0)
+    .join('\n')
+}
+
+// 1 章を書き直すときの、伏線についての依頼。ほかの章は固定なので、id の整合をコードで決めて渡す
+// (モデルに全章の setups と payoffs を突き合わせさせない)。
+//   keep     この章が張っていて、後の章が回収する伏線。同じ id と内容で残させる (消すと後の章の回収が浮く)
+//   mustPay  前の章が張っていて、今のこの章が回収している伏線。ほかに回収する章が無いので、この章で回収させる
+//   mayPay   前の章が張っていて、どの章でも回収されていない伏線。この章で回収してもよい
+//   nextId   新しく張る伏線に使える最初の id (既存のどの id とも重ならない番号)
+function threadRequestLines(chapters: OutlineChapter[], chapterNumber: number, isLast: boolean): string[] {
+  const plans = chapters.map((chapter) => ({ number: chapter.chapter_number, plan: planOf(chapter) }))
+  const target = plans.find((entry) => entry.number === chapterNumber)
+  const others = plans.filter((entry) => entry.number !== chapterNumber)
+  const paidElsewhere = new Set(others.flatMap((entry) => entry.plan.payoffs))
+  const paidLater = new Set(
+    others.filter((entry) => entry.number > chapterNumber).flatMap((entry) => entry.plan.payoffs)
+  )
+  const paidHere = new Set(target === undefined ? [] : target.plan.payoffs)
+  const keep = target === undefined ? [] : target.plan.setups.filter((setup) => paidLater.has(setup.id))
+  const payable = others
+    .filter((entry) => entry.number < chapterNumber)
+    .flatMap((entry) => entry.plan.setups)
+    .filter((setup) => !paidElsewhere.has(setup.id))
+  // 最終章は、残っている伏線を全部回収させる (後に回収できる章が無い)。
+  const mustPay = payable.filter((setup) => isLast || paidHere.has(setup.id))
+  const mayPay = payable.filter((setup) => !isLast && !paidHere.has(setup.id))
+  const numbers = plans
+    .flatMap((entry) => entry.plan.setups)
+    .map((setup) => /^s(\d+)$/.exec(setup.id))
+    .map((found) => (found === null ? 0 : Number(found[1])))
+  const nextId = `s${Math.max(0, ...numbers) + 1}`
+  const lines = (threads: StoryThread[]): string[] =>
+    threads.map((thread) => `- ${threadLine(thread.id, thread.description)}`)
+  return [
+    nested('次の伏線は後の章が回収する。この章の出来事の中で張り、setups に同じ id と内容で書く', lines(keep)),
+    // ほかの章は書き換えないので、最終章で新しく張っても回収する章が無い。
+    isLast
+      ? 'この章は最終章なので、新しい伏線は張らない。'
+      : `新しい伏線を張るときは、id を ${nextId} から付ける。ほかの章は固定で、足した伏線は後の章を書き直すまで回収されないので、必要なときだけにする。`,
+    nested(
+      isLast
+        ? '次の伏線は、最終章のこの章で回収する。payoffs に id を書く'
+        : '次の伏線は、この章で回収する（ほかに回収する章が無い）。payoffs に id を書く',
+      lines(mustPay)
+    ),
+    nested('次の伏線は、この章で回収してもよい（前の章が張り、まだどの章でも回収されていない）', lines(mayPay)),
+    payable.length === 0 ? 'payoffs は空にする（前の章が張った、未回収の伏線が無い）。' : ''
+  ].filter((line) => line.length > 0)
+}
+
+// 章立てのうち 1 章だけを書き直すプロンプト。他の章は計画つきで、固定の資料として渡す。
 // 章立てに chapterNumber が無い場合 (後から章数を増やした) は、新しく作る章として扱う。
-export function buildOutlineChapterPrompt(input: {
-  novel: NovelParams
-  style: StyleParams
-  cast: CastMember[]
-  relations: CastRelation[]
-  existing: Outline
-  chapterNumber: number
-}): Prompt {
+export function buildOutlineChapterPrompt(input: OutlineChapterPromptInput): Prompt {
   const { novel, cast, existing, chapterNumber } = input
   const chapters = sortedChapters(existing)
   const target = chapters.find((chapter) => chapter.chapter_number === chapterNumber)
   const others = chapters.filter((chapter) => chapter.chapter_number !== chapterNumber)
+  const lastNumber = Math.max(novel.num_chapters, chapterNumber, ...chapters.map((chapter) => chapter.chapter_number))
+  const isLast = chapterNumber >= lastNumber
+  const flags = outlineFlags(input)
   const targetBody =
-    target === undefined || (target.title.trim().length === 0 && target.summary.trim().length === 0)
+    target === undefined ||
+    (target.title.trim().length === 0 && target.summary.trim().length === 0 && !hasPlan(planOf(target)))
       ? `第${chapterNumber}章（まだ内容が無い。新しく作る）`
-      : outlineLine(target)
+      : outlineChapterBlock(target)
   const request = [
     `第${chapterNumber}章を書き直す。chapter_number は${chapterNumber}のまま。`,
+    isLast ? `この章が最終章。出来事は${flags.hasBibleEnding ? '【作品設計】の「結末」' : '物語の結末'}に至る。` : '',
     `summary は${novel.outline_summary_chars}字程度。`,
     castNamesLine(cast),
+    narratorRequestLine(input, 'この章'),
+    ...threadRequestLines(chapters, chapterNumber, isLast),
     JSON_ONLY_REQUEST
   ].filter((line) => line.length > 0)
   const sections: Section[] = [
     ...outlineMaterials(input, '上の各項目は物語全体で取り込む要素である。この章に合うものを自然に組み込む。'),
-    { heading: '他の章', body: others.map(outlineLine).join('\n') },
+    { heading: '他の章', body: others.map(outlineChapterBlock).join('\n') },
     { heading: '書き直す章', body: targetBody },
     { heading: '今回の依頼', body: bullets(request) }
   ]
-  return { system: outlineChapterSystem(cast.length > 0, chapterNumber), user: renderSections(sections) }
+  return { system: outlineChapterSystem(flags, chapterNumber), user: renderSections(sections) }
 }

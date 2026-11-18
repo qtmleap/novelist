@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { buildLedger, renderLedger } from '@/lib/novel/ledger'
+import { OUTLINE_PLAN_LIMITS, outlineChapterJsonSchema, outlineJsonSchema } from '@/lib/novel/outline'
 import {
   buildChapterPrompt,
   buildChapterPromptForStorage,
@@ -8,7 +9,10 @@ import {
   type CastMember,
   type CastRelation,
   type ChapterPromptInput,
+  charsPerEvent,
   type NovelParams,
+  OUTLINE_EVENTS_MAX,
+  OUTLINE_EVENTS_MIN,
   type PriorChapterInput,
   type PriorChapterText,
   renderPromptForStorage,
@@ -16,7 +20,8 @@ import {
   sceneGuide
 } from '@/lib/novel/prompts'
 import { FIRST_PERSON_AS_NAME } from '@/schemas/character.dto'
-import type { Outline } from '@/schemas/novel.dto'
+import { type Outline, type OutlineChapter, OutlineChapterSchema } from '@/schemas/novel.dto'
+import type { StoryBible } from '@/schemas/story.dto'
 
 // ---------------------- 入力の見本 ----------------------
 
@@ -97,19 +102,29 @@ const style: StyleParams = {
   viewpointChar: { name: '朝倉澪', first_person: '私' }
 }
 
-// 第 2 章は語り手 (朝倉澪) が characters から漏れている。第 4 章は characters が空 (旧データ)。
+// 章立ての 1 章。計画の項目 (出来事など) は、指定が無ければ空 (この項目より前に作られた章立てと同じ)。
+const ch = (
+  chapter: Pick<OutlineChapter, 'chapter_number' | 'title' | 'summary' | 'characters'> & Partial<OutlineChapter>
+): OutlineChapter => ({ events: [], time_place: '', end_state: '', setups: [], payoffs: [], ...chapter })
+
+// 計画の無い章立て (旧データ)。第 2 章は語り手 (朝倉澪) が characters から漏れている。第 4 章は characters が空。
 const outline: Outline = {
   chapters: [
-    { chapter_number: 1, title: '屋上の少女', summary: '澪が屋上でルナと出会う。', characters: ['朝倉澪', 'ルナ'] },
-    { chapter_number: 2, title: '入部届', summary: 'ルナが天文部に入りたいと言い出す。', characters: ['ルナ'] },
-    {
+    ch({ chapter_number: 1, title: '屋上の少女', summary: '澪が屋上でルナと出会う。', characters: ['朝倉澪', 'ルナ'] }),
+    ch({ chapter_number: 2, title: '入部届', summary: 'ルナが天文部に入りたいと言い出す。', characters: ['ルナ'] }),
+    ch({
       chapter_number: 3,
       title: '顧問の条件',
       summary: '柊が入部の条件を出す。',
       characters: ['朝倉澪', 'ルナ', '柊誠']
-    },
-    { chapter_number: 4, title: '準備', summary: '観測会の準備を進める。', characters: [] },
-    { chapter_number: 5, title: '流星群の夜', summary: '観測会の夜、約束を果たす。', characters: ['朝倉澪', 'ルナ'] }
+    }),
+    ch({ chapter_number: 4, title: '準備', summary: '観測会の準備を進める。', characters: [] }),
+    ch({
+      chapter_number: 5,
+      title: '流星群の夜',
+      summary: '観測会の夜、約束を果たす。',
+      characters: ['朝倉澪', 'ルナ']
+    })
   ]
 }
 
@@ -805,7 +820,9 @@ describe('buildChapterPrompt: 今回の執筆', () => {
   })
 
   test('全 1 章の作品は、書き出しであり最終章', () => {
-    const single: Outline = { chapters: [{ chapter_number: 1, title: '一夜', summary: '一晩の話。', characters: [] }] }
+    const single: Outline = {
+      chapters: [ch({ chapter_number: 1, title: '一夜', summary: '一晩の話。', characters: [] })]
+    }
     const body = section(buildChapterPrompt(input(1, { outline: single })).user, '今回の執筆')
     expect(body).toContain('第1章（全1章）の本文を書く。')
     expect(body).toContain('執筆済み: なし')
@@ -936,10 +953,553 @@ describe('buildChapterPrompt: 視点・文体・年齢指定', () => {
   })
 })
 
+// ---------------------- 本文: 作品設計と章の計画 (Phase 3) ----------------------
+
+const bible: StoryBible = {
+  premise: '朝倉澪は廃部寸前の天文部を、流星群の観測会で立て直そうとするが、部員が足りない。',
+  ending: '観測会の夜、屋上で流星群を見上げながら、ルナが部員の名簿に名前を書く。',
+  arcs: [
+    { name: '朝倉澪', start: '一人で部を背負い込んでいる。', end: '部員に仕事を任せられるようになる。' },
+    // 始まりも終わりも空の行は出さない
+    { name: 'ルナ', start: '', end: '' }
+  ],
+  world: {
+    rules: ['屋上の鍵は、顧問の許可が無いと借りられない。'],
+    terms: [
+      { term: '観測会', note: '年に一度、屋上で開く公開の行事。' },
+      { term: '星図盤', note: '' }
+    ]
+  },
+  timeline: ['10月上旬: ルナが屋上に現れる。', '10月21日: 流星群の夜。'],
+  addresses: [
+    { from: '朝倉澪', to: 'ルナ', call: 'ルナ' },
+    { from: 'ルナ', to: '朝倉澪', call: 'ミオちゃん' },
+    { from: '朝倉澪', to: '柊誠', call: '柊先生' },
+    { from: '柊誠', to: '朝倉澪', call: '朝倉' },
+    { from: 'ルナ', to: '柊誠', call: 'せんせー' },
+    { from: '柊誠', to: 'ルナ', call: 'ルナ君' }
+  ],
+  cast: []
+}
+
+// 計画つきの章立て。第 3 章は出来事が無く回収だけ、第 4 章は計画が無い (1 章だけ書き直した旧データを想定)。
+// 第 2 章は characters が「ルナ」だけで、出来事に柊誠が出る。第 5 章は章立てに無い id (s9) を回収に挙げている。
+const plannedOutline: Outline = {
+  chapters: [
+    ch({
+      chapter_number: 1,
+      title: '屋上の少女',
+      summary: '朝倉澪が屋上でルナと出会う。',
+      characters: ['朝倉澪', 'ルナ'],
+      time_place: '10月上旬の夜、高校の屋上',
+      events: ['朝倉澪が屋上で望遠鏡を調整する。', 'ルナが望遠鏡の前に現れる。', '朝倉澪がルナに天文部の話をする。'],
+      end_state: '夜、屋上。朝倉澪とルナが並んで空を見ている。',
+      setups: [{ id: 's1', description: '屋上の望遠鏡の持ち主が分からない。' }]
+    }),
+    ch({
+      chapter_number: 2,
+      title: '入部届',
+      summary: 'ルナが天文部に入りたいと言い出す。',
+      characters: ['ルナ'],
+      time_place: '翌日の放課後、部室',
+      events: ['ルナが部室に来て、入部したいと言う。', '柊誠が入部届の用紙を持ってくる。'],
+      end_state: '夕方、部室。ルナが入部届を書きかけている。',
+      setups: [{ id: 's2', description: 'ルナは入部届の住所の欄を空けたままにする。' }]
+    }),
+    ch({
+      chapter_number: 3,
+      title: '顧問の条件',
+      summary: '入部の条件が出る。',
+      characters: ['朝倉澪', 'ルナ', '柊誠'],
+      payoffs: ['s1']
+    }),
+    ch({ chapter_number: 4, title: '準備', summary: '観測会の準備を進める。', characters: [] }),
+    ch({
+      chapter_number: 5,
+      title: '流星群の夜',
+      summary: '観測会の夜、約束を果たす。',
+      characters: ['朝倉澪', 'ルナ'],
+      time_place: '10月21日の夜、屋上',
+      events: ['朝倉澪とルナが屋上に機材を運ぶ。', '流星群が始まる。', 'ルナが部員の名簿に名前を書く。'],
+      end_state: '深夜、屋上。朝倉澪とルナが流星群を見上げている。',
+      payoffs: ['s2', 's9']
+    })
+  ]
+}
+
+const writingNotes = '- 星の名前は和名で書く。\n\n- 回想は入れない。\n'
+
+// 作品設計と計画つきの入力。
+const planned = (chapterNumber: number, overrides: Partial<ChapterPromptInput> = {}): ChapterPromptInput =>
+  input(chapterNumber, { outline: plannedOutline, bible, writingNotes, ...overrides })
+
+describe('buildChapterPrompt: 作品設計・呼称表・執筆上の指示', () => {
+  test('前半の並び: 作品設計 → 呼称表 → 執筆上の指示 → 全体の章立て → 確定済みの本文', () => {
+    expect(headings(buildChapterPrompt(planned(2)).user)).toEqual([
+      '作品情報',
+      '文体・視点',
+      '作品設計',
+      '呼称表',
+      '執筆上の指示',
+      '全体の章立て',
+      '確定済みの本文',
+      'この章の登場人物',
+      'キャラクター間の関係',
+      '今回の執筆'
+    ])
+    expect(buildChapterPrompt(planned(2)).user).not.toContain('\n\n\n')
+  })
+
+  test('作品設計: 物語の核、結末、人物の変化、世界のルール、用語、時系列。空の項目は出さない', () => {
+    expect(section(buildChapterPrompt(planned(2)).user, '作品設計')).toBe(
+      [
+        '【作品設計】',
+        '物語の核: 朝倉澪は廃部寸前の天文部を、流星群の観測会で立て直そうとするが、部員が足りない。',
+        '結末: 観測会の夜、屋上で流星群を見上げながら、ルナが部員の名簿に名前を書く。',
+        '人物の変化:',
+        '- 朝倉澪',
+        '  始まり: 一人で部を背負い込んでいる。',
+        '  終わり: 部員に仕事を任せられるようになる。',
+        '世界のルール:',
+        '- 屋上の鍵は、顧問の許可が無いと借りられない。',
+        '用語:',
+        '- 観測会: 年に一度、屋上で開く公開の行事。',
+        '- 星図盤',
+        '時系列:',
+        '- 10月上旬: ルナが屋上に現れる。',
+        '- 10月21日: 流星群の夜。'
+      ].join('\n')
+    )
+  })
+
+  test('呼称表: 全ての組を「呼ぶ人 → 呼ばれる人: 呼び方」で載せる (章ごとに絞らない)', () => {
+    const expected = [
+      '【呼称表】',
+      '「呼ぶ人 → 呼ばれる人: 呼び方」の表。',
+      '- 朝倉澪 → ルナ: ルナ',
+      '- ルナ → 朝倉澪: ミオちゃん',
+      '- 朝倉澪 → 柊誠: 柊先生',
+      '- 柊誠 → 朝倉澪: 朝倉',
+      '- ルナ → 柊誠: せんせー',
+      '- 柊誠 → ルナ: ルナ君'
+    ].join('\n')
+    // 柊誠が登場しない第 1 章でも、同じ表を載せる
+    expect(section(buildChapterPrompt(planned(1)).user, '呼称表')).toBe(expected)
+    expect(section(buildChapterPrompt(planned(3)).user, '呼称表')).toBe(expected)
+  })
+
+  test('呼称表: 空の行と、同じ組の 2 行目は載せない', () => {
+    const { user } = buildChapterPrompt(
+      planned(2, {
+        bible: {
+          ...bible,
+          addresses: [
+            { from: '朝倉澪', to: 'ルナ', call: ' ルナ ' },
+            { from: '朝倉澪', to: 'ルナ', call: 'ルナさん' },
+            { from: 'ルナ', to: '朝倉澪', call: '  ' }
+          ]
+        }
+      })
+    )
+    expect(section(user, '呼称表')).toBe('【呼称表】\n「呼ぶ人 → 呼ばれる人: 呼び方」の表。\n- 朝倉澪 → ルナ: ルナ')
+  })
+
+  test('執筆上の指示: 空行を詰めて載せる。空なら節を出さない', () => {
+    expect(section(buildChapterPrompt(planned(2)).user, '執筆上の指示')).toBe(
+      '【執筆上の指示】\n- 星の名前は和名で書く。\n- 回想は入れない。'
+    )
+    for (const empty of [undefined, '', '  \n\n']) {
+      const { system, user } = buildChapterPrompt(planned(2, { writingNotes: empty }))
+      expect(headings(user)).not.toContain('執筆上の指示')
+      expect(system).not.toContain('執筆上の指示')
+    }
+  })
+
+  test('作品設計が無い、または中身が空なら、節を出さない', () => {
+    const emptyBible: StoryBible = {
+      premise: '',
+      ending: ' ',
+      arcs: [],
+      world: { rules: [], terms: [] },
+      timeline: [],
+      addresses: [],
+      cast: []
+    }
+    for (const none of [undefined, null, emptyBible]) {
+      const { system, user } = buildChapterPrompt(planned(2, { bible: none }))
+      expect(headings(user)).not.toContain('作品設計')
+      expect(headings(user)).not.toContain('呼称表')
+      expect(system).not.toContain('作品設計')
+      expect(system).not.toContain('呼称表')
+    }
+  })
+
+  test('全体の章立て: 章末の状況を 1 行添える。出来事の一覧は載せない', () => {
+    const body = section(buildChapterPrompt(planned(2)).user, '全体の章立て')
+    expect(body.split('\n').slice(1)).toEqual([
+      '第1章「屋上の少女」: 朝倉澪が屋上でルナと出会う。',
+      '  章末の状況: 夜、屋上。朝倉澪とルナが並んで空を見ている。',
+      '第2章「入部届」: ルナが天文部に入りたいと言い出す。',
+      '  章末の状況: 夕方、部室。ルナが入部届を書きかけている。',
+      '第3章「顧問の条件」: 入部の条件が出る。',
+      '第4章「準備」: 観測会の準備を進める。',
+      '第5章「流星群の夜」: 観測会の夜、約束を果たす。',
+      '  章末の状況: 深夜、屋上。朝倉澪とルナが流星群を見上げている。'
+    ])
+    // 後の章の出来事を先取りさせないよう、出来事は今回の章の分だけを【今回の執筆】に出す
+    expect(body).not.toContain('機材を運ぶ')
+    expect(buildChapterPrompt(planned(2)).user).not.toContain('機材を運ぶ')
+  })
+
+  test('前半の安定性: 作品設計つきでも、前の章の本文の終わりまでが次の章の先頭と一致する', () => {
+    for (const n of [2, 3, 4]) {
+      const current = buildChapterPrompt(planned(n)).user
+      const next = buildChapterPrompt(planned(n + 1)).user
+      const lastText = chapterText(n - 1)
+      const end = current.indexOf(lastText) + lastText.length
+      expect(current.indexOf(lastText)).toBeGreaterThan(0)
+      expect(next.startsWith(current.slice(0, end))).toBe(true)
+    }
+    // 第 1 章の「全体の章立て」までが、第 2 章の先頭と一致する
+    const first = buildChapterPrompt(planned(1)).user
+    const stable = first.slice(0, first.indexOf('\n\n【この章の登場人物】'))
+    expect(stable).toContain('【呼称表】')
+    expect(buildChapterPrompt(planned(2)).user.startsWith(`${stable}\n\n【確定済みの本文】\n`)).toBe(true)
+  })
+
+  test('system は章が変わっても同じ (出来事の無い章、計画の無い章でも)', () => {
+    const second = buildChapterPrompt(planned(2)).system
+    for (const n of [1, 3, 4, 5]) {
+      expect(buildChapterPrompt(planned(n)).system).toBe(second)
+    }
+    expect(second).not.toMatch(/第\s*[0-9０-９]+\s*章/)
+    expect(second).not.toContain('朝倉澪')
+    expect(second).not.toContain('入部届')
+  })
+
+  test('保存用にも、作品設計と計画が入る', () => {
+    const stored = buildChapterPromptForStorage(planned(2))
+    expect(stored).toContain('【作品設計】\n物語の核: ')
+    expect(stored).toContain('【呼称表】\n')
+    expect(stored).toContain('- 出来事（この順に、すべてを場面として書く）:')
+  })
+})
+
+describe('buildChapterPrompt: 呼称表があるときの呼び方', () => {
+  test('「他者の呼び方」の行と、関係の「呼び方は」を出さない (呼称表に 1 本化)', () => {
+    const { system, user } = buildChapterPrompt(planned(3))
+    expect(section(user, 'この章の登場人物')).not.toContain('他者の呼び方')
+    expect(section(user, 'キャラクター間の関係')).toBe(
+      [
+        '【キャラクター間の関係】',
+        '- 朝倉澪から見たルナ: 友人。屋上で出会った',
+        '- ルナから見た朝倉澪: 友人',
+        '- 朝倉澪から見た柊誠: 教師。部の顧問',
+        '- 柊誠から見たルナ: 教え子'
+      ].join('\n')
+    )
+    expect(system).toContain('相手の呼び方は【呼称表】のとおりにする。表に無い相手は、関係と人物像に合わせて呼ぶ。')
+    expect(system).not.toContain('他者の呼び方')
+    expect(system).not.toContain('型を表す')
+  })
+
+  test('呼称表に無い組が残る人物だけ、「他者の呼び方」の行を残す', () => {
+    // 柊誠 ⇔ ルナ の組が無い呼称表 (人物が多い作品では、関係を定義した組と語り手との組だけになる)
+    const partial: StoryBible = {
+      ...bible,
+      addresses: bible.addresses.filter((row) => !(row.from !== '朝倉澪' && row.to !== '朝倉澪'))
+    }
+    const { system, user } = buildChapterPrompt(planned(3, { bible: partial }))
+    const people = section(user, 'この章の登場人物')
+    // 朝倉澪は、登場する相手への呼び方が全部表にある
+    expect(people).toContain('■ 朝倉澪（17歳・女性・学生）\n  役割: 主人公・語り手\n  一人称: 私\n  外見: ')
+    expect(people).toContain('  他者の呼び方: 名前')
+    expect(people).toContain('  他者の呼び方: 苗字')
+    expect(people).not.toContain('他者の呼び方: 苗字＋さん')
+    // 表に無い組の関係は、呼び方の指定を残す
+    const relationLines = section(user, 'キャラクター間の関係')
+    expect(relationLines).toContain('- 柊誠から見たルナ: 教え子。ルナへの呼び方は「苗字＋さん」')
+    expect(relationLines).toContain('- 朝倉澪から見たルナ: 友人。屋上で出会った')
+    expect(system).toContain(
+      '相手の呼び方は【呼称表】のとおりにする。表に無い相手は、関係に呼び方の指定があればそれを使い、無ければその人物の「他者の呼び方」に従う。'
+    )
+    expect(system).toContain('呼び方の「名前」「苗字」は型を表す')
+    // 表に無い組の人物が登場しない章でも、system は同じ (作品単位で決まる)
+    expect(buildChapterPrompt(planned(1, { bible: partial })).system).toBe(system)
+    // その章では、登場する二人の組が表にあるので、行は出ない
+    expect(section(buildChapterPrompt(planned(1, { bible: partial })).user, 'この章の登場人物')).not.toContain(
+      '他者の呼び方'
+    )
+  })
+
+  test('登場しない人物の呼び方は、呼称表から引く', () => {
+    const body = section(buildChapterPrompt(planned(1)).user, 'この章に登場しない人物')
+    expect(body).toBe(
+      [
+        '【この章に登場しない人物】',
+        '次の人物は、この章の概要と出来事に出てこないので、場面に登場させない（概要と出来事に出てくる人物がいれば、概要と出来事に従う）。会話で話題に出るときは、下の呼び方（【呼称表】のとおり）で呼ぶ。',
+        '- 柊誠（脇役）: 朝倉澪からの呼び方は「柊先生」、ルナからの呼び方は「せんせー」'
+      ].join('\n')
+    )
+  })
+
+  test('登場しない人物: 呼称表に無い組は、関係の呼び方の指定を使う', () => {
+    const partial: StoryBible = { ...bible, addresses: bible.addresses.filter((row) => row.to !== '柊誠') }
+    const body = section(buildChapterPrompt(planned(1, { bible: partial })).user, 'この章に登場しない人物')
+    expect(body.split('\n')[2]).toBe('- 柊誠（脇役）: 朝倉澪からの呼び方は「苗字＋先生」')
+  })
+})
+
+describe('buildChapterPrompt: 章の計画', () => {
+  test('今回の執筆: 時と場所、出来事 (番号つき)、章末の状況、張る伏線、まだ回収しない伏線、分量', () => {
+    expect(section(buildChapterPrompt(planned(2)).user, '今回の執筆')).toBe(
+      [
+        '【今回の執筆】',
+        '第2章（全5章）の本文を書く。',
+        '- 執筆済み: 第1章（その終わりから続けて書く）',
+        '- この後の章: 第3〜5章（この章では書かない。物語は途中なので、章末で締めくくらない）',
+        '- 題: 入部届',
+        '- 概要: ルナが天文部に入りたいと言い出す。',
+        '- 時と場所: 翌日の放課後、部室',
+        '- 出来事（この順に、すべてを場面として書く）:',
+        '  1. ルナが部室に来て、入部したいと言う。',
+        '  2. 柊誠が入部届の用紙を持ってくる。',
+        '- 章末の状況: 夕方、部室。ルナが入部届を書きかけている（この状況になったところで章を終える）',
+        '- 張る伏線（この章の中で書く。種明かしはしない）:',
+        '  - [s2] ルナは入部届の住所の欄を空けたままにする。',
+        // 前の章が張り、後の章 (第 3 章) が回収する伏線
+        '- まだ回収しない伏線（後の章で回収する。この章では決着させない）:',
+        '  - [s1] 屋上の望遠鏡の持ち主が分からない。',
+        '- 分量: 約4,000字。出来事1つあたり約2,000字を目安に書く。出来事を端折って短く終えない。'
+      ].join('\n')
+    )
+  })
+
+  test('回収する伏線には、張った章の説明を添える。出来事が無い章の分量は場面数の指示', () => {
+    const body = section(buildChapterPrompt(planned(3)).user, '今回の執筆')
+    expect(body).toContain('- 回収する伏線（この章で決着させる）:\n  - [s1] 屋上の望遠鏡の持ち主が分からない。')
+    // 第 2 章が張り、第 5 章が回収する
+    expect(body).toContain(
+      '- まだ回収しない伏線（後の章で回収する。この章では決着させない）:\n  - [s2] ルナは入部届の住所の欄を空けたままにする。'
+    )
+    expect(body).not.toContain('出来事（')
+    expect(body).not.toContain('時と場所')
+    expect(body).not.toContain('章末の状況')
+    expect(body).toContain('- 分量: 約4,000字。概要の範囲を4場面程度に分け、1場面あたり約1,000字を目安に書く。')
+  })
+
+  test('計画が無い章は、今までどおり', () => {
+    expect(section(buildChapterPrompt(planned(4)).user, '今回の執筆')).toBe(
+      [
+        '【今回の執筆】',
+        '第4章（全5章）の本文を書く。',
+        '- 執筆済み: 第1〜3章（第3章の終わりから続けて書く）',
+        '- この後の章: 第5章（この章では書かない。物語は途中なので、章末で締めくくらない）',
+        '- 題: 準備',
+        '- 概要: 観測会の準備を進める。',
+        // 第 2 章が張り、第 5 章が回収する
+        '- まだ回収しない伏線（後の章で回収する。この章では決着させない）:',
+        '  - [s2] ルナは入部届の住所の欄を空けたままにする。',
+        '- 分量: 約4,000字。概要の範囲を4場面程度に分け、1場面あたり約1,000字を目安に書く。場面を端折って短く終えない。'
+      ].join('\n')
+    )
+  })
+
+  test('最終章: 結末まで書き切る。章末の状況に「ここで終える」の注記を付けない', () => {
+    const body = section(buildChapterPrompt(planned(5)).user, '今回の執筆')
+    expect(body).toContain('- この後の章: なし（この章が最終章。結末まで書き切る）')
+    expect(body).toContain('- 章末の状況: 深夜、屋上。朝倉澪とルナが流星群を見上げている。\n')
+    expect(body).not.toContain('この状況になったところで章を終える')
+    // 章立てに無い id は、id だけを出す
+    expect(body).toContain(
+      '- 回収する伏線（この章で決着させる）:\n  - [s2] ルナは入部届の住所の欄を空けたままにする。\n  - [s9]\n'
+    )
+    expect(body).not.toContain('まだ回収しない伏線')
+    expect(body).toContain('- 分量: 約4,000字。出来事1つあたり約1,300字を目安に書く。')
+  })
+
+  test('分量は出来事の数で割り当てる (100 字単位)', () => {
+    expect(charsPerEvent(4000, 4)).toBe(1000)
+    expect(charsPerEvent(4000, 3)).toBe(1300)
+    expect(charsPerEvent(20000, 6)).toBe(3300)
+    expect(charsPerEvent(500, 8)).toBe(100)
+    expect(charsPerEvent(4000, 0)).toBe(4000)
+  })
+
+  test('出来事に名前が出る人物は、characters に無くても登場扱いにする', () => {
+    // 第 2 章の characters は「ルナ」だけ。柊誠は出来事に出る。朝倉澪は語り手
+    const { user } = buildChapterPrompt(planned(2))
+    const people = section(user, 'この章の登場人物')
+    expect(people).toContain('■ 柊誠（42歳・男性・教師）')
+    expect(people).toContain('■ 朝倉澪')
+    expect(headings(user)).not.toContain('この章に登場しない人物')
+    // 出来事から名前を消すと、登場しない人物に戻る
+    const withoutName: Outline = {
+      chapters: plannedOutline.chapters.map((c) =>
+        c.chapter_number === 2 ? { ...c, events: ['ルナが部室に来て、入部したいと言う。'] } : c
+      )
+    }
+    expect(section(buildChapterPrompt(planned(2, { outline: withoutName })).user, 'この章に登場しない人物')).toContain(
+      '- 柊誠（脇役）'
+    )
+  })
+
+  test('章末の状況に名前が出る人物も登場扱いにする。伏線の説明は対象にしない', () => {
+    const variant = (patch: Partial<OutlineChapter>): string => {
+      const changed: Outline = {
+        chapters: plannedOutline.chapters.map((c) => (c.chapter_number === 1 ? { ...c, ...patch } : c))
+      }
+      return section(buildChapterPrompt(planned(1, { outline: changed })).user, 'この章の登場人物')
+    }
+    expect(variant({ end_state: '夜、屋上。柊誠が鍵を閉めに来る。' })).toContain('■ 柊誠')
+    expect(variant({ setups: [{ id: 's1', description: '柊誠が望遠鏡の持ち主を知っている。' }] })).not.toContain(
+      '■ 柊誠'
+    )
+  })
+
+  test('計画の項目そのものが無い章立て (保存済みの旧形式) でも組み立てられる', () => {
+    // Zod を通っていない章立て (DO ストレージに残った旧形式の payload) は、計画の項目を持たない。
+    // JSON.parse の戻り値として作り、型の上では Outline として渡す。
+    const legacy: Outline = JSON.parse(
+      JSON.stringify({
+        chapters: outline.chapters.map((c) => ({
+          chapter_number: c.chapter_number,
+          title: c.title,
+          summary: c.summary,
+          characters: c.characters
+        }))
+      })
+    )
+    expect(Object.keys(legacy.chapters[0])).toEqual(['chapter_number', 'title', 'summary', 'characters'])
+    for (const n of [1, 2, 3, 4, 5]) {
+      expect(buildChapterPrompt(input(n, { outline: legacy }))).toEqual(buildChapterPrompt(input(n)))
+    }
+  })
+})
+
+describe('buildChapterPrompt: 作品設計と計画があるときの system', () => {
+  const { system } = buildChapterPrompt(planned(2))
+  const plain = buildChapterPrompt(input(2)).system
+
+  test('出来事、章末の状況、伏線の扱い', () => {
+    expect(system).toContain(
+      '【今回の執筆】に「出来事」があるときは、挙がっている順に、すべてを場面として書く。1つの出来事を数行の説明で済ませず、挙がっていない大きな出来事を足さない。'
+    )
+    expect(system).toContain(
+      '【今回の執筆】に「章末の状況」があればその状況になったところで、無ければ最後の出来事を書いたところで止める'
+    )
+    expect(system).toContain('「張る伏線」は、この章の出来事の中で読者に見せる。後の章で回収するので、種明かしはしない')
+    expect(system).toContain('「回収する伏線」は、この章で読者に分かる形で決着させる')
+    expect(system).toContain(
+      '「未回収の伏線」のうち、【今回の執筆】の「回収する伏線」はこの章で決着させ、「まだ回収しない伏線」は決着させない'
+    )
+    expect(system).toContain('新しい出来事を足して埋めない')
+  })
+
+  test('作品設計: 全ての章で守る。結末は最終章で至る (途中の章で先取りしない)', () => {
+    expect(system).toContain('【作品設計】は作品全体の設計で、全ての章で守る')
+    expect(system).toContain('用語は【作品設計】の表記で書く')
+    expect(system).toContain('【作品設計】の「結末」と、「人物の変化」の終わりの状態は、最終章で至るものである')
+    expect(system).toContain('最終章より前の章では、人物は変化の途中にあり、結末に先に到達させない')
+    expect(system).toContain('最終章は、【作品設計】の「結末」まで書き切る。')
+    expect(system).toContain(
+      '【作品設計】、【全体の章立て】の概要、【確定事項】が確定済みの本文と食い違うときは、本文を正とする'
+    )
+    expect(system).toContain('【執筆上の指示】は、この作品についての依頼者の指示である。全ての章で守る。')
+  })
+
+  test('system が名前で指す小見出しは、user に実際にある', () => {
+    const { user } = buildChapterPrompt(planned(2))
+    const labels = ['出来事', '章末の状況', '張る伏線', 'まだ回収しない伏線']
+    for (const label of labels) {
+      expect(system).toContain(`「${label}」`)
+      expect(section(user, '今回の執筆')).toContain(`- ${label}`)
+    }
+    expect(section(buildChapterPrompt(planned(3)).user, '今回の執筆')).toContain('- 回収する伏線')
+    for (const label of ['結末', '人物の変化']) {
+      expect(system).toContain(`「${label}」`)
+      expect(section(user, '作品設計')).toContain(`\n${label}:`)
+    }
+  })
+
+  test('作品設計も計画も無ければ、これらの規則は出さない', () => {
+    for (const word of ['作品設計', '呼称表', '執筆上の指示', '章末の状況', '張る伏線', 'まだ回収しない伏線']) {
+      expect(plain).not.toContain(word)
+    }
+    expect(plain).toContain('最終章は、結末まで書き切る。')
+    expect(plain).toContain('「場面」は出来事の一区切りを指す')
+  })
+})
+
+describe('buildChapterPrompt: 成人指定と作品設計', () => {
+  const adultBible: StoryBible = {
+    ...bible,
+    cast: [
+      {
+        name: '朝倉澪',
+        age: '20',
+        occupation: '大学生',
+        appearance: '肩までの黒髪。',
+        background: '天文サークルの代表。'
+      }
+    ]
+  }
+  const ratingOf = (age_rating: string, bibleValue: StoryBible | null): string =>
+    section(buildChapterPrompt(planned(2, { style: { ...style, age_rating }, bible: bibleValue })).user, '文体・視点')
+
+  test('作品設計に成人としての人物設定があれば、人物設定の読み替えの文面を出さない', () => {
+    for (const rating of ['R15', 'R18']) {
+      const body = ratingOf(rating, adultBible)
+      expect(body).toContain('物語の登場人物はすべて 18 歳以上の成人とする。')
+      expect(body).not.toContain('登場人物詳細に')
+      expect(body).not.toContain('女子高生')
+      // 世界観・設定は利用者の原文のまま渡るので、設定についての読み替えは残す
+      expect(body).toContain(
+        '【作品情報】の世界観・設定に、高校や学年など未成年を連想させる記述があっても、成人の設定として読み替えること。学校設定が必要な場合は大学とする。'
+      )
+    }
+    // 描写の強度の指示は残る (R15 と R18 の違い)
+    expect(ratingOf('R15', adultBible)).toContain('性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。')
+    expect(ratingOf('R18', adultBible)).toContain('年齢指定: 成人向け。')
+    expect(ratingOf('R18', adultBible)).toContain('踏み込んだ表現を制限なく用いてよい')
+  })
+
+  test('成人としての人物設定が無ければ (旧データ)、今までの文面', () => {
+    for (const bibleValue of [bible, null]) {
+      expect(ratingOf('R15', bibleValue)).toContain(
+        'たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等'
+      )
+      expect(ratingOf('R15', bibleValue)).not.toContain('【作品情報】の世界観・設定に')
+    }
+  })
+
+  test('全年齢は、作品設計があっても同じ文面', () => {
+    expect(ratingOf('全年齢', adultBible)).toContain(
+      '年齢指定: 性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること'
+    )
+  })
+})
+
 // ---------------------- 章立て ----------------------
+
+// 見本 (system の【出力】) のキーの並び。全章用は章 1 件の行、1 章用は見本そのもの。
+const outlineSkeleton = (system: string): unknown => {
+  const line = system.split('\n').find((candidate) => candidate.trimStart().startsWith('{ "chapter_number"'))
+  return JSON.parse(line === undefined ? 'null' : line.trim().replace(/,$/, ''))
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const keysOfRecord = (value: unknown): string[] => (isRecord(value) ? Object.keys(value) : [])
+
+// JSON Schema の中の、キーを辿った先。
+const dig = (value: unknown, ...path: string[]): unknown =>
+  path.reduce<unknown>((current, key) => (isRecord(current) ? current[key] : undefined), value)
 
 describe('buildOutlinePrompt', () => {
   const prompt = buildOutlinePrompt({ novel, style, cast, relations })
+  const withBible = buildOutlinePrompt({ novel, style, cast, relations, bible })
 
   test('名簿の名前と章数が入る', () => {
     expect(prompt.user).toContain('章数: 5')
@@ -948,36 +1508,145 @@ describe('buildOutlinePrompt', () => {
     expect(prompt.user).toContain('summary は各章300字程度。')
   })
 
-  test('連番、空にしない、名簿の表記と完全に一致、の規則が system にある', () => {
-    expect(prompt.system).toContain('章数ちょうどの章を作る')
-    expect(prompt.system).toContain('chapter_number は1から章数までの連番にする')
-    expect(prompt.system).toContain('どちらも空にしない')
-    expect(prompt.system).toContain('名簿の表記と完全に一致させる')
-    expect(prompt.system).toContain('"chapters": [')
-    expect(prompt.system).toContain('"characters": [')
-  })
-
-  test('資料の並びと、結末・備考', () => {
+  test('資料の並び。視点と文体の節は渡さない', () => {
     expect(headings(prompt.user)).toEqual([
       '作品情報',
-      '文体・視点',
       '登場人物',
       'キャラクター間の関係',
       '物語に取り込みたい要素',
       '今回の依頼'
     ])
-    expect(section(prompt.user, '文体・視点')).toContain(
-      '結末: 主要な葛藤が解決し、登場人物が報われる前向きな結末へ向けて構成すること'
-    )
+    expect(headings(withBible.user)).toEqual([
+      '作品情報',
+      '作品設計',
+      '登場人物',
+      'キャラクター間の関係',
+      '物語に取り込みたい要素',
+      '今回の依頼'
+    ])
+    // 視点と文体を渡すと、概要が語り手の一人称や本文の文体で書かれる
+    for (const text of [prompt.user, prompt.system, withBible.user, withBible.system]) {
+      for (const word of ['視点:', '文体:', 'ライトノベル', '一人称視点', '文体・視点']) {
+        expect(text).not.toContain(word)
+      }
+      expect(text).not.toContain('\n\n\n')
+    }
     expect(section(prompt.user, '物語に取り込みたい要素')).toContain('- 流星群の夜を入れる')
     // 章立てには全員の詳細を渡す
     expect(section(prompt.user, '登場人物')).toContain('■ 柊誠（42歳・男性・教師）')
-    expect(prompt.user).not.toContain('\n\n\n')
+  })
+
+  test('作品情報: 年齢指定と結末の方向は残す', () => {
+    expect(section(prompt.user, '作品情報')).toBe(
+      [
+        '【作品情報】',
+        'ジャンル: 青春',
+        '世界観・設定: 地方の高校の天文部。屋上に古い望遠鏡がある。',
+        '章数: 5',
+        '年齢指定: 性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること',
+        '結末: 主要な葛藤が解決し、登場人物が報われる前向きな結末へ向けて構成すること'
+      ].join('\n')
+    )
+    // 作品設計に結末の具体像があれば、そちらを正とする
+    expect(section(withBible.user, '作品情報').split('\n').at(-1)).toBe(
+      '結末の方向: 主要な葛藤が解決し、登場人物が報われる前向きな結末へ向けて構成すること（具体的な結末は【作品設計】の「結末」に従う）'
+    )
+    expect(withBible.system).toContain('最終章の出来事は、【作品設計】の「結末」に至る。')
+    expect(prompt.system).toContain('最終章の出来事は、物語の結末に至る。')
   })
 
   test('結末が未指定なら行を出さない', () => {
     const { user } = buildOutlinePrompt({ novel, style: { ...style, ending: '未指定' }, cast, relations })
     expect(user).not.toContain('結末:')
+    expect(user).not.toContain('結末の方向')
+  })
+
+  test('作品設計: 本文プロンプトと同じ文面で渡す。呼称表は渡さない', () => {
+    expect(section(withBible.user, '作品設計')).toBe(section(buildChapterPrompt(planned(2)).user, '作品設計'))
+    expect(withBible.user).not.toContain('呼称表')
+    expect(withBible.user).not.toContain('ミオちゃん')
+    expect(withBible.system).toContain('【作品設計】に従う。世界のルール、用語、時系列と矛盾させない。')
+    expect(withBible.system).toContain(
+      'time_place: その章がいつ、どこで起きるか。1文で書く。【作品設計】の時系列と合わせる。'
+    )
+    // 作品設計が無い旧データでは、節も規則も出さない
+    for (const none of [undefined, null]) {
+      const plain = buildOutlinePrompt({ novel, style, cast, relations, bible: none })
+      expect(plain.user).not.toContain('作品設計')
+      expect(plain.system).not.toContain('作品設計')
+    }
+  })
+
+  test('章の計画を書かせる規則が system にある', () => {
+    const { system } = prompt
+    expect(system).toContain('章立ては本文を書く前の計画で、各章で何が起きるかを具体的に決める。')
+    expect(system).toContain('章数ちょうどの章を作る')
+    expect(system).toContain('chapter_number は1から章数までの連番にする')
+    expect(system).toContain(
+      'どの項目も三人称の常体で、事実として書く。宣伝文のような煽りや問いかけ、語り手の一人称では書かない。'
+    )
+    expect(system).toContain('title: 章のタイトル。空にしない。')
+    expect(system).toContain('名前は名簿の表記と完全に一致させる')
+    expect(system).toContain(
+      `events: その章で起きる出来事を、起きる順に${OUTLINE_EVENTS_MIN}〜${OUTLINE_EVENTS_MAX}個。1項目に1つの出来事を、誰が何をするかが分かる1文で書く。心情や雰囲気ではなく、起きることを書く。`
+    )
+    expect(system).toContain('end_state: 章末に、誰がどこにいて、どういう状況か。1〜2文で書く。次の章はここから続く。')
+    expect(system).toContain('id は s1、s2…と章立て全体の通し番号にし')
+    expect(system).toContain(`1章に${OUTLINE_PLAN_LIMITS.setupsMax}個まで。無ければ空にする。`)
+    expect(system).toContain('payoffs: この章で回収する伏線の id。それより前の章の setups の id だけを書く。')
+    expect(system).toContain('summary: events をまとめた章の概要。空にしない。')
+    expect(system).toContain(
+      '隣り合う章で同じ出来事を書かない。各章の end_state と、次の章の time_place・最初の出来事が繋がるようにする。'
+    )
+    expect(system).toContain('張った伏線（setups）は、張った章より後の、最終章までのどこかの章で回収する（payoffs）。')
+    // 出来事の数の目安は、切り詰めの上限を超えない
+    expect(OUTLINE_EVENTS_MIN).toBeLessThan(OUTLINE_EVENTS_MAX)
+    expect(OUTLINE_EVENTS_MAX).toBeLessThanOrEqual(OUTLINE_PLAN_LIMITS.eventsMax)
+  })
+
+  test('出力の見本は、JSON Schema とキーも順序も同じで、OutlineChapterSchema を通る', () => {
+    const cases: Array<{ castNames: string[]; system: string }> = [
+      { castNames: cast.map((member) => member.name), system: prompt.system },
+      { castNames: [], system: buildOutlinePrompt({ novel, style, cast: [], relations: [] }).system }
+    ]
+    for (const { castNames, system } of cases) {
+      const skeleton = outlineSkeleton(system)
+      const properties = dig(outlineJsonSchema(castNames), 'properties', 'chapters', 'items', 'properties')
+      expect(keysOfRecord(skeleton)).toEqual(keysOfRecord(properties))
+      const parsed = OutlineChapterSchema.safeParse(skeleton)
+      expect(parsed.success).toBe(true)
+      // Zod は知らないキーを黙って捨てる。見本のキーが全部残っていれば、型と食い違っていない
+      for (const key of keysOfRecord(skeleton)) {
+        expect(keysOfRecord(parsed.data)).toContain(key)
+      }
+      expect(system).toContain('"chapters": [')
+    }
+    expect(keysOfRecord(outlineSkeleton(prompt.system))).toEqual([
+      'chapter_number',
+      'title',
+      'characters',
+      'time_place',
+      'events',
+      'end_state',
+      'setups',
+      'payoffs',
+      'summary'
+    ])
+  })
+
+  test('語り手: 視点の文面は渡さず、誰の視点で書かれるかだけを伝える', () => {
+    expect(section(prompt.user, '今回の依頼')).toContain('- 語り手: 朝倉澪（全ての章に登場させる）')
+    expect(section(prompt.user, '登場人物')).toContain('  役割: 主人公・語り手')
+    expect(prompt.system).toContain(
+      '本文は【今回の依頼】に示した語り手（視点人物）の視点で書かれる。その人物を必ず登場させ、その人物が居合わせない出来事を入れない。'
+    )
+    const focal = buildOutlinePrompt({ novel, style: { ...style, pov: '三人称一元視点' }, cast, relations })
+    expect(section(focal.user, '今回の依頼')).toContain('- 視点人物: 朝倉澪（全ての章に登場させる）')
+    // 視点人物を持たない視点では出さない
+    const omniscient = buildOutlinePrompt({ novel, style: { ...style, pov: '三人称神視点' }, cast, relations })
+    expect(omniscient.user).not.toContain('語り手')
+    expect(omniscient.user).not.toContain('視点人物')
+    expect(omniscient.system).not.toContain('視点人物')
   })
 
   // OpenAI 互換の json_object モードは、入力 (user) に「json」の語が無い要求を拒否する。system は数えられない。
@@ -990,23 +1659,52 @@ describe('buildOutlinePrompt', () => {
   test('名簿が空なら characters に触れない', () => {
     const empty = buildOutlinePrompt({ novel: { ...novel, notes: '  ' }, style, cast: [], relations: [] })
     expect(empty.system).not.toContain('characters')
+    expect(empty.system).not.toContain('名簿')
     expect(empty.user).not.toContain('characters')
-    expect(headings(empty.user)).toEqual(['作品情報', '文体・視点', '今回の依頼'])
+    expect(headings(empty.user)).toEqual(['作品情報', '今回の依頼'])
+  })
+
+  test('成人指定: 作品設計に成人としての人物設定があれば、人物設定の読み替えの文面を出さない', () => {
+    const adultBible: StoryBible = {
+      ...bible,
+      cast: [{ name: '朝倉澪', age: '20', occupation: '大学生', appearance: '', background: '' }]
+    }
+    const adultStyle = { ...style, age_rating: 'R18' }
+    const resolved = section(
+      buildOutlinePrompt({ novel, style: adultStyle, cast, relations, bible: adultBible }).user,
+      '作品情報'
+    )
+    expect(resolved).toContain('年齢指定: 成人向け。物語の登場人物はすべて 18 歳以上の成人とする。')
+    expect(resolved).not.toContain('登場人物詳細に')
+    expect(resolved).toContain('【作品情報】の世界観・設定に、高校や学年など未成年を連想させる記述があっても')
+    // 作品設計が無い旧データ、成人としての人物設定が無い作品設計では、今までの文面
+    for (const bibleValue of [undefined, bible]) {
+      const legacy = section(
+        buildOutlinePrompt({ novel, style: adultStyle, cast, relations, bible: bibleValue }).user,
+        '作品情報'
+      )
+      expect(legacy).toContain('たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等')
+    }
   })
 
   test('system は作品の内容を含まない', () => {
-    expect(prompt.system).not.toContain('朝倉澪')
-    expect(prompt.system).not.toContain('天文部')
+    for (const system of [prompt.system, withBible.system]) {
+      for (const word of ['朝倉澪', '天文部', '観測会', '流星群']) {
+        expect(system).not.toContain(word)
+      }
+    }
   })
 })
 
 describe('buildOutlineChapterPrompt', () => {
-  const prompt = buildOutlineChapterPrompt({ novel, style, cast, relations, existing: outline, chapterNumber: 3 })
+  const rewrite = (chapterNumber: number, existing: Outline = plannedOutline, bibleValue: StoryBible | null = bible) =>
+    buildOutlineChapterPrompt({ novel, style, cast, relations, bible: bibleValue, existing, chapterNumber })
+  const prompt = rewrite(2)
 
-  test('他の章を固定の資料として渡し、書き直す章を分けて示す', () => {
+  test('資料の並び。視点と文体の節は渡さない', () => {
     expect(headings(prompt.user)).toEqual([
       '作品情報',
-      '文体・視点',
+      '作品設計',
       '登場人物',
       'キャラクター間の関係',
       '物語に取り込みたい要素',
@@ -1014,22 +1712,156 @@ describe('buildOutlineChapterPrompt', () => {
       '書き直す章',
       '今回の依頼'
     ])
-    const others = section(prompt.user, '他の章')
-    expect(others).toContain('第2章「入部届」')
-    expect(others).toContain('第4章「準備」')
-    expect(others).not.toContain('顧問の条件')
-    expect(section(prompt.user, '書き直す章')).toBe('【書き直す章】\n第3章「顧問の条件」: 柊が入部の条件を出す。')
+    for (const word of ['視点:', '文体:', 'ライトノベル', '文体・視点']) {
+      expect(prompt.user).not.toContain(word)
+      expect(prompt.system).not.toContain(word)
+    }
+    expect(prompt.user).not.toContain('\n\n\n')
   })
 
-  test('章番号、概要の字数、名簿の名前が入る', () => {
-    const request = section(prompt.user, '今回の依頼')
-    expect(request).toContain('第3章を書き直す。chapter_number は3のまま。')
-    expect(request).toContain('summary は300字程度。')
-    expect(request).toContain('名簿（characters に使える名前）: 朝倉澪、ルナ、柊誠')
-    expect(prompt.system).toContain('"chapter_number": 3')
-    expect(prompt.system).toContain('前後の章と矛盾しない内容にする')
+  test('他の章は計画つきで、固定の資料として渡す', () => {
+    const others = section(prompt.user, '他の章')
+    expect(others).toStartWith(
+      [
+        '【他の章】',
+        '第1章「屋上の少女」: 朝倉澪が屋上でルナと出会う。',
+        '  時と場所: 10月上旬の夜、高校の屋上',
+        '  出来事:',
+        '    1. 朝倉澪が屋上で望遠鏡を調整する。',
+        '    2. ルナが望遠鏡の前に現れる。',
+        '    3. 朝倉澪がルナに天文部の話をする。',
+        '  章末の状況: 夜、屋上。朝倉澪とルナが並んで空を見ている。',
+        '  張る伏線:',
+        '    - [s1] 屋上の望遠鏡の持ち主が分からない。',
+        '第3章「顧問の条件」: 入部の条件が出る。',
+        '  回収する伏線: s1',
+        '第4章「準備」: 観測会の準備を進める。',
+        '第5章「流星群の夜」: 観測会の夜、約束を果たす。'
+      ].join('\n')
+    )
+    expect(others).toContain('  回収する伏線: s2、s9')
+    expect(others).not.toContain('入部届')
+    expect(prompt.system).toContain('【他の章】は固定で、書き換えない。')
+    expect(prompt.system).toContain(
+      '前の章の章末の状況から続き、次の章の時と場所・最初の出来事へ繋がるようにする。前後の章と同じ出来事を書かない。'
+    )
     expect(prompt.system).toContain('異なる切り口・展開を提案してよい')
-    expect(prompt.system).toContain('名簿の表記と完全に一致させる')
+  })
+
+  test('書き直す章も、今の計画つきで示す', () => {
+    expect(section(prompt.user, '書き直す章')).toBe(
+      [
+        '【書き直す章】',
+        '第2章「入部届」: ルナが天文部に入りたいと言い出す。',
+        '  時と場所: 翌日の放課後、部室',
+        '  出来事:',
+        '    1. ルナが部室に来て、入部したいと言う。',
+        '    2. 柊誠が入部届の用紙を持ってくる。',
+        '  章末の状況: 夕方、部室。ルナが入部届を書きかけている。',
+        '  張る伏線:',
+        '    - [s2] ルナは入部届の住所の欄を空けたままにする。'
+      ].join('\n')
+    )
+    // 計画の無い旧データは、題と概要だけ
+    expect(section(rewrite(3, outline, null).user, '書き直す章')).toBe(
+      '【書き直す章】\n第3章「顧問の条件」: 柊が入部の条件を出す。'
+    )
+  })
+
+  test('今回の依頼: 章番号、概要の字数、名簿、語り手', () => {
+    const request = section(prompt.user, '今回の依頼')
+    expect(request).toContain('- 第2章を書き直す。chapter_number は2のまま。')
+    expect(request).toContain('- summary は300字程度。')
+    expect(request).toContain('- 名簿（characters に使える名前）: 朝倉澪、ルナ、柊誠')
+    expect(request).toContain('- 語り手: 朝倉澪（この章に登場させる）')
+    expect(request).not.toContain('最終章')
+  })
+
+  test('伏線: 後の章が回収する伏線は、同じ id と内容で残させる。新しい id は既存と重ならない番号から', () => {
+    const request = section(prompt.user, '今回の依頼')
+    // 第 2 章が張る s2 は、第 5 章が回収する
+    expect(request).toContain(
+      '- 次の伏線は後の章が回収する。この章の出来事の中で張り、setups に同じ id と内容で書く:\n  - [s2] ルナは入部届の住所の欄を空けたままにする。'
+    )
+    expect(request).toContain('- 新しい伏線を張るときは、id を s3 から付ける。')
+    // 第 1 章が張った s1 は第 3 章が回収するので、この章では回収できない
+    expect(request).toContain('- payoffs は空にする（前の章が張った、未回収の伏線が無い）。')
+    expect(request).not.toContain('[s1]')
+  })
+
+  test('伏線: 今この章が回収している伏線は、この章で回収させる (ほかに回収する章が無い)', () => {
+    const request = section(rewrite(3).user, '今回の依頼')
+    expect(request).toContain(
+      '- 次の伏線は、この章で回収する（ほかに回収する章が無い）。payoffs に id を書く:\n  - [s1] 屋上の望遠鏡の持ち主が分からない。'
+    )
+    // s2 は第 5 章が回収するので挙げない
+    expect(request).not.toContain('[s2]')
+    expect(request).not.toContain('後の章が回収する。この章の出来事の中で張り')
+    expect(request).not.toContain('payoffs は空にする')
+  })
+
+  test('伏線: どの章でも回収されていない伏線は、回収してもよいと伝える', () => {
+    const unpaid: Outline = {
+      chapters: plannedOutline.chapters.map((c) => (c.chapter_number === 3 ? { ...c, payoffs: [] } : c))
+    }
+    const request = section(rewrite(4, unpaid).user, '今回の依頼')
+    expect(request).toContain(
+      '- 次の伏線は、この章で回収してもよい（前の章が張り、まだどの章でも回収されていない）:\n  - [s1] 屋上の望遠鏡の持ち主が分からない。'
+    )
+    expect(request).not.toContain('ほかに回収する章が無い')
+  })
+
+  test('最終章: 新しい伏線を張らせず、残っている伏線を回収させる', () => {
+    const request = section(rewrite(5).user, '今回の依頼')
+    expect(request).toContain('- この章が最終章。出来事は【作品設計】の「結末」に至る。')
+    expect(request).toContain('- この章は最終章なので、新しい伏線は張らない。')
+    expect(request).toContain(
+      '- 次の伏線は、最終章のこの章で回収する。payoffs に id を書く:\n  - [s2] ルナは入部届の住所の欄を空けたままにする。'
+    )
+    expect(request).not.toContain('id を s3 から付ける')
+    // 作品設計が無ければ、物語の結末
+    expect(section(rewrite(5, plannedOutline, null).user, '今回の依頼')).toContain(
+      '- この章が最終章。出来事は物語の結末に至る。'
+    )
+  })
+
+  test('出力の見本は、JSON Schema とキーも順序も同じで、OutlineChapterSchema を通る', () => {
+    const cases: Array<{ castNames: string[]; system: string }> = [
+      { castNames: cast.map((member) => member.name), system: prompt.system },
+      {
+        castNames: [],
+        system: buildOutlineChapterPrompt({
+          novel,
+          style,
+          cast: [],
+          relations: [],
+          existing: plannedOutline,
+          chapterNumber: 2
+        }).system
+      }
+    ]
+    for (const { castNames, system } of cases) {
+      const skeleton = outlineSkeleton(system)
+      expect(keysOfRecord(skeleton)).toEqual(keysOfRecord(dig(outlineChapterJsonSchema(castNames), 'properties')))
+      const parsed = OutlineChapterSchema.safeParse(skeleton)
+      expect(parsed.success).toBe(true)
+      for (const key of keysOfRecord(skeleton)) {
+        expect(keysOfRecord(parsed.data)).toContain(key)
+      }
+      expect(dig(skeleton, 'chapter_number')).toBe(2)
+    }
+  })
+
+  test('各項目の書き方は全章の生成と同じ。伏線だけ【今回の依頼】に従わせる', () => {
+    const { system } = prompt
+    expect(system).toContain(
+      `events: その章で起きる出来事を、起きる順に${OUTLINE_EVENTS_MIN}〜${OUTLINE_EVENTS_MAX}個。`
+    )
+    expect(system).toContain('どの項目も三人称の常体で、事実として書く。')
+    expect(system).toContain('名前は名簿の表記と完全に一致させる')
+    expect(system).toContain('どの伏線を書くかは【今回の依頼】に従う')
+    expect(system).toContain('payoffs: この章で回収する伏線の id。【今回の依頼】に挙げた id だけを書く。')
+    expect(system).not.toContain('章数ちょうど')
   })
 
   // OpenAI 互換の json_object モードは、入力 (user) に「json」の語が無い要求を拒否する。system は数えられない。
@@ -1048,13 +1880,17 @@ describe('buildOutlineChapterPrompt', () => {
   })
 
   test('章立てに無い章番号は、新しく作る章として扱う', () => {
-    const added = buildOutlineChapterPrompt({ novel, style, cast, relations, existing: outline, chapterNumber: 6 })
+    const added = rewrite(6, outline, null)
     expect(section(added.user, '書き直す章')).toBe('【書き直す章】\n第6章（まだ内容が無い。新しく作る）')
     expect(section(added.user, '他の章').split('\n')).toHaveLength(1 + outline.chapters.length)
+    // 章数より後ろに足す章は、最終章として扱う
+    expect(section(added.user, '今回の依頼')).toContain('- この章が最終章。出来事は物語の結末に至る。')
   })
 
   test('他の章が無ければ節を出さない', () => {
-    const single: Outline = { chapters: [{ chapter_number: 1, title: '一夜', summary: '一晩の話。', characters: [] }] }
+    const single: Outline = {
+      chapters: [ch({ chapter_number: 1, title: '一夜', summary: '一晩の話。', characters: [] })]
+    }
     const only = buildOutlineChapterPrompt({
       novel,
       style,
@@ -1063,13 +1899,7 @@ describe('buildOutlineChapterPrompt', () => {
       existing: single,
       chapterNumber: 1
     })
-    expect(headings(only.user)).toEqual([
-      '作品情報',
-      '文体・視点',
-      '物語に取り込みたい要素',
-      '書き直す章',
-      '今回の依頼'
-    ])
+    expect(headings(only.user)).toEqual(['作品情報', '物語に取り込みたい要素', '書き直す章', '今回の依頼'])
     expect(only.system).not.toContain('characters')
   })
 })

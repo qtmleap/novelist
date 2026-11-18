@@ -789,6 +789,82 @@ describe('renderLedger', () => {
   })
 })
 
+describe('renderLedger: previousChapter', () => {
+  const NO_LIMIT = { maxChars: Number.POSITIVE_INFINITY }
+  const ENDING = '◆ 直前の章の終わり'
+
+  // 第 2 章までしか記録が無い (第 3 章の抽出が失敗した) 台帳。endState は第 2 章のもの
+  test('shows the ending when its chapter is the previous chapter', () => {
+    const text = renderLedger(fullLedger, { previousChapter: 2 })
+    expect(text).toContain(`${ENDING}（第2章）\n- 時: 放課後 / 場所: 図書室 / その場にいる人物: アリス、ボブ`)
+    expect(text).toBe(renderLedger(fullLedger))
+  })
+
+  test('leaves the ending out when it is from a different chapter', () => {
+    // 第 4 章を書くとき、直前は第 3 章だが、記録は第 2 章までしか無い
+    const text = renderLedger(fullLedger, { previousChapter: 3 })
+    expect(text).not.toContain(ENDING)
+    expect(text).not.toContain('時: 放課後')
+    expect(text).not.toContain('場所: 図書室')
+  })
+
+  test('everything else is unchanged when the ending is left out', () => {
+    const withEnding = renderLedger(fullLedger)
+    const without = renderLedger(fullLedger, { previousChapter: 3 })
+    expect(without).toBe(withEnding.slice(0, withEnding.indexOf(`\n\n${ENDING}`)))
+    expect(without).toContain('◆ これまでの流れ')
+    expect(without).toContain('◆ 未回収の伏線')
+  })
+
+  test('without previousChapter the ending is shown with its chapter number, as before', () => {
+    const text = renderLedger({ ...fullLedger, endState: { chapter: 1, time: '朝', place: '駅', present: [] } })
+    expect(text).toContain(`${ENDING}（第1章）`)
+  })
+
+  test('a ledger with no ending is the same with or without previousChapter', () => {
+    const none: Ledger = { ...fullLedger, endState: null }
+    expect(renderLedger(none, { previousChapter: 5 })).toBe(renderLedger(none))
+  })
+
+  test('the section is the only thing left out, even when it would be the only content', () => {
+    const onlyEnding: Ledger = { flow: [], facts: [], characters: [], openThreads: [], endState: fullLedger.endState }
+    expect(renderLedger(onlyEnding, { previousChapter: 2 })).toContain(ENDING)
+    expect(renderLedger(onlyEnding, { previousChapter: 3 })).toBe('')
+  })
+
+  test('works together with maxChars: the length is judged without the left-out section', () => {
+    const chapters = [1, 2, 3, 4]
+    const action = (chapter: number) => `${'あ'.repeat(100)}${chapter}`
+    const ledger: Ledger = {
+      flow: chapters.map((chapter) => ({ chapter, summary: `第${chapter}章の流れ` })),
+      facts: [],
+      characters: [
+        {
+          name: 'アリス',
+          state: { chapter: 4, text: '図書室にいる' },
+          knowledge: [],
+          actions: chapters.map((chapter) => ({ chapter, items: [action(chapter)] }))
+        }
+      ],
+      openThreads: [],
+      endState: { chapter: 4, time: '放課後', place: 'あ'.repeat(100), present: ['アリス'] }
+    }
+    const full = renderLedger(ledger, NO_LIMIT)
+    const withoutEnding = renderLedger(ledger, { ...NO_LIMIT, previousChapter: 5 })
+    expect(withoutEnding.length).toBeLessThan(full.length)
+    // 節を除いた長さがちょうど収まる上限なら、「したこと」は 1 つも省かれない
+    expect(renderLedger(ledger, { maxChars: withoutEnding.length, previousChapter: 5 })).toBe(withoutEnding)
+    // 節を出す場合は、同じ上限では収まらず「したこと」が省かれる
+    const shown = renderLedger(ledger, { maxChars: withoutEnding.length, previousChapter: 4 })
+    expect(shown).toContain('の「したこと」は省略')
+    expect(shown).toContain(ENDING)
+    // 節を除いても超えるなら、古い章の「したこと」から省く。直前の章の終わりは出ない
+    const tight = renderLedger(ledger, { maxChars: withoutEnding.length - 1, previousChapter: 5 })
+    expect(tight).toContain('第1章の「したこと」は省略')
+    expect(tight).not.toContain(ENDING)
+  })
+})
+
 describe('renderLedger: size limit', () => {
   const NO_LIMIT = { maxChars: Number.POSITIVE_INFINITY }
   const CHAPTERS = [1, 2, 3, 4, 5, 6]
