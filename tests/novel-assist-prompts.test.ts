@@ -1046,18 +1046,20 @@ describe('buildBiblePrompt: 成人指定', () => {
       'セーラー服',
       '学ラン',
       '学生服',
-      '体操服',
-      'スクール水着',
-      'ブルマ',
-      'ランドセル',
-      '通学帽'
+      'ランドセル'
     ])
     for (const term of quoted(line)) {
       expect(findMinorTerms(term, { appearance: true })).not.toEqual([])
       // 外見の欄だけの語 (職業や背景では、少女漫画家、少年野球のコーチ、幼い頃 のような語がある)
       expect(findMinorTerms(term)).toEqual([])
     }
-    expect(line).toContain('学校の制服や、幼さを強調する描写を残さず、年齢相応の大人として書く。')
+    // 体操着や通学用の持ち物は、語として並べずにまとめて書く (検証の側は、それらの語も拾う)
+    expect(line).toContain(
+      '学校の制服、体操着、通学用の持ち物など、学校に通う子供を思わせる服装や持ち物と、幼さを強調する描写を残さず、年齢相応の大人として書く。'
+    )
+    for (const word of ['体操服', 'スクール水着', 'ブルマ', '通学帽']) {
+      expect(buildBiblePrompt(bibleInput({ style: adultStyle('R18') })).system).not.toContain(word)
+    }
     // 「制服」単独は通る (成人の職業の制服がある)
     expect(findMinorTerms('制服', { appearance: true })).toEqual([])
     // 「幼い頃」は背景では通るが、外見の欄では落ちる。「子供の頃」はどちらも通る
