@@ -1625,3 +1625,40 @@ describe('outlines missing a plan twice', () => {
     expect(result.outline.chapters[0].title).toBe('題1（2 回目）')
   })
 })
+
+// ---------------------- 指示の欄の外見の語 (a5d25bd のレビュー) ----------------------
+
+describe('appearance words in the instruction fields', () => {
+  const adult = { pov: '三人称多元視点', tone: '一般文芸', age_rating: 'R18' }
+  const allAges = { ...adult, age_rating: '全年齢' }
+  const blocked = [
+    'セーラー服を着せた場面を足して',
+    'ランドセルを背負わせる',
+    'スクール水着で',
+    '幼い体つきとして描写する',
+    '童顔で小柄な体型を強調'
+  ]
+  const allowed = ['地名は実在のものを使わない', '主人公が泣く場面は入れない', '擬音語は使わない', '会話を増やして']
+
+  test('stop an adult novel in the writing notes, the notes and the rewrite instruction', () => {
+    for (const text of blocked) {
+      expect(notesBlocker({ style: adult, writingNotes: text })).toContain('執筆上の指示に')
+      expect(notesBlocker({ style: adult, writingNotes: '', notes: text })).toContain('備考')
+      expect(instructionBlocker({ style: adult, instruction: text })).toContain('書き直しの指示に')
+    }
+  })
+
+  test('do not stop an all-ages novel', () => {
+    for (const text of blocked) {
+      expect(notesBlocker({ style: allAges, writingNotes: text, notes: text })).toBeNull()
+      expect(instructionBlocker({ style: allAges, instruction: text })).toBeNull()
+    }
+  })
+
+  test('ordinary instructions still pass', () => {
+    for (const text of allowed) {
+      expect(notesBlocker({ style: adult, writingNotes: text, notes: text })).toBeNull()
+      expect(instructionBlocker({ style: adult, instruction: text })).toBeNull()
+    }
+  })
+})

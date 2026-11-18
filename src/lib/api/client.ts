@@ -19,6 +19,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   invalid_notes: '執筆上の指示または備考に、成人指定の作品では使えない語があります',
   invalid_instruction: '書き直しの指示に、成人指定の作品では使えない語があります',
   invalid_base_version: '書き直す元の版が見つかりません',
+  invalid_base_content: '元の版に未成年を指す記述があるため、書き直せません。再生成してください',
   invalid_chapter_number: '章番号が不正です',
   chapter_not_in_outline: 'この章は章立てに含まれていません',
   not_latest_chapter: '最新の生成済み章でのみ操作できます',

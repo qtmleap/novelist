@@ -1030,6 +1030,15 @@ function quotedTerms(terms: string[]): string {
   return terms.map((term) => `「${term}」`).join('')
 }
 
+// 指示の欄では、外見の欄用の語 (セーラー服、ランドセル、童顔、幼い など) も見る。
+// 指示の欄は資料ではなく書き手への直接の指示で、成人指定の表現の許可と一緒に渡るため、この種類の書き方を止める。
+// 「幼い頃の回想を入れる」「少年漫画のような展開」も止まるが、成人指定の指示の欄なので安全側に倒す
+// (エラー文に語が出るので、利用者は言い換えられる)。本文と書き直しの元の版の検査は外見の語を見ない
+// (本文では「幼い頃」「少女」が普通に出るため)。
+function instructionTerms(text: string): string[] {
+  return findMinorTerms(text, { appearance: true })
+}
+
 // 成人指定 (R15 / R18) の作品で、利用者の指示として入る欄に未成年を指す語があれば、止める理由の文。無ければ null。
 // 成人指定の読み替えの指示は「資料」(あらすじ、登場人物の辞典) に対するもので、利用者の直接の指示とは正面からぶつかるため、
 // 指示の欄は読み替えずに止める。あらすじと辞典は資料なので検査しない。
@@ -1038,18 +1047,18 @@ function quotedTerms(terms: string[]): string {
 export function notesBlocker(input: { style: StyleParams; writingNotes: string; notes?: string }): string | null {
   if (!isAdultStyle(input.style)) return null
   const fields = [
-    { label: '執筆上の指示', terms: findMinorTerms(input.writingNotes) },
-    { label: '備考（物語に取り込みたい要素）', terms: input.notes === undefined ? [] : findMinorTerms(input.notes) }
+    { label: '執筆上の指示', terms: instructionTerms(input.writingNotes) },
+    { label: '備考（物語に取り込みたい要素）', terms: input.notes === undefined ? [] : instructionTerms(input.notes) }
   ].filter((field) => field.terms.length > 0)
   if (fields.length === 0) return null
   return `${fields.map((field) => `${field.label}に、未成年を指す語（${quotedTerms(field.terms)}）があります`).join('。')}。成人指定の作品では使えません。`
 }
 
 // 成人指定の作品で、書き直しの指示に未成年を指す語があれば、止める理由の文。無ければ null。
-// 書き直しの元の版 (既に書かれた本文) は検査しない。
+// 書き直しの元の版 (既に書かれた本文) は、chapter-context.ts の revisionBaseCheck が本文と同じ基準で検査する。
 export function instructionBlocker(input: { style: StyleParams; instruction: string }): string | null {
   if (!isAdultStyle(input.style)) return null
-  const terms = findMinorTerms(input.instruction)
+  const terms = instructionTerms(input.instruction)
   if (terms.length === 0) return null
   return `書き直しの指示に、未成年を指す語（${quotedTerms(terms)}）があります。成人指定の作品では使えません。`
 }

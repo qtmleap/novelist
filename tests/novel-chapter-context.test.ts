@@ -32,6 +32,9 @@ import {
   reviewAndSave,
   reviewInputsOf,
   reviewOwnsState,
+  chapterLineage,
+  REVIEW_DEADLINE_MS,
+  revisionBaseCheck,
   revisionBaseOf,
   revisionInstruction,
   setupsOf
@@ -70,7 +73,15 @@ function record(n: number, overrides: Partial<ChapterRecord> = {}): ChapterRecor
 }
 
 function chapter(n: number, rec: ChapterRecord | null = record(n)): ContextChapter {
-  return { id: `v${n}`, number: n, title: `題${n}`, content: content(n), record: rec, outlineHash: null }
+  return {
+    id: `v${n}`,
+    number: n,
+    title: `題${n}`,
+    content: content(n),
+    record: rec,
+    outlineHash: null,
+    prevChapterId: null
+  }
 }
 
 const outline: Outline = {
@@ -101,6 +112,7 @@ function source(chapters: ContextChapter[], chapterNumber = 5): ContextSource {
     bible: null,
     bibleUnreadable: false,
     revision: null,
+    revisionLineage: null,
     jobPending: [],
     writingNotes: '',
     chapters
@@ -823,7 +835,7 @@ describe('generation start checks', () => {
 })
 
 describe('decideGenerationStart', () => {
-  const ready = { outline, written: new Set([1, 2]), blocker: null, baseVersionError: null }
+  const ready = { outline, written: new Set([1, 2]), blocker: null, revisionBlock: null }
 
   test('targets are sorted and deduplicated, and the first one is started', () => {
     expect(decideGenerationStart(ready, 'n1', [4, 3, 3], 'm')).toEqual({
@@ -932,13 +944,21 @@ describe('revision', () => {
   const base = { novelId: 'n1', chapterNumber: 3 }
 
   test('without a version id, the latest version of the chapter is the base', () => {
-    expect(revisionBaseOf({ ...base, baseVersionId: '', latest, row: null })).toEqual({ ok: true, content: content(3) })
+    expect(revisionBaseOf({ ...base, baseVersionId: '', latest, row: null })).toEqual({
+      ok: true,
+      content: content(3),
+      lineage: { outlineHash: null, prevChapterId: null }
+    })
     expect(revisionBaseOf({ ...base, baseVersionId: '', latest: undefined, row: null }).ok).toBe(false)
   })
 
   test('a version id must belong to this novel and this chapter', () => {
-    const row = { novel_id: 'n1', chapter_number: 3, content: '元の版の本文' }
-    expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row })).toEqual({ ok: true, content: '元の版の本文' })
+    const row = { novel_id: 'n1', chapter_number: 3, content: '元の版の本文', outline_hash: 'h3a', prev_chapter_id: 'v2a' }
+    expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row })).toEqual({
+      ok: true,
+      content: '元の版の本文',
+      lineage: { outlineHash: 'h3a', prevChapterId: 'v2a' }
+    })
     expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row: { ...row, novel_id: 'other' } }).ok).toBe(false)
     expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row: { ...row, chapter_number: 2 } }).ok).toBe(false)
     expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row: null }).ok).toBe(false)
@@ -1045,7 +1065,14 @@ describe('reviewInputsOf', () => {
 })
 
 describe('reviewAlarmAction', () => {
-  const pending = { reviewPending: true, reviewRunning: false, reviewAttempts: 1, hasTarget: true }
+  const pending = {
+    reviewPending: true,
+    reviewRunning: false,
+    reviewAttempts: 1,
+    hasTarget: true,
+    reviewStartedAt: null,
+    now: 0
+  }
 
   test('decides whether to keep the DO alive, retry or give up', () => {
     expect(reviewAlarmAction({ ...pending, reviewPending: false })).toBe('none')
@@ -1259,7 +1286,7 @@ describe('instruction fields of adult novels', () => {
       outline,
       written: new Set([1, 2]),
       blocker: generationBlock({ ...base, writingNotes: '女子高生' }),
-      baseVersionError: null
+      revisionBlock: null
     }
     expect(decideGenerationStart(ready, 'n1', [3], 'm')).toMatchObject({ ok: false, status: 400, error: 'invalid_notes' })
   })
@@ -1325,7 +1352,7 @@ describe('the next chapter of a running batch', () => {
 
 describe('every target must be in the outline', () => {
   test('a later target missing from the outline is a 404 at the start', () => {
-    const ready = { outline, written: new Set([1, 2, 3, 4, 5, 6]), blocker: null, baseVersionError: null }
+    const ready = { outline, written: new Set([1, 2, 3, 4, 5, 6]), blocker: null, revisionBlock: null }
     expect(decideGenerationStart(ready, 'n1', [5, 6, 7], 'm')).toEqual({ ok: false, status: 404, error: 'not_found' })
     expect(decideGenerationStart(ready, 'n1', [5, 6], 'm')).toMatchObject({ ok: true, targets: [5, 6] })
   })
@@ -1335,7 +1362,12 @@ describe('every target must be in the outline', () => {
 
 describe('the rewrite base version at the generation start', () => {
   test('decideGenerationStart answers 400 invalid_base_version after the content checks, before 409', () => {
-    const source = { outline, written: new Set<number>(), blocker: null, baseVersionError: '書き直す元の版が見つかりません' }
+    const source = {
+      outline,
+      written: new Set<number>(),
+      blocker: null,
+      revisionBlock: { error: 'invalid_base_version' as const, detail: '書き直す元の版が見つかりません' }
+    }
     expect(decideGenerationStart(source, 'n1', [3], 'm')).toEqual({
       ok: false,
       status: 400,
@@ -1428,5 +1460,262 @@ describe('the rewrite base version at the generation start', () => {
     const start = await prepareGenerationStart(fake([]), 'n1', [1], 'm', { instruction: '  ', baseVersionId: 'nope' })
     expect(start.ok).toBe(true)
     expect((await prepareGenerationStart(fake([]), 'n1', [1], 'm')).ok).toBe(true)
+  })
+})
+
+// ---------------------- 成人指定の書き直しの元の版の本文 ----------------------
+
+describe('the base text of an adult rewrite', () => {
+  const adult: StyleParams = { pov: '三人称多元視点', tone: '一般文芸', age_rating: 'R18' }
+  const allAges: StyleParams = { ...adult, age_rating: '全年齢' }
+  const minorText = '　あの日、高校二年生の彩葉は港の灯台へ向かった。'
+
+  test('revisionBaseCheck: adult novels stop on words for minors in the base text', () => {
+    const checked = revisionBaseCheck({ ok: true, content: minorText }, adult)
+    if (checked.ok) throw new Error('expected a block')
+    expect(checked.error).toBe('invalid_base_content')
+    expect(checked.detail).toMatch(/^元の版に未成年を指す記述があります（「[^」]+」/)
+    expect(checked.detail).toContain('彩葉')
+    expect(checked.detail.endsWith('書き直しではなく再生成してください。')).toBe(true)
+    // 抜粋は短い (語の前後だけ)
+    expect(checked.detail.length).toBeLessThan(120)
+  })
+
+  test('revisionBaseCheck: clean text, all ages, and an unusable base', () => {
+    expect(revisionBaseCheck({ ok: true, content: '　大学生の彩葉は港へ向かった。' }, adult)).toEqual({
+      ok: true,
+      content: '　大学生の彩葉は港へ向かった。'
+    })
+    expect(revisionBaseCheck({ ok: true, content: minorText }, allAges)).toEqual({ ok: true, content: minorText })
+    // 元の版が使えないときは本文を見ずに invalid_base_version
+    expect(revisionBaseCheck({ ok: false, error: '見つかりません' }, adult)).toEqual({
+      ok: false,
+      error: 'invalid_base_version',
+      detail: '見つかりません'
+    })
+  })
+
+  type Row = { id: string; novel_id: string; chapter_number: number; title: string | null; content: string; record: null }
+
+  // 成人指定 (age_rating を変えられる) の小説と、id で引ける版の行。latest を渡すと第 1 章の最新 version にする
+  function fake(rows: Row[], options: { ageRating?: string; latest?: Row } = {}): PrismaClient {
+    const latest = options.latest
+    return Object.assign(Object.create(null), {
+      novel: {
+        findUnique: async () => ({
+          id: 'n1',
+          title: 't',
+          genre: 'g',
+          setting: 's',
+          num_chapters: 6,
+          target_chars: 2000,
+          outline_summary_chars: 200,
+          pov: '三人称多元視点',
+          tone: '一般文芸',
+          age_rating: options.ageRating === undefined ? 'R18' : options.ageRating,
+          pov_character_id: '',
+          ending: '未指定',
+          notes: '',
+          writing_notes: null,
+          editor_model: 'gemini-2.5-flash',
+          bible: null,
+          outline: JSON.stringify(outline),
+          chapters: latest === undefined ? [] : [{ id: latest.id, chapter_number: latest.chapter_number, version: 1 }],
+          character_links: [],
+          relations: [],
+          generation_costs: [],
+          generation_job: null,
+          category: null
+        })
+      },
+      chapter: {
+        findUnique: async (args: { where: { id: string } }) => {
+          const found = rows.find((row) => row.id === args.where.id)
+          return found === undefined ? null : found
+        },
+        findMany: async () =>
+          latest === undefined
+            ? []
+            : [{ ...latest, version: 1, outline_hash: null, prev_chapter_id: null, review: null, created_at: new Date(0) }]
+      }
+    })
+  }
+  const minorRow: Row = { id: 'v1', novel_id: 'n1', chapter_number: 1, title: '題1', content: minorText, record: null }
+  const cleanRow: Row = { ...minorRow, content: '　大学生の彩葉は港へ向かった。' }
+  const rewrite = (baseVersionId: string) => ({ instruction: '場面を詳しく書き足して', baseVersionId })
+
+  test('the generation start answers 400 invalid_base_content for an adult rewrite of such text', async () => {
+    const start = await prepareGenerationStart(fake([minorRow]), 'n1', [1], 'm', rewrite('v1'))
+    expect(start).toMatchObject({ ok: false, status: 400, error: 'invalid_base_content' })
+  })
+
+  test('clean text, all ages, and a normal generation pass', async () => {
+    expect((await prepareGenerationStart(fake([cleanRow]), 'n1', [1], 'm', rewrite('v1'))).ok).toBe(true)
+    expect((await prepareGenerationStart(fake([minorRow], { ageRating: '全年齢' }), 'n1', [1], 'm', rewrite('v1'))).ok).toBe(
+      true
+    )
+    const normal = await prepareGenerationStart(fake([minorRow]), 'n1', [1], 'm', { instruction: '', baseVersionId: 'v1' })
+    expect(normal.ok).toBe(true)
+  })
+
+  test('without a base id, the latest version is checked', async () => {
+    const start = await prepareGenerationStart(fake([], { latest: minorRow }), 'n1', [1], 'm', rewrite(''))
+    expect(start).toMatchObject({ ok: false, status: 400, error: 'invalid_base_content' })
+    expect((await prepareGenerationStart(fake([], { latest: cleanRow }), 'n1', [1], 'm', rewrite(''))).ok).toBe(true)
+  })
+
+  test('an unusable base version is reported before its text', async () => {
+    // 別の章の版 (本文には語がある)
+    const other = { ...minorRow, id: 'v2', chapter_number: 2 }
+    const start = await prepareGenerationStart(fake([other]), 'n1', [1], 'm', rewrite('v2'))
+    expect(start).toMatchObject({ ok: false, status: 400, error: 'invalid_base_version' })
+    // 書き直しの指示の検査はさらに前
+    const instruction = await prepareGenerationStart(fake([minorRow]), 'n1', [1], 'm', {
+      instruction: '中学生として書き直す',
+      baseVersionId: 'v1'
+    })
+    expect(instruction).toMatchObject({ ok: false, status: 400, error: 'invalid_instruction' })
+  })
+
+  test('the DO context stops on the same condition', async () => {
+    const payload = {
+      novelId: 'n1',
+      chapterNumber: 1,
+      model: 'gemini-2.5-flash',
+      instruction: '場面を詳しく書き足して',
+      baseVersionId: 'v1'
+    }
+    const stopped = await buildChapterContext(fake([minorRow]), untouchedEnv, payload)
+    if (stopped.ok) throw new Error('expected failure')
+    const expected = revisionBaseCheck({ ok: true, content: minorText }, adult)
+    if (expected.ok) throw new Error('expected a block')
+    expect(stopped.error).toBe(expected.detail)
+    const allAges = await buildChapterContext(fake([minorRow], { ageRating: '全年齢' }), untouchedEnv, payload)
+    expect(allAges.ok).toBe(true)
+  })
+})
+
+// ---------------------- レビュー (fa166bd) の残り ----------------------
+
+describe('the lineage of a rewritten version', () => {
+  const current = lineageOf(source(sixChapters, 3))
+
+  test('a normal generation records the current outline and previous version', () => {
+    expect(chapterLineage(source(sixChapters, 3))).toEqual(current)
+    expect(current.outlineHash).not.toBeNull()
+    expect(current.prevChapterId).toBe('v2')
+  })
+
+  test('a rewrite inherits the lineage of its base version', () => {
+    const inherited = { outlineHash: '元の版を書いたときのハッシュ', prevChapterId: 'v2-old' }
+    const src = {
+      ...source(sixChapters, 3),
+      revision: { baseContent: '元の版', instruction: '誤字を直す' },
+      revisionLineage: inherited
+    }
+    expect(chapterLineage(src)).toEqual(inherited)
+    expect(planChapterContext(src, huge).lineage).toEqual(inherited)
+  })
+
+  test('a base version from before this feature keeps null (not judged)', () => {
+    const nulls = { outlineHash: null, prevChapterId: null }
+    const src = { ...source(sixChapters, 3), revision: { baseContent: '元の版', instruction: '誤字を直す' }, revisionLineage: nulls }
+    expect(chapterLineage(src)).toEqual(nulls)
+  })
+
+  test('a base version that is not the latest gives its own lineage', () => {
+    const latest = { ...chapter(3), outlineHash: 'h-latest', prevChapterId: 'v2-latest' }
+    const older = { novel_id: 'n1', chapter_number: 3, content: '古い版', outline_hash: 'h-old', prev_chapter_id: 'v2-old' }
+    const base = revisionBaseOf({ novelId: 'n1', chapterNumber: 3, baseVersionId: 'v3-old', latest, row: older })
+    expect(base).toMatchObject({ ok: true, lineage: { outlineHash: 'h-old', prevChapterId: 'v2-old' } })
+    const fromLatest = revisionBaseOf({ novelId: 'n1', chapterNumber: 3, baseVersionId: '', latest, row: null })
+    expect(fromLatest).toMatchObject({ ok: true, lineage: { outlineHash: 'h-latest', prevChapterId: 'v2-latest' } })
+    // 成人指定の本文の検査を通っても、系譜はそのまま
+    expect(revisionBaseCheck(base, { pov: '一人称', tone: '', age_rating: 'R18' })).toMatchObject({
+      ok: true,
+      lineage: { outlineHash: 'h-old', prevChapterId: 'v2-old' }
+    })
+  })
+
+  test('the DO context saves the base version lineage for a rewrite', async () => {
+    const row = {
+      id: 'v1-old',
+      novel_id: 'n1',
+      chapter_number: 1,
+      title: '題1',
+      content: '　元の版。',
+      record: null,
+      outline_hash: 'h-old',
+      prev_chapter_id: null
+    }
+    const prisma = Object.assign(Object.create(null), {
+      novel: {
+        findUnique: async () => ({
+          id: 'n1',
+          title: 't',
+          genre: 'g',
+          setting: 's',
+          num_chapters: 6,
+          target_chars: 2000,
+          outline_summary_chars: 200,
+          pov: '三人称多元視点',
+          tone: '一般文芸',
+          age_rating: '全年齢',
+          pov_character_id: '',
+          ending: '未指定',
+          notes: '',
+          writing_notes: null,
+          editor_model: 'gemini-2.5-flash',
+          bible: null,
+          outline: JSON.stringify(outline),
+          chapters: [],
+          character_links: [],
+          relations: [],
+          generation_costs: [],
+          generation_job: null,
+          category: null
+        })
+      },
+      chapter: { findUnique: async (args: { where: { id: string } }) => (args.where.id === row.id ? row : null) }
+    })
+    const result = await buildChapterContext(prisma, untouchedEnv, {
+      novelId: 'n1',
+      chapterNumber: 1,
+      model: 'gemini-2.5-flash',
+      instruction: '誤字を直す',
+      baseVersionId: 'v1-old'
+    })
+    if (!result.ok) throw new Error(result.error)
+    expect(result.context.lineage).toEqual({ outlineHash: 'h-old', prevChapterId: null })
+  })
+})
+
+describe('the review alarm deadline', () => {
+  const pending = { reviewPending: true, reviewRunning: true, reviewAttempts: 1, hasTarget: true }
+  const startedAt = 1_000_000
+
+  test('within the deadline the decision is unchanged', () => {
+    expect(reviewAlarmAction({ ...pending, reviewStartedAt: startedAt, now: startedAt + REVIEW_DEADLINE_MS })).toBe('keep')
+    expect(
+      reviewAlarmAction({ ...pending, reviewRunning: false, reviewStartedAt: startedAt, now: startedAt + 60_000 })
+    ).toBe('retry')
+  })
+
+  test('past the deadline the alarm gives up, even while the review is still running', () => {
+    expect(reviewAlarmAction({ ...pending, reviewStartedAt: startedAt, now: startedAt + REVIEW_DEADLINE_MS + 1 })).toBe(
+      'give_up'
+    )
+    expect(
+      reviewAlarmAction({ ...pending, reviewRunning: false, reviewStartedAt: startedAt, now: startedAt + 11 * 60_000 })
+    ).toBe('give_up')
+    // 検査待ちが無ければ none のまま
+    expect(
+      reviewAlarmAction({ ...pending, reviewPending: false, reviewStartedAt: startedAt, now: startedAt + 11 * 60_000 })
+    ).toBe('none')
+  })
+
+  test('old storage without a start time keeps the old decision', () => {
+    expect(reviewAlarmAction({ ...pending, reviewStartedAt: null, now: Number.MAX_SAFE_INTEGER })).toBe('keep')
+    expect(reviewAlarmAction({ ...pending, reviewRunning: false, reviewStartedAt: null, now: 1e15 })).toBe('retry')
   })
 })

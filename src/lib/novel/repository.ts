@@ -242,7 +242,16 @@ export async function saveChapterRecord(prisma: PrismaClient, chapterId: string,
 export async function findChapterVersion(prisma: PrismaClient, chapterId: string) {
   const row = await prisma.chapter.findUnique({
     where: { id: chapterId },
-    select: { id: true, novel_id: true, chapter_number: true, title: true, content: true, record: true }
+    select: {
+      id: true,
+      novel_id: true,
+      chapter_number: true,
+      title: true,
+      content: true,
+      record: true,
+      outline_hash: true,
+      prev_chapter_id: true
+    }
   })
   return row === null ? null : { ...row, record: parseStoredRecord(row.record) }
 }

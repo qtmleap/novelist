@@ -14,8 +14,8 @@ import {
   toStoryBible
 } from '@/lib/novel/assist'
 import type { ReviewPromptInput } from '@/lib/novel/assist-prompts'
-import { addressesFor, callsByName } from '@/lib/novel/bible'
-import { type ChapterCheckInput, checkChapter } from '@/lib/novel/checks'
+import { addressesFor, callsByName, isAdultRating } from '@/lib/novel/bible'
+import { type ChapterCheckInput, checkChapter, findMinorTermsInChapter } from '@/lib/novel/checks'
 import { type GenerationCostInput, recordGenerationCost } from '@/lib/novel/cost'
 import { buildLedger, LEDGER_MAX_CHARS, type Ledger, renderLedger } from '@/lib/novel/ledger'
 import { contextBudgetTokens, selectPriorChapters, TOKENS_PER_CHAR } from '@/lib/novel/memory'
@@ -208,6 +208,8 @@ export type ContextChapter = {
   record: ChapterRecord | null
   // 生成に使った章立ての項目のハッシュ。この機能より前の章は null
   outlineHash: string | null
+  // 直前の章として使った version の id。第 1 章、直前の章の本文が無かった章、この機能より前の章は null
+  prevChapterId: string | null
 }
 
 // 文脈の組み立ての材料 (D1 から読んだもの)。
@@ -226,6 +228,8 @@ export type ContextSource = {
   bibleUnreadable: boolean
   // 指示つきの書き直しのとき、元の版の本文と指示。通常の生成では null
   revision: RevisionInput | null
+  // 書き直しのとき、元の版の系譜 (outline_hash と prev_chapter_id)。通常の生成では null
+  revisionLineage: ChapterLineage | null
   // 走っている生成のジョブで、これから書く章 (pending)。ジョブが無い・止まっていれば空
   jobPending: number[]
   // 執筆上の指示 (Novel.writing_notes)。無ければ ''
@@ -325,6 +329,14 @@ export function nextChapterOf(source: ContextSource): NextChapterInput | null {
 
 // 今回の章をどの章立てと前章の版から作るか。前章は最新 version (本文があるもの) の id。第 1 章は null。
 // 章立てに今回の章が無ければ null のハッシュ (その場合 buildChapterPrompt が throw する)。
+// 本文と一緒に保存する系譜。通常の生成は今の章立てと今の前章の版 (lineageOf)。
+// 指示つきの書き直しは元の版の値をそのまま引き継ぐ (元の版が null なら null のまま。判定しない、のまま)。
+// 書き直しは「指示された点以外は元の版のまま」なので、中身は元の版を書いたときの計画と前章に基づいている。
+// 今の値を記録すると、要再生成の章を誤字直しで書き直しただけで「新しい」と判定され、要再生成の表示が消えてしまう。
+export function chapterLineage(source: ContextSource): ChapterLineage {
+  return source.revisionLineage !== null ? source.revisionLineage : lineageOf(source)
+}
+
 export function lineageOf(source: ContextSource): ChapterLineage {
   const entry = source.outline.chapters.find((chapter) => chapter.chapter_number === source.chapterNumber)
   const previous = source.chapters.find((chapter) => chapter.number === source.chapterNumber - 1)
@@ -407,7 +419,7 @@ export function planChapterContext(
       .filter((chapter) => recorded.has(chapter.number) && effectiveRecord(chapter, extra) === null)
       .map((chapter) => chapter.number),
     ledger,
-    lineage: lineageOf(source)
+    lineage: chapterLineage(source)
   }
 }
 
@@ -688,7 +700,8 @@ function contextChapters(novel: LoadedNovel): ContextChapter[] {
     title: chapter.title,
     content: chapter.content,
     record: chapter.record,
-    outlineHash: chapter.outline_hash
+    outlineHash: chapter.outline_hash,
+    prevChapterId: chapter.prev_chapter_id
   }))
 }
 
@@ -725,7 +738,7 @@ export async function buildChapterContext(
   const cast = buildCastForGemini(novel.character_links)
   const style = styleOf(novel)
   const chapters = contextChapters(novel)
-  const revision = await loadRevision(prisma, payload, chapters)
+  const revision = await loadRevision(prisma, payload, chapters, style)
   if (!revision.ok) return revision
   const source: ContextSource = {
     novel: novelParams(novel),
@@ -738,6 +751,7 @@ export async function buildChapterContext(
     bible: novel.bible === null ? null : toStoryBible(novel.bible),
     bibleUnreadable: novel.bible_unreadable,
     revision: revision.revision,
+    revisionLineage: revision.lineage,
     jobPending: runningJobPending(novel.generation_job),
     writingNotes: novel.writing_notes,
     chapters
@@ -862,7 +876,7 @@ export type GenerationStart =
   | { ok: true; payload: ChapterGenPayload; targets: number[] }
   | { ok: false; status: 404; error: 'not_found' }
   | ({ ok: false; status: 400 } & GenerationBlock)
-  | { ok: false; status: 400; error: 'invalid_base_version'; detail: string }
+  | ({ ok: false; status: 400 } & RevisionBlock)
   | { ok: false; status: 409; error: 'previous_chapters_missing'; detail: string }
 
 // 生成の開始の判定の材料 (D1 から読んだもの)。
@@ -872,12 +886,13 @@ export type GenerationStartSource = {
   written: Set<number>
   // 生成を止める理由 (generationBlock。DO の文脈の段階と同じ判定)。止めなければ null
   blocker: GenerationBlock | null
-  // 書き直しの元の版が使えない理由 (revisionBaseOf。DO の文脈の段階と同じ判定)。書き直しでない・使えるなら null
-  baseVersionError: string | null
+  // 書き直しを止める理由 (revisionBaseCheck。DO の文脈の段階と同じ判定)。書き直しでない・止めないなら null
+  revisionBlock: RevisionBlock | null
 }
 
 // 生成を始めてよいか。順に、小説と章立ての対象の章 (全て。404)、
 // 作品設計・執筆上の指示・書き直しの指示 (400 invalid_bible / invalid_notes / invalid_instruction)、
+// 書き直しの元の版 (400 invalid_base_version、次に本文の 400 invalid_base_content)、
 // 前の章が欠けていないか (409)。ジョブを running にする前、DO を起動する前に判定する
 // (DO の文脈の段階でも同じ判定をする。開始の時点で止めれば、利用者がストリームのエラーで初めて気付くことも、
 // ジョブが一度 running になることも無い)。対象は重複を除いて昇順にする。
@@ -896,9 +911,7 @@ export function decideGenerationStart(
   const planned = new Set(source.outline.chapters.map((chapter) => chapter.chapter_number))
   if (!normalized.every((target) => planned.has(target))) return { ok: false, status: 404, error: 'not_found' }
   if (source.blocker !== null) return { ok: false, status: 400, ...source.blocker }
-  if (source.baseVersionError !== null) {
-    return { ok: false, status: 400, error: 'invalid_base_version', detail: source.baseVersionError }
-  }
+  if (source.revisionBlock !== null) return { ok: false, status: 400, ...source.revisionBlock }
   const checked = checkGenerationTargets(normalized, source.written)
   if (!checked.ok) {
     return {
@@ -914,24 +927,21 @@ export function decideGenerationStart(
 // 生成の開始の判定を D1 から行う (小説、章立て、名簿、作品設計、各章の最新 version を読む)。
 export type StartRevision = { instruction: string; baseVersionId: string }
 
-// 書き直しの元の版の確認 (書き直しでなければ null)。DO の文脈の段階 (loadRevision) と同じ revisionBaseOf を使う。
-async function baseVersionError(
+// 書き直しの元の版の確認 (書き直しでなければ null)。DO の文脈の段階 (loadRevision) と同じ関数を使う。
+async function revisionStartBlock(
   prisma: PrismaClient,
-  target: { novelId: string; chapterNumber: number | undefined; chapters: ContextChapter[] },
+  target: { novelId: string; chapterNumber: number | undefined; chapters: ContextChapter[]; style: StyleParams },
   revision: StartRevision
-): Promise<string | null> {
+): Promise<RevisionBlock | null> {
   if (revisionInstruction(revision.instruction).length === 0 || target.chapterNumber === undefined) return null
-  const chapterNumber = target.chapterNumber
-  const baseVersionId = revision.baseVersionId.trim()
-  const row = baseVersionId.length === 0 ? null : await findChapterVersion(prisma, baseVersionId)
-  const base = revisionBaseOf({
+  const base = await resolveRevisionBase(prisma, {
     novelId: target.novelId,
-    chapterNumber,
-    baseVersionId,
-    latest: target.chapters.find((chapter) => chapter.number === chapterNumber),
-    row
+    chapterNumber: target.chapterNumber,
+    baseVersionId: revision.baseVersionId,
+    chapters: target.chapters
   })
-  return base.ok ? null : base.error
+  const checked = revisionBaseCheck(base, target.style)
+  return checked.ok ? null : { error: checked.error, detail: checked.detail }
 }
 
 // revision は書き直しの指示と元の版 (1 章の生成だけ。バッチの生成では渡さない)。
@@ -944,8 +954,9 @@ export async function prepareGenerationStart(
 ): Promise<GenerationStart> {
   const novel = await getNovelWithChapters(prisma, novelId)
   if (novel === null) return decideGenerationStart(null, novelId, targets, model)
+  const style = styleOf(novel)
   const blocker = generationBlock({
-    style: styleOf(novel),
+    style,
     cast: buildCastForGemini(novel.character_links),
     bible: novel.bible === null ? null : toStoryBible(novel.bible),
     bibleUnreadable: novel.bible_unreadable,
@@ -958,16 +969,27 @@ export async function prepareGenerationStart(
     outline: parseOutline(novel.outline),
     written: new Set(novel.chapters.map((chapter) => chapter.chapter_number)),
     blocker,
-    baseVersionError: await baseVersionError(prisma, { novelId, chapterNumber: normalized[0], chapters }, revision)
+    revisionBlock: await revisionStartBlock(
+      prisma,
+      { novelId, chapterNumber: normalized[0], chapters, style },
+      revision
+    )
   }
   return decideGenerationStart(source, novelId, targets, model)
 }
 
 // ---------------------- 指示つきの書き直し ----------------------
 
-export type RevisionBaseRow = { novel_id: string; chapter_number: number; content: string }
+export type RevisionBaseRow = {
+  novel_id: string
+  chapter_number: number
+  content: string
+  outline_hash: string | null
+  prev_chapter_id: string | null
+}
 
-export type RevisionBase = { ok: true; content: string } | { ok: false; error: string }
+// lineage は元の版の系譜 (書き直した版に引き継ぐ)。
+export type RevisionBase = { ok: true; content: string; lineage: ChapterLineage } | { ok: false; error: string }
 
 // 書き直しの元の版を選ぶ。baseVersionId が空ならその章の最新 version。指定があれば、その行がこの小説のこの章のものであること。
 // 元の版が無い・本文が空・別の小説や別の章の版なら失敗。エラー文に指示の文面は入れない。
@@ -980,35 +1002,97 @@ export function revisionBaseOf(input: {
 }): RevisionBase {
   const missing = `書き直す元の版がありません（第 ${input.chapterNumber} 章の本文を確かめてください）`
   if (input.baseVersionId.length === 0) {
-    return input.latest === undefined || trimChapterText(input.latest.content).length === 0
+    const latest = input.latest
+    return latest === undefined || trimChapterText(latest.content).length === 0
       ? { ok: false, error: missing }
-      : { ok: true, content: input.latest.content }
+      : {
+          ok: true,
+          content: latest.content,
+          lineage: { outlineHash: latest.outlineHash, prevChapterId: latest.prevChapterId }
+        }
   }
   const row = input.row
   if (row === null || row.novel_id !== input.novelId || row.chapter_number !== input.chapterNumber) {
     return { ok: false, error: '書き直す元の版が見つかりません（この小説のこの章の版ではありません）' }
   }
-  return trimChapterText(row.content).length === 0 ? { ok: false, error: missing } : { ok: true, content: row.content }
+  return trimChapterText(row.content).length === 0
+    ? { ok: false, error: missing }
+    : {
+        ok: true,
+        content: row.content,
+        lineage: { outlineHash: row.outline_hash, prevChapterId: row.prev_chapter_id }
+      }
 }
 
-// 書き直しなら元の版を読んで revision を作る。通常の生成なら null。
+// 書き直しの元の版を D1 から選ぶ (revisionBaseOf)。生成の開始と DO の文脈の段階が同じ関数を使う。
+async function resolveRevisionBase(
+  prisma: PrismaClient,
+  target: { novelId: string; chapterNumber: number; baseVersionId: string; chapters: ContextChapter[] }
+): Promise<RevisionBase> {
+  const baseVersionId = target.baseVersionId.trim()
+  const row = baseVersionId.length === 0 ? null : await findChapterVersion(prisma, baseVersionId)
+  return revisionBaseOf({
+    novelId: target.novelId,
+    chapterNumber: target.chapterNumber,
+    baseVersionId,
+    latest: target.chapters.find((chapter) => chapter.number === target.chapterNumber),
+    row
+  })
+}
+
+// 書き直しを止める理由。元の版が使えない (invalid_base_version) か、元の版の本文に成人指定では書き直せない記述がある
+// (invalid_base_content)。生成の開始 (400) と DO の文脈の段階 (error) が同じ判定を使う。
+export type RevisionBlock = { error: 'invalid_base_version' | 'invalid_base_content'; detail: string }
+
+// 元の版の本文の検査で、detail に並べる語の数。
+const BASE_TERMS_SHOWN = 3
+
+// 書き直しの元の版を確かめる。元の版が使えなければ invalid_base_version (本文は見ない)。
+// 成人指定 (R15 / R18) で、元の版の本文に未成年を指す語があれば invalid_base_content。
+// 書き直しは元の版の全文を渡して「指示された点以外はそのまま保つ」よう指示するので、その語が成人向けの表現と一緒に残ってしまう
+// (全年齢で書いた章を R18 に変えてから書き直した場合や、minor_term の警告が出た章を別の指示で書き直した場合)。
+// 回想の「14歳の頃」のような記述でも止まるが、安全側に倒す (再生成なら元の版を渡さないので書ける)。全年齢では本文を見ない。
+export function revisionBaseCheck(
+  base: RevisionBase,
+  style: StyleParams
+): { ok: true; content: string; lineage: ChapterLineage } | ({ ok: false } & RevisionBlock) {
+  if (!base.ok) return { ok: false, error: 'invalid_base_version', detail: base.error }
+  if (style.age_rating === undefined || !isAdultRating(style.age_rating)) return base
+  const found = findMinorTermsInChapter(base.content)
+  if (found.length === 0) return base
+  const terms = found
+    .slice(0, BASE_TERMS_SHOWN)
+    .map((hit) => `「${hit.term}」`)
+    .join('')
+  // 抜粋は最初の語の前後だけ (前 10 字・後 15 字ほど。checks.ts の findMinorTermsInChapter)
+  return {
+    ok: false,
+    error: 'invalid_base_content',
+    detail: `元の版に未成年を指す記述があります（${terms}: ${found[0].excerpt}）。書き直しではなく再生成してください。`
+  }
+}
+
+// 書き直しなら元の版を読んで確かめ、revision を作る。通常の生成なら null。
 async function loadRevision(
   prisma: PrismaClient,
   payload: ChapterGenPayload,
-  chapters: ContextChapter[]
-): Promise<{ ok: true; revision: RevisionInput | null } | { ok: false; error: string }> {
+  chapters: ContextChapter[],
+  style: StyleParams
+): Promise<
+  { ok: true; revision: RevisionInput | null; lineage: ChapterLineage | null } | { ok: false; error: string }
+> {
   const instruction = revisionInstruction(payload.instruction)
-  if (instruction.length === 0) return { ok: true, revision: null }
-  const baseVersionId = payload.baseVersionId === undefined ? '' : payload.baseVersionId.trim()
-  const row = baseVersionId.length === 0 ? null : await findChapterVersion(prisma, baseVersionId)
-  const base = revisionBaseOf({
+  if (instruction.length === 0) return { ok: true, revision: null, lineage: null }
+  const base = await resolveRevisionBase(prisma, {
     novelId: payload.novelId,
     chapterNumber: payload.chapterNumber,
-    baseVersionId,
-    latest: chapters.find((chapter) => chapter.number === payload.chapterNumber),
-    row
+    baseVersionId: payload.baseVersionId === undefined ? '' : payload.baseVersionId,
+    chapters
   })
-  return base.ok ? { ok: true, revision: { baseContent: base.content, instruction } } : base
+  const checked = revisionBaseCheck(base, style)
+  return checked.ok
+    ? { ok: true, revision: { baseContent: checked.content, instruction }, lineage: checked.lineage }
+    : { ok: false, error: checked.detail }
 }
 
 // ---------------------- 検査 (Phase 5) ----------------------
@@ -1088,21 +1172,29 @@ export function reviewInputsOf(source: ReviewSource): ReviewInputs | null {
 // 検査を何回まで走らせるか (最初の 1 回と、DO が落ちて失われたときのやり直し 1 回)。
 export const MAX_REVIEW_ATTEMPTS = 2
 
+// 検査を始めてから、alarm で DO を生かし続ける上限。モデルの呼び出しは 90 秒 × 2 回で打ち切られるが、
+// D1 が応答しないなどで検査が終わらないときに、alarm の連鎖を止めるため。
+export const REVIEW_DEADLINE_MS = 10 * 60_000
+
 export type ReviewAlarmAction = 'none' | 'keep' | 'retry' | 'give_up'
 
 // 生成が終わった後 (phase が streaming でない) の alarm で、検査をどうするか。
 //   none     検査待ちが無い (alarm の連鎖を終える)
 //   keep     検査がこの DO で走っている (alarm を連鎖させて DO を生かす)
 //   retry    検査待ちなのに走っていない (DO が落ちて失われた)。回数が残っていれば検査だけやり直す
-//   give_up  やり直しの回数が尽きた、または検査する版が分からない。検査待ちを消す
+//   give_up  やり直しの回数が尽きた、検査する版が分からない、または始めてから REVIEW_DEADLINE_MS を過ぎた。検査待ちを消す
+// reviewStartedAt は検査を始めた時刻 (ms)。この項目より前のストレージには無い (null) ので、時間の上限は見ない。
 export function reviewAlarmAction(state: {
   reviewPending: boolean
   reviewRunning: boolean
   reviewAttempts: number
   hasTarget: boolean
+  reviewStartedAt: number | null
+  now: number
 }): ReviewAlarmAction {
   if (!state.reviewPending) return 'none'
   if (!state.hasTarget) return 'give_up'
+  if (state.reviewStartedAt !== null && state.now - state.reviewStartedAt > REVIEW_DEADLINE_MS) return 'give_up'
   if (state.reviewRunning) return 'keep'
   return state.reviewAttempts < MAX_REVIEW_ATTEMPTS ? 'retry' : 'give_up'
 }

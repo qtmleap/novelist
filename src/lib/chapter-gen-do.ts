@@ -95,7 +95,9 @@ const PersistedStateSchema = z.object({
   // 検査する版 (保存した chapterId)
   reviewChapterId: z.string().nonempty().max(64).nullable().default(null),
   // 検査を始めた回数 (最初の 1 回と、DO が落ちて失われたときのやり直し)
-  reviewAttempts: z.number().int().min(0).default(0)
+  reviewAttempts: z.number().int().min(0).default(0),
+  // 検査を始めた時刻 (ms)。ここから REVIEW_DEADLINE_MS を過ぎたら alarm が諦める。この項目より前のストレージには無い
+  reviewStartedAt: z.number().nullable().default(null)
 })
 
 type Phase = z.infer<typeof PersistedStateSchema>['phase']
@@ -141,6 +143,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   private reviewPending = false
   private reviewChapterId: string | null = null
   private reviewAttempts = 0
+  private reviewStartedAt: number | null = null
 
   // いまこの DO のメモリで走っている検査の世代 (in-memory のみ)。evict で消えると null に戻り、alarm が「失われた」と判断する。
   private reviewRunningGeneration: number | null = null
@@ -165,6 +168,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.reviewPending = state_.reviewPending
       this.reviewChapterId = state_.reviewChapterId
       this.reviewAttempts = state_.reviewAttempts
+      this.reviewStartedAt = state_.reviewStartedAt
     })
   }
 
@@ -188,6 +192,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     this.reviewPending = false
     this.reviewChapterId = null
     this.reviewAttempts = 0
+    this.reviewStartedAt = null
     this.phase = 'streaming'
     this.buffer = ''
     this.errMsg = null
@@ -243,12 +248,15 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       reviewPending: this.reviewPending,
       reviewRunning: isReviewRunning(this.reviewRunningGeneration, this.generation),
       reviewAttempts: this.reviewAttempts,
-      hasTarget: payload !== null && chapterId !== null && this.phase === 'done'
+      hasTarget: payload !== null && chapterId !== null && this.phase === 'done',
+      reviewStartedAt: this.reviewStartedAt,
+      now: Date.now()
     })
     if (action === 'none') return
     if (action === 'give_up' || payload === null || chapterId === null) {
       this.reviewPending = false
       this.reviewChapterId = null
+      this.reviewStartedAt = null
       await this.persistAll()
       return
     }
@@ -277,6 +285,7 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     if (!reviewOwnsState(generation, this.generation)) return
     this.reviewPending = false
     this.reviewChapterId = null
+    this.reviewStartedAt = null
     await this.persistAll()
   }
 
@@ -423,6 +432,8 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.reviewPending = true
       this.reviewChapterId = saved.chapterId
       this.reviewAttempts = 1
+      // 時間の上限は最初に始めた時刻から数える (やり直しでは更新しない)
+      this.reviewStartedAt = Date.now()
       this.reviewRunningGeneration = generation
       await this.persistAll()
       // 検査の間も DO を生かす (生成中に予約した alarm が残っていても、明示的に予約し直す)。
@@ -756,7 +767,8 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.ctx.storage.put('generation', this.generation),
       this.ctx.storage.put('reviewPending', this.reviewPending),
       this.ctx.storage.put('reviewChapterId', this.reviewChapterId),
-      this.ctx.storage.put('reviewAttempts', this.reviewAttempts)
+      this.ctx.storage.put('reviewAttempts', this.reviewAttempts),
+      this.ctx.storage.put('reviewStartedAt', this.reviewStartedAt)
     ])
   }
 
