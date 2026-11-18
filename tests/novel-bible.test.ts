@@ -14,6 +14,8 @@ import {
   isAdultRating,
   missingAddressPairs,
   findMinorTerms,
+  locateMinorTerms,
+  normalizeForMinorScan,
   parseExactAge,
   requiredAddressPairs,
   validateAdultBibleText,
@@ -693,6 +695,593 @@ describe('findMinorTerms', () => {
   })
 })
 
+describe('normalizeForMinorScan', () => {
+  test('applies NFKC: full-width alphanumerics, half-width katakana', () => {
+    expect(normalizeForMinorScan('高２')).toBe('高2')
+    expect(normalizeForMinorScan('ＪＫ')).toBe('JK')
+    expect(normalizeForMinorScan('ﾛﾘ')).toBe('ロリ')
+    expect(normalizeForMinorScan('１０代')).toBe('10代')
+  })
+  test('removes invisible characters', () => {
+    // ゼロ幅スペース、ソフトハイフン、WORD JOINER、BOM、異体字セレクタ、ゼロ幅非接合子、結合文字
+    expect(normalizeForMinorScan('高​校­生⁠﻿')).toBe('高校生')
+    expect(normalizeForMinorScan('高︀校️生‌‍')).toBe('高校生')
+    expect(normalizeForMinorScan('高́校生')).toBe('高校生')
+  })
+  test('maps variant characters', () => {
+    expect(normalizeForMinorScan('髙校生')).toBe('高校生')
+    expect(normalizeForMinorScan('中學生')).toBe('中学生')
+    expect(normalizeForMinorScan('兒童')).toBe('児童')
+    expect(normalizeForMinorScan('十四歲')).toBe('十四歳')
+  })
+  test('keeps ordinary spaces, newlines and punctuation', () => {
+    expect(normalizeForMinorScan('途中。 学生は\n高・校')).toBe('途中。 学生は\n高・校')
+    expect(normalizeForMinorScan('高　校')).toBe('高 校')
+  })
+  test('empty text stays empty', () => {
+    expect(normalizeForMinorScan('')).toBe('')
+  })
+})
+
+describe('findMinorTerms: age expressions', () => {
+  test('finds an age under 18 in any notation, as a normalized term', () => {
+    expect(findMinorTerms('14歳')).toEqual(['14歳'])
+    expect(findMinorTerms('十四歳')).toEqual(['14歳'])
+    expect(findMinorTerms('１４才')).toEqual(['14歳'])
+    expect(findMinorTerms('12 歳')).toEqual(['12歳'])
+    expect(findMinorTerms('17さい')).toEqual(['17歳'])
+    expect(findMinorTerms('十七歳')).toEqual(['17歳'])
+    expect(findMinorTerms('十歳')).toEqual(['10歳'])
+    expect(findMinorTerms('一歳')).toEqual(['1歳'])
+    expect(findMinorTerms('一七歳')).toEqual(['17歳'])
+    expect(findMinorTerms('零歳')).toEqual(['0歳'])
+  })
+  test('finds it inside a sentence, including a past event', () => {
+    expect(findMinorTerms('8歳で両親を亡くし、叔父に育てられた')).toEqual(['8歳'])
+    expect(findMinorTerms('実年齢は十四歳です')).toEqual(['14歳'])
+    expect(findMinorTerms('戸籍上は18歳だが実年齢は14歳')).toEqual(['14歳'])
+  })
+  test('18 and over are not minors, but 未満 / 以下 up to 20 are', () => {
+    for (const text of ['18歳', '18才', '20歳', '二十歳', '三十七歳', '25歳', '18歳以上', '21歳未満', '21歳以下']) {
+      expect(findMinorTerms(text)).toEqual([])
+    }
+    expect(findMinorTerms('18歳未満')).toEqual(['18歳未満'])
+    expect(findMinorTerms('18才未満')).toEqual(['18歳未満'])
+    expect(findMinorTerms('18歳以下')).toEqual(['18歳以下'])
+    expect(findMinorTerms('20歳未満')).toEqual(['20歳未満'])
+    expect(findMinorTerms('十八歳に満たない')).toEqual(['18歳に満たない'])
+  })
+  test('reads the longest number, so 118歳 is not 18 and 二十歳 is not 十歳', () => {
+    expect(findMinorTerms('118歳')).toEqual([])
+    expect(findMinorTerms('2018歳')).toEqual([])
+    expect(findMinorTerms('二十歳')).toEqual([])
+    expect(findMinorTerms('百十八歳')).toEqual([])
+    expect(findMinorTerms('万歳三唱')).toEqual([])
+    expect(findMinorTerms('千歳飴')).toEqual([])
+  })
+  test('an age difference is not an age', () => {
+    const differences = [
+      '3歳年上',
+      '5歳年下',
+      '2歳上の姉',
+      '4歳下の弟',
+      '10歳差',
+      '3歳違い',
+      '5歳離れた兄',
+      '3歳ほど年下',
+      '2歳くらい年上',
+      '3歳若く見える',
+      '1歳年長'
+    ]
+    for (const text of differences) {
+      expect(findMinorTerms(text)).toEqual([])
+    }
+  })
+  test('a range or a list is judged by its smallest number', () => {
+    expect(findMinorTerms('17〜18歳')).toEqual(['17歳'])
+    expect(findMinorTerms('17~18歳')).toEqual(['17歳'])
+    expect(findMinorTerms('17-18歳')).toEqual(['17歳'])
+    expect(findMinorTerms('14、15歳')).toEqual(['14歳'])
+    expect(findMinorTerms('十五か十六歳')).toEqual(['15歳'])
+    expect(findMinorTerms('18〜20歳')).toEqual([])
+    expect(findMinorTerms('17.5歳')).toEqual(['17歳'])
+  })
+  test('is found with other terms, in the order found', () => {
+    expect(findMinorTerms('12歳の女子高生、実は十四歳')).toEqual(['12歳', '女子高生', '14歳'])
+    expect(findMinorTerms('10代、14歳')).toEqual(['10代', '14歳'])
+  })
+  test('is found whatever the appearance option is', () => {
+    expect(findMinorTerms('12歳', { appearance: true })).toEqual(['12歳'])
+    expect(findMinorTerms('12歳', { appearance: false })).toEqual(['12歳'])
+  })
+})
+
+describe('findMinorTerms: preprocessing', () => {
+  const hidden = ['​', '­', '⁠', '﻿', '︀', '️', '‌', '‍', '́']
+  test('invisible characters in a word do not hide it', () => {
+    for (const char of hidden) {
+      expect(findMinorTerms(`高${char}校生`)).toEqual(['高校生'])
+      expect(findMinorTerms(`女子${char}高生`)).toEqual(['女子高生'])
+    }
+  })
+  test('invisible characters in an age or an English word do not hide it', () => {
+    expect(findMinorTerms('1​4歳')).toEqual(['14歳'])
+    expect(findMinorTerms('十­四歳')).toEqual(['14歳'])
+    expect(findMinorTerms('J​K')).toEqual(['JK'])
+    expect(findMinorTerms('tee⁠nager')).toEqual(['TEENAGER'])
+  })
+  test('spaces, tabs and middle dots inside a line do not hide a word', () => {
+    const joined = [
+      '高 校 生',
+      '高　校　生',
+      '高校　生',
+      '高\t校生',
+      '高・校・生',
+      '高･校･生',
+      '高 ・ 校 生',
+      '高-校-生',
+      '高‐校‐生',
+      '高―校―生'
+    ]
+    for (const text of joined) {
+      expect(findMinorTerms(text)).toEqual(['高校生'])
+    }
+    expect(findMinorTerms('高 校 2 年')).toEqual(['高校2年'])
+    expect(findMinorTerms('1 4 歳')).not.toEqual([])
+    expect(findMinorTerms('女 子 高 生')).toEqual(['女子高生'])
+  })
+  test('a line break or a punctuation mark is not removed', () => {
+    expect(findMinorTerms('途中。学生は')).toEqual([])
+    expect(findMinorTerms('途中、学生は')).toEqual([])
+    expect(findMinorTerms('途中\n学生は')).toEqual([])
+    expect(findMinorTerms('中\n学生')).toEqual([])
+    expect(findMinorTerms('高\n校生')).toEqual([])
+    expect(findMinorTerms('途中。　学生は')).toEqual([])
+  })
+  test('a space inside a line is removed, so a word that spans a space is found (a known false positive)', () => {
+    expect(findMinorTerms('途中 学生は')).toEqual(['中学生'])
+  })
+  test('a space inside a number is still caught (it may read only the last digit, which errs on the side of a problem)', () => {
+    expect(findMinorTerms('十 四 歳')).not.toEqual([])
+    expect(findMinorTerms('1 7 歳')).not.toEqual([])
+  })
+  test('a number before the age after a space is a list number, not a part of the age', () => {
+    expect(findMinorTerms('1 14歳の春')).toEqual(['14歳'])
+    expect(findMinorTerms('2 十四歳になった')).toEqual(['14歳'])
+    expect(findMinorTerms('3 18歳になる')).toEqual([])
+  })
+  test('the boundaries still apply after the spaces are removed', () => {
+    expect(findMinorTerms('標 高 2000m')).toEqual([])
+    expect(findMinorTerms('最 高 3 位')).toEqual([])
+    expect(findMinorTerms('高校 生活')).toEqual([])
+    expect(findMinorTerms('中 1 日')).toEqual([])
+  })
+  test('English words are not joined across spaces', () => {
+    expect(findMinorTerms('J K')).toEqual([])
+    expect(findMinorTerms('t e e n')).toEqual([])
+  })
+  test('variant characters do not hide a word', () => {
+    expect(findMinorTerms('髙校生')).toEqual(['高校生'])
+    expect(findMinorTerms('中學生')).toEqual(['中学生'])
+    expect(findMinorTerms('小學生')).toEqual(['小学生'])
+    expect(findMinorTerms('髙校2年')).toEqual(['高校2年'])
+    expect(findMinorTerms('兒童')).toEqual(['児童'])
+    expect(findMinorTerms('十四歲')).toEqual(['14歳'])
+  })
+  test('a word found both ways is reported once', () => {
+    expect(findMinorTerms('高校生と高 校 生')).toEqual(['高校生'])
+  })
+  test('a longer word found with a space wins over a shorter one next to it', () => {
+    expect(findMinorTerms('女子 高校生')).toEqual(['高校生'])
+  })
+})
+
+describe('findMinorTerms: added words and boundaries', () => {
+  test('finds the added status words', () => {
+    const words = [
+      '女子生徒',
+      '男子生徒',
+      '女生徒',
+      '男生徒',
+      '生徒会',
+      '女児',
+      '男児',
+      '高等部',
+      '中等部',
+      '初等部',
+      '低学年',
+      '高学年',
+      '未就学',
+      '学童'
+    ]
+    for (const word of words) {
+      expect(findMinorTerms(`彼女は${word}だ`)).toEqual([word])
+    }
+  })
+  test('finds the kana spellings, hiragana and katakana', () => {
+    const words = [
+      'こうこうせい',
+      'コウコウセイ',
+      'ちゅうがくせい',
+      'チュウガクセイ',
+      'しょうがくせい',
+      'ショウガクセイ',
+      'じょしこうせい',
+      'ジョシコウセイ',
+      'みせいねん',
+      'ミセイネン'
+    ]
+    for (const word of words) {
+      expect(findMinorTerms(`彼女は${word}だ`)).toEqual([word])
+    }
+  })
+  test('a short grade expression after a word for the time is a grade', () => {
+    expect(findMinorTerms('現在高2の')).toEqual(['高2'])
+    expect(findMinorTerms('今年中3になった')).toEqual(['中3'])
+    expect(findMinorTerms('来年小6')).toEqual(['小6'])
+    expect(findMinorTerms('去年高1だった')).toEqual(['高1'])
+    expect(findMinorTerms('昨年中2')).toEqual(['中2'])
+    expect(findMinorTerms('当時高3')).toEqual(['高3'])
+    expect(findMinorTerms('まだ高2')).toEqual(['高2'])
+    expect(findMinorTerms('春から中1')).toEqual(['中1'])
+    expect(findMinorTerms('もう高三')).toEqual(['高三'])
+  })
+  test('the other words that end in a kanji still block a short grade expression', () => {
+    expect(findMinorTerms('途中1回')).toEqual([])
+    expect(findMinorTerms('標高2000m')).toEqual([])
+    expect(findMinorTerms('最高3位')).toEqual([])
+  })
+  test('a grade after the school name and の', () => {
+    expect(findMinorTerms('高校の2年')).toEqual(['高校の2年'])
+    expect(findMinorTerms('高校の二年生')).toEqual(['高校の二年'])
+    expect(findMinorTerms('高等学校の3年')).toEqual(['高等学校の3年'])
+    expect(findMinorTerms('中学の3年')).toEqual(['中学の3年'])
+    expect(findMinorTerms('中学校の一年')).toEqual(['中学校の一年'])
+    expect(findMinorTerms('小学校の5年')).toEqual(['小学校の5年'])
+    expect(findMinorTerms('小学の六年生')).toEqual(['小学の六年'])
+    expect(findMinorTerms('高校の3年間は部活漬けだった')).toEqual([])
+  })
+  test('finds the English words, any case, only as whole words', () => {
+    const words = [
+      'teen',
+      'teens',
+      'teenage',
+      'teenager',
+      'teenagers',
+      'schoolgirl',
+      'schoolboy',
+      'schoolgirls',
+      'high schooler',
+      'high school student',
+      'high school students',
+      'middle schooler',
+      'middle school student',
+      'underage',
+      'minor',
+      'minors',
+      'loli',
+      'lolita',
+      'shota'
+    ]
+    for (const word of words) {
+      expect(findMinorTerms(`a ${word}.`)).toEqual([word.toUpperCase()])
+      expect(findMinorTerms(`A ${word.toUpperCase()}.`)).toEqual([word.toUpperCase()])
+    }
+    expect(findMinorTerms('She is a Teenager')).toEqual(['TEENAGER'])
+    expect(findMinorTerms('high  school   student')).toEqual(['HIGH SCHOOL STUDENT'])
+    expect(findMinorTerms('high\tschool student')).toEqual(['HIGH SCHOOL STUDENT'])
+    expect(findMinorTerms('high\nschool student')).toEqual([])
+  })
+  test('the English words do not match inside other words', () => {
+    const others = [
+      'fourteen',
+      'sixteen',
+      'nineteen',
+      'eighteen',
+      'minority',
+      'minority report',
+      'Shotaro',
+      'terminal',
+      'high school',
+      'middle school',
+      'the school boy'
+    ]
+    for (const text of others) {
+      expect(findMinorTerms(text)).toEqual([])
+    }
+  })
+  test('words for an adult stay clean', () => {
+    const adult = [
+      '高校教師',
+      '高校を卒業後、上京した',
+      '高校時代はバスケ部',
+      '大学2年生',
+      '学生時代',
+      '若い頃',
+      '子供の頃',
+      '警察官の制服',
+      '生徒に慕われる教師',
+      '三十代',
+      '3歳年上の兄'
+    ]
+    for (const text of adult) {
+      expect(findMinorTerms(text)).toEqual([])
+      expect(findMinorTerms(text, { appearance: true })).toEqual([])
+    }
+  })
+})
+
+describe('findMinorTerms: words for the appearance only', () => {
+  const found: Array<[string, string]> = [
+    ['幼い体つき', '幼い'],
+    ['幼げな瞳', '幼げ'],
+    ['幼さが残る', '幼さ'],
+    ['あどけない顔立ち', 'あどけな'],
+    ['あどけなさの残る', 'あどけな'],
+    ['童顔', '童顔'],
+    ['子供っぽい', '子供っぽ'],
+    ['子どもっぽい', '子どもっぽ'],
+    ['こどもっぽい', 'こどもっぽ'],
+    ['子供のような', '子供のよう'],
+    ['子どものような', '子どものよう'],
+    ['こどものような', 'こどものよう'],
+    ['子供みたいな', '子供みたい'],
+    ['子どもみたいな', '子どもみたい'],
+    ['こどもみたいな', 'こどもみたい'],
+    ['セーラー服', 'セーラー服'],
+    ['学ラン姿', '学ラン'],
+    ['学生服', '学生服'],
+    ['ランドセル', 'ランドセル'],
+    ['スクール水着', 'スクール水着'],
+    ['ブルマ', 'ブルマ'],
+    ['体操服', '体操服'],
+    ['通学帽', '通学帽'],
+    ['少女のような', '少女'],
+    ['少年のような', '少年']
+  ]
+  test('are found with the appearance option', () => {
+    for (const [text, term] of found) {
+      expect(findMinorTerms(text, { appearance: true })).toEqual([term])
+    }
+  })
+  test('are not found without it (occupation and background may use them)', () => {
+    for (const [text] of found) {
+      expect(findMinorTerms(text)).toEqual([])
+    }
+    expect(findMinorTerms('幼い頃に両親を亡くした')).toEqual([])
+    expect(findMinorTerms('少女漫画家')).toEqual([])
+  })
+  test('the example from the review', () => {
+    expect(findMinorTerms('セーラー服にランドセル', { appearance: true })).toEqual(['セーラー服', 'ランドセル'])
+    expect(findMinorTerms('幼い体つきで、あどけない顔立ち', { appearance: true })).toEqual(['幼い', 'あどけな'])
+  })
+  test('制服 alone and ブルマン are not found', () => {
+    expect(findMinorTerms('制服', { appearance: true })).toEqual([])
+    expect(findMinorTerms('警察官の制服がよく似合う', { appearance: true })).toEqual([])
+    expect(findMinorTerms('ブルマンコーヒー', { appearance: true })).toEqual([])
+  })
+  test('幼児体型 is found as itself with the option and as 幼児 without', () => {
+    expect(findMinorTerms('幼児体型', { appearance: true })).toEqual(['幼児体型'])
+    expect(findMinorTerms('幼児体型')).toEqual(['幼児'])
+  })
+  test('they are found after the spaces are removed too', () => {
+    expect(findMinorTerms('セ ー ラ ー 服', { appearance: true })).toEqual(['セーラー服'])
+    expect(findMinorTerms('ラン ドセル', { appearance: true })).toEqual(['ランドセル'])
+  })
+})
+
+describe('locateMinorTerms', () => {
+  test('gives the positions in normalizeForMinorScan(text)', () => {
+    const text = '彼女は高２だ'
+    const normalized = normalizeForMinorScan(text)
+    expect(normalized).toBe('彼女は高2だ')
+    expect(locateMinorTerms(text)).toEqual([{ term: '高2', start: 3, end: 5 }])
+    expect(normalized.slice(3, 5)).toBe('高2')
+  })
+  test('a word with spaces in it covers the range in the normalized text, with the term without the spaces', () => {
+    const text = '彼女は高　校　生だ'
+    const normalized = normalizeForMinorScan(text)
+    expect(normalized).toBe('彼女は高 校 生だ')
+    expect(locateMinorTerms(text)).toEqual([{ term: '高校生', start: 3, end: 8 }])
+    expect(normalized.slice(3, 8)).toBe('高 校 生')
+  })
+  test('invisible characters are removed before the positions are taken', () => {
+    const text = '彼女は​高⁠２'
+    expect(normalizeForMinorScan(text)).toBe('彼女は高2')
+    expect(locateMinorTerms(text)).toEqual([{ term: '高2', start: 3, end: 5 }])
+  })
+  test('an age expression is located with the normalized term', () => {
+    const text = '実年齢は十四歳です'
+    expect(locateMinorTerms(text)).toEqual([{ term: '14歳', start: 4, end: 7 }])
+    expect(normalizeForMinorScan(text).slice(4, 7)).toBe('十四歳')
+  })
+  test('words, English words and ages come in the order they appear', () => {
+    const text = 'JKの女子高生、十四歳'
+    expect(locateMinorTerms(text)).toEqual([
+      { term: 'JK', start: 0, end: 2 },
+      { term: '女子高生', start: 3, end: 7 },
+      { term: '14歳', start: 8, end: 11 }
+    ])
+  })
+  test('a word found only after the spaces are removed is placed among the others by position', () => {
+    const text = '高 校 生とJKと14歳'
+    const found = locateMinorTerms(text)
+    expect(found.map((item) => item.term)).toEqual(['高校生', 'JK', '14歳'])
+    expect(found.map((item) => item.start)).toEqual([...found.map((item) => item.start)].sort((a, b) => a - b))
+    const normalized = normalizeForMinorScan(text)
+    expect(found.map((item) => normalized.slice(item.start, item.end))).toEqual(['高 校 生', 'JK', '14歳'])
+  })
+  test('a word found directly and again after the spaces are removed is not listed twice', () => {
+    const text = '女子高校生と高 校 生'
+    const normalized = normalizeForMinorScan(text)
+    const found = locateMinorTerms(text)
+    expect(found.map((item) => item.term)).toEqual(['女子高校生', '高校生'])
+    expect(found.map((item) => normalized.slice(item.start, item.end))).toEqual(['女子高校生', '高 校 生'])
+    // 空白を取り除いた文で見つかった「女子高校生」は、1 段目で見つかった同じ範囲と重ならない形でだけ足される
+    expect(locateMinorTerms('女子高校生')).toEqual([{ term: '女子高校生', start: 0, end: 5 }])
+  })
+  test('an English word is located on the first pass only', () => {
+    expect(locateMinorTerms('She is a teenager.')).toEqual([{ term: 'TEENAGER', start: 9, end: 17 }])
+    expect(locateMinorTerms('t e e n')).toEqual([])
+  })
+  test('the appearance option adds the appearance words', () => {
+    expect(locateMinorTerms('少女のような顔')).toEqual([])
+    expect(locateMinorTerms('少女のような顔', { appearance: true })).toEqual([{ term: '少女', start: 0, end: 2 }])
+  })
+  test('nothing found, or an empty text', () => {
+    expect(locateMinorTerms('')).toEqual([])
+    expect(locateMinorTerms('二十代の会社員')).toEqual([])
+    expect(locateMinorTerms('途中。学生は')).toEqual([])
+  })
+  test('findMinorTerms is the terms of locateMinorTerms without duplicates', () => {
+    const text = '女子高生。高2で、十代で、女子高生で、JK、14歳、十四歳'
+    const terms = locateMinorTerms(text).map((item) => item.term)
+    expect(terms).toEqual(['女子高生', '高2', '十代', '女子高生', 'JK', '14歳', '14歳'])
+    expect(findMinorTerms(text)).toEqual([...new Set(terms)])
+  })
+  test('can be called repeatedly with the same result', () => {
+    const first = locateMinorTerms('高2と14歳と高 校 生')
+    expect(locateMinorTerms('高2と14歳と高 校 生')).toEqual(first)
+    expect(locateMinorTerms('高2と14歳と高 校 生')).toEqual(first)
+  })
+})
+
+describe('validateAdultCast: loopholes found in the review', () => {
+  const row = (overrides: Partial<BibleCast> = {}): BibleCast => ({
+    name: 'かぐや',
+    age: '18',
+    occupation: '会社員',
+    appearance: '黒髪',
+    background: '都内で働く',
+    ...overrides
+  })
+  const check = (overrides: Partial<BibleCast>): string[] => validateAdultCast('R18', [row(overrides)], ['かぐや'])
+
+  test('an age written in another field is a problem', () => {
+    expect(check({ appearance: '見た目は12歳ほどの幼い体つき' })).toEqual([
+      'かぐや の外見に、未成年を指す語（「12歳」「幼い」）が残っています'
+    ])
+    expect(check({ background: '戸籍上は18歳だが実年齢は14歳' })).toEqual([
+      'かぐや の背景に、未成年を指す語（「14歳」）が残っています'
+    ])
+    expect(check({ background: '戸籍上は18歳だが実年齢は十四歳' })).toEqual([
+      'かぐや の背景に、未成年を指す語（「14歳」）が残っています'
+    ])
+    expect(check({ occupation: '14歳の探偵' })).toEqual(['かぐや の職業に、未成年を指す語（「14歳」）が残っています'])
+    expect(check({ background: '18歳未満の頃に家を出た' })).toEqual([
+      'かぐや の背景に、未成年を指す語（「18歳未満」）が残っています'
+    ])
+  })
+  test('an age difference or an adult age in another field is fine', () => {
+    expect(check({ background: '3歳年上の兄と、二十歳の妹がいる。5歳差の姉もいた' })).toEqual([])
+    expect(check({ appearance: '18歳の頃から変わらない黒髪' })).toEqual([])
+  })
+  test('invisible characters and spaces do not hide a word', () => {
+    const hiddenForms = [
+      '高​校生',
+      '高­校生',
+      '高⁠校生',
+      '高﻿校生',
+      '高️校生',
+      '高 校 生',
+      '高校　生',
+      '高・校・生',
+      '髙校生'
+    ]
+    for (const occupation of hiddenForms) {
+      expect(check({ occupation })).toEqual(['かぐや の職業に、未成年を指す語（「高校生」）が残っています'])
+    }
+  })
+  test('words that were not in the list before', () => {
+    expect(check({ occupation: '女子生徒' })).toEqual(['かぐや の職業に、未成年を指す語（「女子生徒」）が残っています'])
+    expect(check({ background: '現在高2の秋' })).toEqual(['かぐや の背景に、未成年を指す語（「高2」）が残っています'])
+    expect(check({ background: '今年中3になった' })).toEqual([
+      'かぐや の背景に、未成年を指す語（「中3」）が残っています'
+    ])
+    expect(check({ background: '高校の2年のとき' })).toEqual([
+      'かぐや の背景に、未成年を指す語（「高校の2年」）が残っています'
+    ])
+    expect(check({ appearance: 'セーラー服にランドセル' })).toEqual([
+      'かぐや の外見に、未成年を指す語（「セーラー服」「ランドセル」）が残っています'
+    ])
+    expect(check({ appearance: '幼い体つきで、あどけない顔立ち' })).toEqual([
+      'かぐや の外見に、未成年を指す語（「幼い」「あどけな」）が残っています'
+    ])
+  })
+  test('the words for the appearance are fine in the occupation and the background', () => {
+    expect(
+      check({ occupation: 'セーラー服の販売員', background: '幼い頃は田舎で育ち、ランドセルの工房で働いた' })
+    ).toEqual([])
+  })
+  test('an adult setting passes', () => {
+    expect(
+      check({
+        age: '25歳',
+        occupation: '高校教師',
+        appearance: '警察官の制服がよく似合う、落ち着いた雰囲気',
+        background: '高校時代はバスケ部。大学2年生のときに留学した。子供の頃は田舎で育ち、若い頃は旅をした'
+      })
+    ).toEqual([])
+  })
+  test('an all-ages work is never checked', () => {
+    const bad = row({ occupation: '女子高生', appearance: '12歳ほどの幼い体つき', background: '14歳' })
+    expect(validateAdultCast('全年齢', [bad], ['かぐや'])).toEqual([])
+  })
+})
+
+describe('validateAdultBibleText: ages and hidden words', () => {
+  const clean = () => ({
+    premise: '竹取の翁が光る竹の中から女性を見つける。',
+    ending: 'かぐやは月へ帰る。',
+    arcs: [{ name: 'かぐや', start: '竹林で暮らす', end: '月へ帰る' }],
+    world: { rules: ['月の民は地上に長く居られない'], terms: [{ term: '月の都', note: '月の民の国' }] },
+    timeline: ['春: 竹から生まれる', '夏: 求婚が始まる']
+  })
+  const check = (override: Record<string, unknown>) => validateAdultBibleText('R18', { ...clean(), ...override })
+
+  test('an age under 18 is a problem in every item', () => {
+    expect(check({ premise: '主人公は14歳の少女だ' })).toEqual([
+      '作品設計の物語の核に、未成年を指す語（「14歳」）が残っています'
+    ])
+    expect(check({ ending: '十五歳のかぐやが帰る' })).toEqual([
+      '作品設計の結末に、未成年を指す語（「15歳」）が残っています'
+    ])
+    expect(check({ arcs: [{ name: 'かぐや', start: '12歳の頃', end: '' }] })).toEqual([
+      '作品設計の人物の変化に、未成年を指す語（「12歳」）が残っています'
+    ])
+    expect(check({ world: { rules: ['18歳未満は入れない'], terms: [] } })).toEqual([
+      '作品設計の世界のルールに、未成年を指す語（「18歳未満」）が残っています'
+    ])
+    expect(check({ world: { rules: [], terms: [{ term: '学び舎', note: '10歳から通う' }] } })).toEqual([
+      '作品設計の用語に、未成年を指す語（「10歳」）が残っています'
+    ])
+    expect(check({ timeline: ['春: 8歳で両親を亡くす'] })).toEqual([
+      '作品設計の時系列に、未成年を指す語（「8歳」）が残っています'
+    ])
+    expect(check({ addresses: [{ call: '17歳' }] })).toEqual([
+      '作品設計の呼称表に、未成年を指す語（「17歳」）が残っています'
+    ])
+  })
+  test('an adult age or an age difference is fine', () => {
+    expect(check({ premise: '20歳の誕生日を迎える。3歳年上の兄がいる' })).toEqual([])
+    expect(check({ timeline: ['春: 18歳になる'] })).toEqual([])
+  })
+  test('invisible characters and spaces do not hide a word', () => {
+    expect(check({ premise: '高​校生の物語' })).toEqual([
+      '作品設計の物語の核に、未成年を指す語（「高校生」）が残っています'
+    ])
+    expect(check({ timeline: ['春: 高 校 生活'] })).toEqual([])
+    expect(check({ timeline: ['春: 女子 高生が来る'] })).toEqual([
+      '作品設計の時系列に、未成年を指す語（「女子高生」）が残っています'
+    ])
+  })
+  test('an all-ages work is never checked', () => {
+    expect(
+      validateAdultBibleText('全年齢', { ...clean(), premise: '14歳の女子高生', addresses: [{ call: '12歳' }] })
+    ).toEqual([])
+  })
+})
+
 describe('validateAdultCast', () => {
   const row = (name: string, age: string, overrides: Partial<BibleCast> = {}): BibleCast => ({
     name,
@@ -920,11 +1509,9 @@ describe('validateAdultBibleText', () => {
     expect(validateAdultBibleText('全年齢', { ...clean(), addresses: [{ call: '女子高生' }] })).toEqual([])
   })
   test('works with a StoryBible-shaped object', () => {
-    const bible: Parameters<typeof validateAdultBibleText>[1] = {
-      ...clean(),
-      arcs: [],
-      addresses: [{ from: '太郎', to: '花子', call: '花子さん' }]
-    }
+    // 余分なキー (from、to) があっても渡せる: リテラルではなく変数として渡す
+    const addresses = [{ from: '太郎', to: '花子', call: '花子さん' }]
+    const bible = { ...clean(), arcs: [], addresses }
     expect(validateAdultBibleText('R18', bible)).toEqual([])
   })
 })
