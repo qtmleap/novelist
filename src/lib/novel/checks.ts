@@ -1,4 +1,4 @@
-import { findMinorTerms, isAdultRating } from '@/lib/novel/bible'
+import { isAdultRating, locateMinorTerms, type MinorMatch, normalizeForMinorScan } from '@/lib/novel/bible'
 import type { CheckKind, CheckWarning } from '@/schemas/story.dto'
 
 // 生成された章の機械的な検査 (文字数、章末の重複、口調の例の丸写し、字下げ、人物名の出現、成人指定の本文の未成年を指す語)。
@@ -43,9 +43,6 @@ const MINOR_TERMS_SHOWN = 8
 const MINOR_EXCERPTS_SHOWN = 2
 const MINOR_EXCERPT_BEFORE = 10
 const MINOR_EXCERPT_AFTER = 15
-// 語の位置を確かめるときの窓。findMinorTerms の前後の条件 (直前 4 字ほど、直後 2 字ほど) が窓の端で切れない余白
-const MINOR_VERIFY_BEFORE = 10
-const MINOR_VERIFY_AFTER = 4
 
 // 章末の比較で無視する文字。空白、句読点、記号 (句読点・括弧・ダッシュ・三点リーダ・全角記号を含む)、制御文字。
 // 長音符「ー」(U+30FC) は文字 (Lm) なので残る。
@@ -204,76 +201,33 @@ export function isMentioned(
 
 // ---------------------- 成人指定の本文の未成年を指す語 ----------------------
 
-// 元の本文の位置との対応つきで NFKC 正規化した文。findMinorTerms は NFKC で正規化した文に当てるので、
-// 全角数字 (高２)、三点リーダ (…)、全角記号 (！) は長さが変わりうる。抜粋は元の本文から切り出したいので、
-// 正規化後の 1 字ごとに、元の本文での範囲 [starts, ends) を持つ。
-type OffsetText = { text: string; starts: number[]; ends: number[] }
-
-function normalizeWithOffsets(content: string): OffsetText {
-  const starts: number[] = []
-  const ends: number[] = []
-  const pieces: string[] = []
-  const cursor = { offset: 0 }
-  for (const char of content) {
-    const normalized = char.normalize('NFKC')
-    const end = cursor.offset + char.length
-    pieces.push(normalized)
-    starts.push(...Array.from({ length: normalized.length }, () => cursor.offset))
-    ends.push(...Array.from({ length: normalized.length }, () => end))
-    cursor.offset = end
-  }
-  return { text: pieces.join(''), starts, ends }
-}
-
-// text の中で part が現れる位置 (重ならないもの) を昇順で返す。
-function occurrences(text: string, part: string): number[] {
-  if (part === '') return []
-  const found: number[] = []
-  text
-    .split(part)
-    .slice(0, -1)
-    .reduce((at, piece) => {
-      found.push(at + piece.length)
-      return at + piece.length + part.length
-    }, 0)
-  return found
-}
-
-// 語が実際に当たる最初の位置。「標高2000m」の「高2」のように、文字列としては同じでも語として数えない箇所は飛ばす
-// (findMinorTerms を、その位置の前後だけの窓にかけて確かめる)。
-function locateMinorTerm(mapped: OffsetText, searchable: string, term: string): number | undefined {
-  return occurrences(searchable, term).find((index) => {
-    const window = mapped.text.slice(Math.max(0, index - MINOR_VERIFY_BEFORE), index + term.length + MINOR_VERIFY_AFTER)
-    return findMinorTerms(window).includes(term)
-  })
-}
-
-// 元の本文から、語の前 10 字・後 15 字ほどを切り出す。改行や連続する空白は 1 つの空白にし、切れた端には「…」を付ける。
-function excerptAround(content: string, mapped: OffsetText, index: number, termLength: number): string {
-  const from = Math.max(0, mapped.starts[index] - MINOR_EXCERPT_BEFORE)
-  const to = Math.min(content.length, mapped.ends[index + termLength - 1] + MINOR_EXCERPT_AFTER)
-  const text = content
+// 正規化した文 (normalizeForMinorScan) から、語の前 10 字・後 15 字ほどを切り出す。
+// 照合に使った文字列そのものから切るので、位置がずれない。そのため抜粋は本文の表記ではなく正規化した表記になる
+// (全角の数字は半角、見えない文字は消える)。改行や連続する空白は 1 つの空白にし、切れた端には「…」を付ける。
+function excerptAround(normalized: string, found: MinorMatch): string {
+  const from = Math.max(0, found.start - MINOR_EXCERPT_BEFORE)
+  const to = Math.min(normalized.length, found.end + MINOR_EXCERPT_AFTER)
+  const text = normalized
     .slice(from, to)
     // 切り口が絵文字などのサロゲートペアの途中になったときの、片割れ
     .replace(/^[\uDC00-\uDFFF]/, '')
     .replace(/[\uD800-\uDBFF]$/, '')
     .replace(/\s+/g, ' ')
     .trim()
-  return `${from > 0 ? '…' : ''}${text}${to < content.length ? '…' : ''}`
+  return `${from > 0 ? '…' : ''}${text}${to < normalized.length ? '…' : ''}`
 }
 
-// 本文にある未成年を指す語と、各語の最初の出現箇所の抜粋 (見つかった順、語の重複なし)。
-// 抜粋は元の本文の字のまま (改行は空白)。位置が決まらなかった語は excerpt が空文字。
+// 本文にある未成年を指す語 (18 歳未満の年齢の表現を含む) と、各語の最初の出現箇所の抜粋 (見つかった順、語の重複なし)。
+// 語の検出と位置は bible.ts の locateMinorTerms に任せる。「高 校 生」の term は「高校生」、「十四歳」の term は「14歳」。
 export function findMinorTermsInChapter(content: string): MinorTermExcerpt[] {
-  const terms = findMinorTerms(content)
-  if (terms.length === 0) return []
-  const mapped = normalizeWithOffsets(content)
-  // findMinorTerms は英字の語 (JK) を大文字にそろえて返す。位置の検索も大文字にそろえた文で行う (長さは変わらない)
-  const searchable = mapped.text.replace(/[a-z]/g, (char) => char.toUpperCase())
-  return terms.map((term) => {
-    const index = locateMinorTerm(mapped, searchable, term)
-    return { term, excerpt: index === undefined ? '' : excerptAround(content, mapped, index, term.length) }
-  })
+  const located = locateMinorTerms(content)
+  if (located.length === 0) return []
+  const normalized = normalizeForMinorScan(content)
+  // 位置は出てきた順なので、語ごとに最初に出たものを残す
+  const firstOfEach = located.filter(
+    (found, index) => located.findIndex((other) => other.term === found.term) === index
+  )
+  return firstOfEach.map((found) => ({ term: found.term, excerpt: excerptAround(normalized, found) }))
 }
 
 // ---------------------- 章の検査 ----------------------

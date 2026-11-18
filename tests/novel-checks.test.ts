@@ -304,10 +304,28 @@ describe('findMinorTermsInChapter', () => {
     expect(item?.excerpt).toBe('…の廊下。 制服姿の女子高生が こちらへ歩いてきた。')
     expect(findMinorTermsInChapter('女子高生だった')[0]?.excerpt).toBe('女子高生だった')
   })
-  test('the excerpt keeps the original characters even where NFKC changes them', () => {
+  test('the excerpt is cut from the normalized text (full-width digits and the 3-dot leader change)', () => {
     const [item] = findMinorTermsInChapter('彼女は高２だった！　そう…彼女は高２なのだ。')
     expect(item?.term).toBe('高2')
-    expect(item?.excerpt).toContain('高２だった！ そう…')
+    expect(item?.excerpt).toContain('高2だった! そう...')
+  })
+  test('a stated age under 18 is found, with the term in digits and a non-empty excerpt', () => {
+    expect(findMinorTermsInChapter('彼女は十四歳の頃を思い出した')).toEqual([
+      { term: '14歳', excerpt: '彼女は十四歳の頃を思い出した' }
+    ])
+    expect(findMinorTermsInChapter('彼は１４才だった。')).toEqual([{ term: '14歳', excerpt: '彼は14才だった。' }])
+  })
+  test('an age of 18 or more is not a term', () => {
+    expect(findMinorTermsInChapter('彼女は二十歳になった。彼は三十五歳だ。')).toEqual([])
+  })
+  test('a term split by spaces or invisible characters is found, and the excerpt is not empty', () => {
+    expect(findMinorTermsInChapter('彼女は高 校 生だった。')).toEqual([
+      { term: '高校生', excerpt: '彼女は高 校 生だった。' }
+    ])
+    const [item] = findMinorTermsInChapter('制服の女子高\u200B生が来た。')
+    expect(item?.term).toBe('女子高生')
+    expect(item?.excerpt).toContain('女子高生が来た。')
+    expect(item?.excerpt).not.toContain('\u200B')
   })
   test('skips an occurrence that is not the term (標高2000m) and locates the real one', () => {
     const [item] = findMinorTermsInChapter('標高2000mの山を越えた。翌朝、彼女は高2の制服を着ていた。')
@@ -500,6 +518,15 @@ describe('checkChapter', () => {
         // 前 10 字には直前の行の終わりまで入り、行の切れ目 (改行と字下げの全角空白) は空白 1 つになる
         expect(warnings[0]?.message).toContain('（…夜だった 制服姿の女子高生が廊下を歩いていた。）')
       }
+    })
+    test('a stated age under 18 and a term split by spaces also warn, with an excerpt', () => {
+      const age = minorOf(`${goodContent}\n${indentedLine('彼女は十四歳の頃を思い出した。')}`, 'R18')
+      expect(age).toHaveLength(1)
+      expect(age[0]?.message).toContain('「14歳」（')
+      expect(age[0]?.message).toContain('十四歳の頃を思い出した。')
+      const spaced = minorOf(`${goodContent}\n${indentedLine('彼女は高 校 生だった。')}`, 'R18')
+      expect(spaced[0]?.message).toContain('「高校生」（')
+      expect(spaced[0]?.message).toContain('高 校 生だった。')
     })
     test('is the first warning (before length)', () => {
       const kinds = checkChapter(
