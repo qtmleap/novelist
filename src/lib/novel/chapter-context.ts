@@ -8,8 +8,12 @@ import {
   type JsonCaller,
   type RecordFlowInput,
   type RecordFlowResult,
+  reviewChapterFlow,
   toStoryBible
 } from '@/lib/novel/assist'
+import type { ReviewPromptInput } from '@/lib/novel/assist-prompts'
+import { addressesFor, callsByName } from '@/lib/novel/bible'
+import { type ChapterCheckInput, checkChapter } from '@/lib/novel/checks'
 import { type GenerationCostInput, recordGenerationCost } from '@/lib/novel/cost'
 import { buildLedger, LEDGER_MAX_CHARS, type Ledger, renderLedger } from '@/lib/novel/ledger'
 import { contextBudgetTokens, selectPriorChapters, TOKENS_PER_CHAR } from '@/lib/novel/memory'
@@ -24,23 +28,50 @@ import {
   narratorName,
   type PriorChapterInput,
   type Prompt,
+  type RevisionInput,
   type StyleParams,
   trimChapterText
 } from '@/lib/novel/prompts'
-import { type ChapterLineage, getNovelWithChapters, saveChapterRecord } from '@/lib/novel/repository'
+import {
+  type ChapterLineage,
+  findChapterVersion,
+  getNovelWithChapters,
+  saveChapterRecord,
+  saveChapterReview
+} from '@/lib/novel/repository'
 import { missingPredecessors, normalizeTargets, outlineEntryHash } from '@/lib/novel/staleness'
 import { findContextWindow } from '@/lib/openai/models'
 import type { UsageCounts } from '@/lib/openai/protocol'
 import { type ModelRef, type Outline, OutlineSchema, parseModelRef } from '@/schemas/novel.dto'
-import { type ChapterRecord, EMPTY_END_STATE, type StoryBible, type StoryThread } from '@/schemas/story.dto'
+import {
+  type ChapterRecord,
+  type ChapterReview,
+  EMPTY_END_STATE,
+  type StoryBible,
+  type StoryThread
+} from '@/schemas/story.dto'
 
 // 本文 1 章の生成の文脈 (送るプロンプト、保存用のプロンプト、記録の抽出の材料) を D1 から組み立てる。
 // 判断を含む部分 (既出の章の選び方、確定事項、記録の無い章の扱い、再開の段階) は純粋関数にして bun test で検証する。
 // DB と LLM に触れるのは「D1 から読む」の節の関数だけ。
 
 // 章の生成の Durable Object に渡す payload。文脈は DO の中で実行時に D1 から組み立てる。
-// DO ストレージに残っている旧形式の payload (novel、outline などを含む) も、この 3 項目は同じ名前で持つ。
-export type ChapterGenPayload = { novelId: string; chapterNumber: number; model?: ModelRef }
+// DO ストレージに残っている旧形式の payload (novel、outline などを含む) も、最初の 3 項目は同じ名前で持つ。
+// instruction と baseVersionId は指示つきの書き直しのときだけ (旧形式には無い。無ければ空とみなす)。
+// instruction は利用者の自由記述なので、プロンプトに入れる以外に使わない (ログやエラー文に出さない)。
+export type ChapterGenPayload = {
+  novelId: string
+  chapterNumber: number
+  model?: ModelRef
+  instruction?: string
+  baseVersionId?: string
+}
+
+// 書き直しの指示 (前後の空白を除いたもの)。空なら通常の生成。生成の開始 (API) と文脈の組み立てが同じ判定を使う。
+// 空白だけの指示は、プロンプトの側 (prompts.ts) でも書き直しとして扱われないので、ここでも通常の生成にする。
+export function revisionInstruction(instruction: string | undefined): string {
+  return instruction === undefined ? '' : instruction.trim()
+}
 
 // バリエーション (variant) の生フィールド。name/gender は variant では不変なので持たない。
 type VariantFields = {
@@ -191,6 +222,8 @@ export type ContextSource = {
   bible: StoryBible | null
   // 作品設計の列に値があるのに読めない (壊れている) か
   bibleUnreadable: boolean
+  // 指示つきの書き直しのとき、元の版の本文と指示。通常の生成では null
+  revision: RevisionInput | null
   // 執筆上の指示 (Novel.writing_notes)。無ければ ''
   writingNotes: string
   // 各章の最新 version。今回の章以降を含んでいてもよい (組み立てで除く)
@@ -338,7 +371,8 @@ export function planChapterContext(
     ledgerText: renderLedger(ledger, { maxChars: ledgerMaxChars(budget), previousChapter: source.chapterNumber - 1 }),
     bible: source.bible,
     writingNotes: source.writingNotes,
-    nextChapter: nextChapterOf(source)
+    nextChapter: nextChapterOf(source),
+    revision: source.revision
   }
   const skeleton = buildChapterPrompt({ ...base, priorChapters: [] })
   const selection = selectPriorChapters(
@@ -683,6 +717,9 @@ export async function buildChapterContext(
 
   const cast = buildCastForGemini(novel.character_links)
   const style = styleOf(novel)
+  const chapters = contextChapters(novel)
+  const revision = await loadRevision(prisma, payload, chapters)
+  if (!revision.ok) return revision
   const source: ContextSource = {
     novel: novelParams(novel),
     outline,
@@ -693,8 +730,9 @@ export async function buildChapterContext(
     relations: buildRelationsForGemini(novel.relations),
     bible: novel.bible === null ? null : toStoryBible(novel.bible),
     bibleUnreadable: novel.bible_unreadable,
+    revision: revision.revision,
     writingNotes: novel.writing_notes,
-    chapters: contextChapters(novel)
+    chapters
   }
   // 記録の抽出 (費用がかかる) より前に止める。
   const blocker = contextBlocker(source)
@@ -845,4 +883,207 @@ export async function prepareGenerationStart(
     blocker
   }
   return decideGenerationStart(source, novelId, targets, model)
+}
+
+// ---------------------- 指示つきの書き直し ----------------------
+
+export type RevisionBaseRow = { novel_id: string; chapter_number: number; content: string }
+
+export type RevisionBase = { ok: true; content: string } | { ok: false; error: string }
+
+// 書き直しの元の版を選ぶ。baseVersionId が空ならその章の最新 version。指定があれば、その行がこの小説のこの章のものであること。
+// 元の版が無い・本文が空・別の小説や別の章の版なら失敗。エラー文に指示の文面は入れない。
+export function revisionBaseOf(input: {
+  novelId: string
+  chapterNumber: number
+  baseVersionId: string
+  latest: ContextChapter | undefined
+  row: RevisionBaseRow | null
+}): RevisionBase {
+  const missing = `書き直す元の版がありません（第 ${input.chapterNumber} 章の本文を確かめてください）`
+  if (input.baseVersionId.length === 0) {
+    return input.latest === undefined || trimChapterText(input.latest.content).length === 0
+      ? { ok: false, error: missing }
+      : { ok: true, content: input.latest.content }
+  }
+  const row = input.row
+  if (row === null || row.novel_id !== input.novelId || row.chapter_number !== input.chapterNumber) {
+    return { ok: false, error: '書き直す元の版が見つかりません（この小説のこの章の版ではありません）' }
+  }
+  return trimChapterText(row.content).length === 0 ? { ok: false, error: missing } : { ok: true, content: row.content }
+}
+
+// 書き直しなら元の版を読んで revision を作る。通常の生成なら null。
+async function loadRevision(
+  prisma: PrismaClient,
+  payload: ChapterGenPayload,
+  chapters: ContextChapter[]
+): Promise<{ ok: true; revision: RevisionInput | null } | { ok: false; error: string }> {
+  const instruction = revisionInstruction(payload.instruction)
+  if (instruction.length === 0) return { ok: true, revision: null }
+  const baseVersionId = payload.baseVersionId === undefined ? '' : payload.baseVersionId.trim()
+  const row = baseVersionId.length === 0 ? null : await findChapterVersion(prisma, baseVersionId)
+  const base = revisionBaseOf({
+    novelId: payload.novelId,
+    chapterNumber: payload.chapterNumber,
+    baseVersionId,
+    latest: chapters.find((chapter) => chapter.number === payload.chapterNumber),
+    row
+  })
+  return base.ok ? { ok: true, revision: { baseContent: base.content, instruction } } : base
+}
+
+// ---------------------- 検査 (Phase 5) ----------------------
+
+// 検査の材料 (D1 から読んだもの)。
+export type ReviewSource = {
+  outline: Outline
+  chapterNumber: number
+  // 検査する版 (保存した chapterId の行。最新とは限らない)
+  title: string | null
+  content: string
+  targetChars: number
+  style: StyleParams
+  // 辞典の人物設定 (variant を反映したもの)
+  cast: CastMember[]
+  bible: StoryBible | null
+  bibleUnreadable: boolean
+  // 各章の最新 version (今回の章より前の章を、確定事項と章末の比較に使う)
+  chapters: ContextChapter[]
+}
+
+export type ReviewInputs = {
+  check: ChapterCheckInput
+  // モデルの検査の入力。作品設計で生成を止めるべき状態 (成人指定で検証に落ちる、読めない) なら null
+  // (その人物設定をモデルに渡さない。機械的な検査だけを保存する)
+  review: ReviewPromptInput | null
+}
+
+// その章に登場する人物。章立ての登場予定 (と語り手) で絞る。登場予定が名簿の誰とも一致しなければ全員
+// (本文プロンプトの splitCast と同じ考え方)。
+function presentCast(cast: CastMember[], characters: string[], style: StyleParams): CastMember[] {
+  const listed = new Set(characters)
+  if (!cast.some((member) => listed.has(member.name))) return cast
+  const narrator = narratorName(style, cast)
+  return cast.filter((member) => listed.has(member.name) || member.name === narrator)
+}
+
+// 機械的な検査とモデルの検査の材料を組み立てる。章立てにその章が無ければ null。
+export function reviewInputsOf(source: ReviewSource): ReviewInputs | null {
+  const entry = source.outline.chapters.find((chapter) => chapter.chapter_number === source.chapterNumber)
+  if (entry === undefined) return null
+  const prior = source.chapters
+    .filter((chapter) => chapter.number < source.chapterNumber)
+    .sort((a, b) => a.number - b.number)
+  const present = presentCast(source.cast, entry.characters, source.style)
+  const presentNames = present.map((member) => member.name)
+  const table = source.bible === null ? [] : source.bible.addresses
+  const check: ChapterCheckInput = {
+    chapter: { number: source.chapterNumber, content: source.content },
+    targetChars: source.targetChars,
+    plannedCharacters: entry.characters,
+    castNames: source.cast.map((member) => member.name),
+    ...(table.length > 0 ? { callsByName: callsByName(table) } : {}),
+    speechExamples: entry.characters.length === 0 ? [] : present.flatMap((member) => member.speech_examples),
+    otherChapters: prior.map((chapter) => ({ number: chapter.number, content: chapter.content })),
+    ageRating: source.style.age_rating
+  }
+  const blocked = bibleBlocker(source)
+  const review: ReviewPromptInput | null =
+    blocked !== null
+      ? null
+      : {
+          chapterNumber: source.chapterNumber,
+          title: source.title,
+          content: source.content,
+          entry,
+          bible: source.bible,
+          // 検査する章より前の章までの確定事項
+          ledgerText: renderLedger(ledgerOf(prior, new Map()), { previousChapter: source.chapterNumber - 1 }),
+          cast: castForPrompt(present, source.style, source.bible),
+          addresses: addressesFor(table, presentNames),
+          style: source.style
+        }
+  return { check, review }
+}
+
+// 検査を何回まで走らせるか (最初の 1 回と、DO が落ちて失われたときのやり直し 1 回)。
+export const MAX_REVIEW_ATTEMPTS = 2
+
+export type ReviewAlarmAction = 'none' | 'keep' | 'retry' | 'give_up'
+
+// 生成が終わった後 (phase が streaming でない) の alarm で、検査をどうするか。
+//   none     検査待ちが無い (alarm の連鎖を終える)
+//   keep     検査がこの DO で走っている (alarm を連鎖させて DO を生かす)
+//   retry    検査待ちなのに走っていない (DO が落ちて失われた)。回数が残っていれば検査だけやり直す
+//   give_up  やり直しの回数が尽きた、または検査する版が分からない。検査待ちを消す
+export function reviewAlarmAction(state: {
+  reviewPending: boolean
+  reviewRunning: boolean
+  reviewAttempts: number
+  hasTarget: boolean
+}): ReviewAlarmAction {
+  if (!state.reviewPending) return 'none'
+  if (!state.hasTarget) return 'give_up'
+  if (state.reviewRunning) return 'keep'
+  return state.reviewAttempts < MAX_REVIEW_ATTEMPTS ? 'retry' : 'give_up'
+}
+
+// 検査がこの DO のメモリで、いまの世代のものとして走っているか。
+// 走っている世代が記録されていない (evict でメモリが消えた) か、古い世代の検査なら false。
+export function isReviewRunning(runningGeneration: number | null, generation: number): boolean {
+  return runningGeneration !== null && runningGeneration === generation
+}
+
+// 終わった検査が DO の状態 (検査待ちの印) を書き換えてよいか。始めた後に start() で世代が進んでいたら、
+// 新しい生成の状態なので書き換えない (検査の結果は、検査した版の行にだけ書いてある)。
+export function reviewOwnsState(startedGeneration: number, currentGeneration: number): boolean {
+  return startedGeneration === currentGeneration
+}
+
+// ChapterReviewSchema の上限 (検査の警告の数)。
+const REVIEW_CHECKS_MAX = 100
+
+// 1 章の版を検査して、その版の行に保存する。機械的な検査は必ず、モデルの検査は作品設計で止めるべきでなければ走らせる。
+// モデルの検査が失敗したら、機械的な検査の結果だけを reviewed: false で保存する。コストは kind: 'review'・この章番号。
+// 検査する版が見つからない (削除された)、章立てにその章が無いときは何も保存しない ('skipped')。
+// makeCall は editor_model からモデルの呼び出しを作る (既定は generateJson。テストでは偽の呼び出しを渡す)。
+export async function reviewAndSave(
+  prisma: PrismaClient,
+  env: Env,
+  target: { novelId: string; chapterNumber: number; chapterId: string },
+  makeCall: (model: ModelRef) => JsonCaller = (model) => jsonCaller(env, model)
+): Promise<'saved' | 'skipped'> {
+  const novel = await getNovelWithChapters(prisma, target.novelId)
+  const row = await findChapterVersion(prisma, target.chapterId)
+  if (novel === null || row === null || row.novel_id !== target.novelId) return 'skipped'
+  const outline = parseOutline(novel.outline)
+  if (outline === null) return 'skipped'
+  const inputs = reviewInputsOf({
+    outline,
+    chapterNumber: target.chapterNumber,
+    title: row.title,
+    content: row.content,
+    targetChars: novel.target_chars,
+    style: styleOf(novel),
+    cast: buildCastForGemini(novel.character_links),
+    bible: novel.bible === null ? null : toStoryBible(novel.bible),
+    bibleUnreadable: novel.bible_unreadable,
+    chapters: contextChapters(novel)
+  })
+  if (inputs === null) return 'skipped'
+  const checks = checkChapter(inputs.check).slice(0, REVIEW_CHECKS_MAX)
+  const model = inputs.review === null ? null : await reviewChapterFlow(makeCall(novel.editor_model), inputs.review)
+  if (model !== null) {
+    await recordCostsBestEffort(
+      prisma,
+      env,
+      { novelId: target.novelId, chapterNumber: target.chapterNumber, kind: 'review' },
+      model.usages
+    )
+  }
+  const issues = model === null || !model.ok ? null : model.issues
+  const review: ChapterReview = { checks, issues: issues === null ? [] : issues, reviewed: issues !== null }
+  await saveChapterReview(prisma, target.chapterId, review)
+  return 'saved'
 }

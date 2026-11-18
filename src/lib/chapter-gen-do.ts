@@ -8,12 +8,16 @@ import {
   buildChapterContext,
   type ChapterGenPayload,
   extractAndSaveRecord,
+  isReviewRunning,
   jsonCaller,
   loadRecordMaterials,
   type RecordMaterials,
   recordStageAction,
   restartState,
-  resumePoint
+  resumePoint,
+  reviewAlarmAction,
+  reviewAndSave,
+  reviewOwnsState
 } from '@/lib/novel/chapter-context'
 import { recordGenerationCost } from '@/lib/novel/cost'
 import { findChapterVersion, saveChapter } from '@/lib/novel/repository'
@@ -83,7 +87,15 @@ const PersistedStateSchema = z.object({
   chapterId: z.string().nullable().default(null),
   chapterTitle: z.string().nullable().default(null),
   payload: z.custom<StartChapterGenPayload>().nullable().default(null),
-  lastProgressAt: z.number().default(0)
+  lastProgressAt: z.number().default(0),
+  // 生成の世代。start() のたびに 1 増やす。検査は始めた時の世代を覚えておき、世代が変わっていたら DO の状態を書き換えない
+  generation: z.number().int().min(0).default(0),
+  // 検査待ち (done の後の検査が終わっていない)。この間は alarm を連鎖させて DO を生かす
+  reviewPending: z.boolean().default(false),
+  // 検査する版 (保存した chapterId)
+  reviewChapterId: z.string().nonempty().max(64).nullable().default(null),
+  // 検査を始めた回数 (最初の 1 回と、DO が落ちて失われたときのやり直し)
+  reviewAttempts: z.number().int().min(0).default(0)
 })
 
 type Phase = z.infer<typeof PersistedStateSchema>['phase']
@@ -124,6 +136,15 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   // いまの段階 (SSE で画面に知らせる)。永続化しない: 再開した run() が、実際に入った段階を送り直す。
   private stage: ChapterStage | null = null
 
+  // 検査 (永続化する)。意味は PersistedStateSchema の注記。
+  private generation = 0
+  private reviewPending = false
+  private reviewChapterId: string | null = null
+  private reviewAttempts = 0
+
+  // いまこの DO のメモリで走っている検査の世代 (in-memory のみ)。evict で消えると null に戻り、alarm が「失われた」と判断する。
+  private reviewRunningGeneration: number | null = null
+
   constructor(state: DurableObjectState, env: Env) {
     super(state, env)
     void state.blockConcurrencyWhile(async () => {
@@ -140,6 +161,10 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.chapterTitle = state_.chapterTitle
       this.payload = state_.payload
       this.lastProgressAt = state_.lastProgressAt
+      this.generation = state_.generation
+      this.reviewPending = state_.reviewPending
+      this.reviewChapterId = state_.reviewChapterId
+      this.reviewAttempts = state_.reviewAttempts
     })
   }
 
@@ -157,6 +182,12 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       }
     }
     // 利用者が新しく始めた生成は、保存済みの本文があっても常に最初から (再開ではない)。
+    // 世代を進め、前の生成の検査待ちを消す (走っている検査は、古い版の行にだけ結果を書き、DO の状態は書き換えない)。
+    // 最初の await より前に変える (検査が await から戻ったときに、世代が変わったことに気付けるように)。
+    this.generation += 1
+    this.reviewPending = false
+    this.reviewChapterId = null
+    this.reviewAttempts = 0
     this.phase = 'streaming'
     this.buffer = ''
     this.errMsg = null
@@ -178,7 +209,15 @@ export class ChapterGenerationDO extends DurableObject<Env> {
   // - 進捗が停止 (lastProgressAt が stale) してたら run() を再起動
   // - phase=done/error/idle なら alarm chain を終わらせて DO は自然に hibernate へ
   async alarm() {
-    if (this.phase !== 'streaming') return
+    if (this.phase === 'streaming') {
+      await this.streamingAlarm()
+      return
+    }
+    await this.reviewAlarm()
+  }
+
+  // 生成中の alarm: 進捗が止まっていれば run() を起動し直し、次の alarm を予約し、keep-alive を送る。
+  private async streamingAlarm() {
     const sinceProgress = Date.now() - this.lastProgressAt
     if (sinceProgress > STALE_STREAMING_MS && this.payload !== null && !this.running) {
       // run() の Promise が消えているはずなので新しく起動。本文を保存済みなら記録の抽出から続ける。
@@ -193,6 +232,52 @@ export class ChapterGenerationDO extends DurableObject<Env> {
     // 段階の切り替わり ({ stage }) も通信になるので、そこでは別に送らない。
     // 判定と次の alarm の予約を先に済ませ、送信は待たない (購読者への書き込みが詰まっても、watchdog を止めないため)。
     this.ctx.waitUntil(this.fanout(new TextEncoder().encode(': keep-alive\n\n')).catch(() => undefined))
+  }
+
+  // 生成が終わった後の alarm: 検査待ちの間は連鎖させて DO を生かす。検査が失われていたら (DO が落ちた) 1 回だけやり直す。
+  // 検査待ちが無い、または諦めたときは予約しない (alarm の連鎖が終わり、DO は休止に入れる)。
+  private async reviewAlarm() {
+    const payload = this.payload
+    const chapterId = this.reviewChapterId
+    const action = reviewAlarmAction({
+      reviewPending: this.reviewPending,
+      reviewRunning: isReviewRunning(this.reviewRunningGeneration, this.generation),
+      reviewAttempts: this.reviewAttempts,
+      hasTarget: payload !== null && chapterId !== null && this.phase === 'done'
+    })
+    if (action === 'none') return
+    if (action === 'give_up' || payload === null || chapterId === null) {
+      this.reviewPending = false
+      this.reviewChapterId = null
+      await this.persistAll()
+      return
+    }
+    if (action === 'retry') {
+      this.reviewAttempts += 1
+      const generation = this.generation
+      this.reviewRunningGeneration = generation
+      await this.persistAll()
+      this.ctx.waitUntil(
+        this.review(generation, { novelId: payload.novelId, chapterNumber: payload.chapterNumber, chapterId })
+      )
+    }
+    await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_INTERVAL_MS)
+  }
+
+  // 1 つの版の検査。結果はその版の行 (chapterId) にだけ書く。検査の失敗は章の完了を妨げない (phase は done のまま)。
+  // 終わったら、世代が変わっていなければ検査待ちを消す (成功・失敗・例外のどれでも。やり直すのは失われたときだけ)。
+  private async review(generation: number, target: { novelId: string; chapterNumber: number; chapterId: string }) {
+    try {
+      await this.withPrisma((prisma) => reviewAndSave(prisma, this.env, target))
+    } catch (e) {
+      console.warn(`chapter ${target.chapterNumber} review failed`, e)
+    } finally {
+      if (this.reviewRunningGeneration === generation) this.reviewRunningGeneration = null
+    }
+    if (!reviewOwnsState(generation, this.generation)) return
+    this.reviewPending = false
+    this.reviewChapterId = null
+    await this.persistAll()
   }
 
   // SSE で接続する。現バッファ replay → 以降の差分を fan-out。
@@ -331,14 +416,38 @@ export class ChapterGenerationDO extends DurableObject<Env> {
 
       this.phase = 'done'
       this.stage = null
+      // 完了の通知の後に、この版を検査する。検査待ちと「この DO で走っている」の印は同じ同期区間で立てる
+      // (await の途中で alarm が来ても、走っているのに失われたと誤って判断しないように)。
+      // 打ち切り (truncated) と error の章はここに来ないので、検査しない。
+      const generation = this.generation
+      this.reviewPending = true
+      this.reviewChapterId = saved.chapterId
+      this.reviewAttempts = 1
+      this.reviewRunningGeneration = generation
       await this.persistAll()
+      // 検査の間も DO を生かす (生成中に予約した alarm が残っていても、明示的に予約し直す)。
+      // 予約に失敗しても、完了した章を error にしない (検査は章の完了を妨げない)。
+      try {
+        await this.ctx.storage.setAlarm(Date.now() + KEEPALIVE_INTERVAL_MS)
+      } catch (e) {
+        console.warn('review keep-alive alarm failed', e)
+      }
 
       const encoder = new TextEncoder()
       const event = encoder.encode(
         `data: ${JSON.stringify({ done: true, chapterId: saved.chapterId, title: saved.title })}\n\n`
       )
       await this.fanout(event)
+      // 購読を続けている画面にだけ届く (今の画面は done で購読を閉じる)。
+      await this.fanout(encoder.encode(`data: ${JSON.stringify({ stage: 'reviewing' })}\n\n`))
       await this.closeAll()
+      this.ctx.waitUntil(
+        this.review(generation, {
+          novelId: payload.novelId,
+          chapterNumber: payload.chapterNumber,
+          chapterId: saved.chapterId
+        })
+      )
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       await this.transitionError(msg)
@@ -643,7 +752,11 @@ export class ChapterGenerationDO extends DurableObject<Env> {
       this.ctx.storage.put('chapterId', this.chapterId),
       this.ctx.storage.put('chapterTitle', this.chapterTitle),
       this.ctx.storage.put('payload', this.payload),
-      this.ctx.storage.put('lastProgressAt', this.lastProgressAt)
+      this.ctx.storage.put('lastProgressAt', this.lastProgressAt),
+      this.ctx.storage.put('generation', this.generation),
+      this.ctx.storage.put('reviewPending', this.reviewPending),
+      this.ctx.storage.put('reviewChapterId', this.reviewChapterId),
+      this.ctx.storage.put('reviewAttempts', this.reviewAttempts)
     ])
   }
 

@@ -35,6 +35,7 @@ import {
   jsonCaller,
   prepareGenerationStart,
   recordCostsBestEffort,
+  revisionInstruction,
   viewpointCharFor
 } from '@/lib/novel/chapter-context'
 import { normalizeOutlineCharacters, sortOutline, validateThreads } from '@/lib/novel/outline'
@@ -68,6 +69,7 @@ import {
   CreateCategorySchema,
   CreateNovelSchema,
   FOCAL_POVS,
+  GenerateChapterOptionsSchema,
   GenerateOptionsSchema,
   GenerateOutlineOptionsSchema,
   type ModelRef,
@@ -346,7 +348,8 @@ export const app = new Hono()
           content: ch.content,
           created_at: ch.created_at.toISOString(),
           record: ch.record,
-          staleness: staleness.get(ch.chapter_number)
+          staleness: staleness.get(ch.chapter_number),
+          review: ch.review
         })),
         cast: novel.cast,
         relations: novel.relations,
@@ -602,7 +605,8 @@ export const app = new Hono()
           content: v.content,
           prompt: v.prompt,
           created_at: v.created_at.toISOString(),
-          record: v.record
+          record: v.record,
+          review: v.review
         }))
       )
     } finally {
@@ -666,17 +670,22 @@ export const app = new Hono()
     '/novels/:id/chapters/:number/generate',
     requireAuth,
     zValidator('param', ChapterParamSchema),
-    zValidator('json', GenerateOptionsSchema),
+    zValidator('json', GenerateChapterOptionsSchema),
     async (c) => {
       const { id, number: chapterNumber } = c.req.valid('param')
       const options = c.req.valid('json')
       const prisma = getPrisma()
+      // instruction が空でなければ、指示つきの書き直し (base_version_id の版、空ならその章の最新の版を元にする)。
+      // 書き直しでも、通常の生成と同じ検証を通す。元の版の確認は DO の文脈の段階で行う。
       // 小説と章立ての該当章があること、作品設計が成人指定の条件を満たすこと、前の章が欠けていないことを確かめる。
       // 文脈 (既出の章、確定事項) は DO が組み立てる (DO も同じ作品設計の判定をする)。
       const model = options.model !== undefined ? options.model : DEFAULT_CHAPTER_MODEL
       const start = await prepareGenerationStart(prisma, id, [chapterNumber], model).finally(() => prisma.$disconnect())
       if (!start.ok) return c.json(startErrorBody(start), start.status)
-      const payload = start.payload
+      const payload =
+        revisionInstruction(options.instruction).length > 0
+          ? { ...start.payload, instruction: options.instruction, baseVersionId: options.base_version_id }
+          : start.payload
 
       const env = getEnv()
       const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapterNumber}`)

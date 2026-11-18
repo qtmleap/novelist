@@ -7,7 +7,13 @@ import {
   type StoredBible,
   StoredBibleSchema
 } from '@/schemas/novel.dto'
-import { type ChapterRecord, ChapterRecordSchema, type ChapterStaleness } from '@/schemas/story.dto'
+import {
+  type ChapterRecord,
+  ChapterRecordSchema,
+  type ChapterReview,
+  ChapterReviewSchema,
+  type ChapterStaleness
+} from '@/schemas/story.dto'
 
 // Novel.writing_notes は null 許容の列 (理由は schema.prisma の注記)。読むときはここで '' にそろえる。
 function withWritingNotes<T extends { writing_notes: string | null }>(row: T): T & { writing_notes: string } {
@@ -210,6 +216,22 @@ export function outlineStamps(chapters: LineageChapter[], previous: Outline | nu
     .map((chapter) => ({ id: chapter.id, outlineHash: entryHash(previous, chapter.chapter_number) }))
 }
 
+// Chapter.review (JSON 文字列 | null) を検証して返す。未検査 (null) や壊れた値は null。
+export function parseStoredReview(raw: string | null): ChapterReview | null {
+  if (raw === null || raw.length === 0) return null
+  try {
+    const result = ChapterReviewSchema.safeParse(JSON.parse(raw))
+    return result.success ? result.data : null
+  } catch {
+    return null
+  }
+}
+
+// 検査の結果を保存する (version ごとに 1:1。同じ version を検査し直したら上書き)。
+export async function saveChapterReview(prisma: PrismaClient, chapterId: string, review: ChapterReview) {
+  await prisma.chapter.update({ where: { id: chapterId }, data: { review: JSON.stringify(review) } })
+}
+
 // 章の記録を保存する (version ごとに 1:1。同じ version に抽出し直したら上書き)。
 export async function saveChapterRecord(prisma: PrismaClient, chapterId: string, record: ChapterRecord) {
   await prisma.chapter.update({ where: { id: chapterId }, data: { record: JSON.stringify(record) } })
@@ -229,9 +251,18 @@ export async function listChapterVersions(prisma: PrismaClient, novelId: string,
   const rows = await prisma.chapter.findMany({
     where: { novel_id: novelId, chapter_number: chapterNumber },
     orderBy: { version: 'desc' },
-    select: { id: true, version: true, title: true, content: true, prompt: true, record: true, created_at: true }
+    select: {
+      id: true,
+      version: true,
+      title: true,
+      content: true,
+      prompt: true,
+      record: true,
+      review: true,
+      created_at: true
+    }
   })
-  return rows.map((row) => ({ ...row, record: parseStoredRecord(row.record) }))
+  return rows.map((row) => ({ ...row, record: parseStoredRecord(row.record), review: parseStoredReview(row.review) }))
 }
 
 // 各章の最新 version の id。rows は chapter_number 昇順・version 降順で並んでいる前提 (同じ章の先頭が最新)。
@@ -259,11 +290,12 @@ async function latestChapters(prisma: PrismaClient, rows: Array<{ id: string; ch
       record: true,
       outline_hash: true,
       prev_chapter_id: true,
+      review: true,
       created_at: true
     }
   })
   return chapters
-    .map((ch) => ({ ...ch, record: parseStoredRecord(ch.record) }))
+    .map((ch) => ({ ...ch, record: parseStoredRecord(ch.record), review: parseStoredReview(ch.review) }))
     .sort((a, b) => a.chapter_number - b.chapter_number)
 }
 

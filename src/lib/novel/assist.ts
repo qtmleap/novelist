@@ -1,5 +1,13 @@
 import type { z } from 'zod'
-import { bibleAddressPairs, buildBiblePrompt, buildRecordPrompt } from '@/lib/novel/assist-prompts'
+import {
+  bibleAddressPairs,
+  buildBiblePrompt,
+  buildRecordPrompt,
+  buildReviewPrompt,
+  REVIEW_ISSUES_MAX,
+  REVIEW_QUOTE_MIN_CHARS,
+  type ReviewPromptInput
+} from '@/lib/novel/assist-prompts'
 import {
   type AdultBibleText,
   applyBibleCast,
@@ -11,7 +19,7 @@ import {
   validateAdultBibleText,
   validateAdultCast
 } from '@/lib/novel/bible'
-import { bibleJsonSchema, recordJsonSchema } from '@/lib/novel/json-schemas'
+import { bibleJsonSchema, recordJsonSchema, reviewJsonSchema } from '@/lib/novel/json-schemas'
 import { finalizeRecord } from '@/lib/novel/ledger'
 import {
   type JsonSchema,
@@ -42,6 +50,9 @@ import {
   type ChapterRecord,
   ChapterRecordDraftSchema,
   type OutlineWarning,
+  REVIEW_ISSUE_KINDS,
+  type ReviewIssue,
+  type ReviewIssueKind,
   type StoryBible,
   StoryBibleSchema,
   type StoryThread
@@ -737,7 +748,9 @@ function rawBibleText(value: Record<string, unknown>): AdultBibleText {
       rules: rawTexts(world.rules),
       terms: rawRecords(world.terms).map((term) => ({ term: rawText(term.term), note: rawText(term.note) }))
     },
-    timeline: rawTexts(value.timeline)
+    timeline: rawTexts(value.timeline),
+    // 呼称表の呼び方も見る (文字列でない call は '' として読む)。名簿に無い名前の行は後で捨てられるが、生の値で先に見る
+    addresses: rawRecords(value.addresses).map((entry) => ({ call: rawText(entry.call) }))
   }
 }
 
@@ -885,4 +898,105 @@ export async function prepareBibleFlow(
   return created.ok
     ? { ok: true, bible: created.bible }
     : { ok: false, status: 502, error: 'generation_failed', detail: created.error }
+}
+
+// ---------------------- 検査 (Phase 5) ----------------------
+
+export type ReviewFlowResult =
+  | { ok: true; issues: ReviewIssue[]; usages: UsageCounts[] }
+  | { ok: false; error: string; usages: UsageCounts[] }
+
+// 検査の応答を待つ上限。検査は章の完了の後に走り、失敗しても章は完了のまま。
+const REVIEW_TIMEOUT_MS = 90_000
+// 保存する引用と理由の長さの上限 (字)。
+const REVIEW_QUOTE_STORE_CHARS = 200
+const REVIEW_REASON_STORE_CHARS = 300
+
+// 引用の照合で無視する文字 (空白、全角空白、改行)。モデルは改行や空白を落として引用することがある。
+const QUOTE_SPACE = /\s/u
+
+// 本文から空白を除いた文字列と、その各文字が元の本文のどこにあったか (コードポイント単位)。
+function compacted(text: string): { chars: string[]; origin: number[] } {
+  const points = [...text]
+  const kept = points.map((char, index) => ({ char, index })).filter(({ char }) => !QUOTE_SPACE.test(char))
+  return { chars: kept.map(({ char }) => char), origin: kept.map(({ index }) => index) }
+}
+
+// 引用が本文にあれば、本文の該当箇所 (空白や改行を含む元の文字列) を返す。無ければ null。
+// 空白と改行を除いて比べる。空白を除いて REVIEW_QUOTE_MIN_CHARS 字未満の引用は、どこにでも当たりうるので受けない。
+// 返すのは本文の文字列そのもの (画面や書き直しの指示で、本文から探せる形にするため)。
+export function findQuote(quote: string, content: string): string | null {
+  const needle = compacted(quote).chars
+  if (needle.length < REVIEW_QUOTE_MIN_CHARS) return null
+  const body = compacted(content)
+  const target = needle.join('')
+  const start = body.chars.join('').indexOf(target)
+  if (start === -1) return null
+  // indexOf は UTF-16 の位置を返すので、コードポイントの位置に直す
+  const first = [...body.chars.join('').slice(0, start)].length
+  const last = first + needle.length - 1
+  return [...content].slice(body.origin[first], body.origin[last] + 1).join('')
+}
+
+function isReviewIssueKind(value: string): value is ReviewIssueKind {
+  return REVIEW_ISSUE_KINDS.some((kind) => kind === value)
+}
+
+// モデルの指摘を保存できる形にする。引用が本文に無いもの、引用や理由が空のものは捨てる。
+// 種別が分からなければ other。引用と理由は上限で切る。最大 REVIEW_ISSUES_MAX 件。
+export function normalizeReviewIssues(raw: unknown[], content: string): ReviewIssue[] {
+  return raw
+    .flatMap((item): ReviewIssue[] => {
+      if (!isRecordValue(item)) return []
+      const quote = typeof item.quote === 'string' ? findQuote(item.quote, content) : null
+      const reason = typeof item.reason === 'string' ? item.reason.trim() : ''
+      if (quote === null || reason.length === 0) return []
+      const kind = typeof item.kind === 'string' && isReviewIssueKind(item.kind) ? item.kind : 'other'
+      return [
+        {
+          kind,
+          quote: clipText(quote.trim(), REVIEW_QUOTE_STORE_CHARS),
+          reason: clipText(reason, REVIEW_REASON_STORE_CHARS)
+        }
+      ]
+    })
+    .slice(0, REVIEW_ISSUES_MAX)
+}
+
+// 応答を { issues: [...] } として読む (配列をそのまま返されたら、それを issues とみなす)。
+// issues が配列でなければ解釈の失敗 (やり直しに回す)。個々の指摘の不備は捨てるだけで、失敗にしない。
+function interpretReview(text: string, content: string): Interpreted<ReviewIssue[]> {
+  const json = parseJsonText(text)
+  if (!json.ok) return json
+  const value: unknown = json.value
+  const issues = Array.isArray(value) ? value : isRecordValue(value) ? value.issues : undefined
+  if (!Array.isArray(issues)) {
+    return { ok: false, error: `検査の応答に issues の配列がありません (応答の先頭: ${excerpt(text)})` }
+  }
+  return { ok: true, value: normalizeReviewIssues(issues, content) }
+}
+
+// 書き上がった章を検査する。解釈に失敗したら 1 回だけやり直す。呼び出しの失敗 (throw) はやり直さない。
+// 本文が空なら LLM を呼ばずに失敗を返す (buildReviewPrompt が throw する)。
+export async function reviewChapterFlow(call: JsonCaller, input: ReviewPromptInput): Promise<ReviewFlowResult> {
+  const prompt = buildReviewPromptSafely(input)
+  if (!prompt.ok) return { ok: false, error: prompt.error, usages: [] }
+  const outcome = await callUntilValid(
+    call,
+    prompt.value,
+    { op: 'reviewChapter', schema: reviewJsonSchema(), timeoutMs: REVIEW_TIMEOUT_MS },
+    (text) => interpretReview(text, input.content),
+    MAX_ATTEMPTS,
+    []
+  )
+  if (!outcome.ok) return outcome
+  return { ok: true, issues: outcome.value, usages: outcome.usages }
+}
+
+function buildReviewPromptSafely(input: ReviewPromptInput): Interpreted<Prompt> {
+  try {
+    return { ok: true, value: buildReviewPrompt(input) }
+  } catch (e) {
+    return { ok: false, error: errorMessage(e) }
+  }
 }

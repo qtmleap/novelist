@@ -23,8 +23,15 @@ import {
   recordNarrator,
   recordStageAction,
   resolveChapterContext,
+  isReviewRunning,
   restartState,
   resumePoint,
+  reviewAlarmAction,
+  reviewAndSave,
+  reviewInputsOf,
+  reviewOwnsState,
+  revisionBaseOf,
+  revisionInstruction,
   setupsOf
 } from '@/lib/novel/chapter-context'
 import type { JsonCaller } from '@/lib/novel/assist'
@@ -91,6 +98,7 @@ function source(chapters: ContextChapter[], chapterNumber = 5): ContextSource {
     relations: [],
     bible: null,
     bibleUnreadable: false,
+    revision: null,
     writingNotes: '',
     chapters
   }
@@ -901,5 +909,314 @@ describe('contextBlocker for adult novels', () => {
     ).toBeNull()
     // 未作成 (列が null) は旧データとして止めない
     expect(contextBlocker({ style, cast, bible: null, bibleUnreadable: false })).toBeNull()
+  })
+})
+
+// ---------------------- 指示つきの書き直し (Phase 5) ----------------------
+
+describe('revision', () => {
+  test('a whitespace-only instruction is a normal generation', () => {
+    expect(revisionInstruction(undefined)).toBe('')
+    expect(revisionInstruction(' \n　')).toBe('')
+    expect(revisionInstruction(' 呼び方を直す ')).toBe('呼び方を直す')
+  })
+
+  const latest = { ...chapter(3), id: 'v3b' }
+  const base = { novelId: 'n1', chapterNumber: 3 }
+
+  test('without a version id, the latest version of the chapter is the base', () => {
+    expect(revisionBaseOf({ ...base, baseVersionId: '', latest, row: null })).toEqual({ ok: true, content: content(3) })
+    expect(revisionBaseOf({ ...base, baseVersionId: '', latest: undefined, row: null }).ok).toBe(false)
+  })
+
+  test('a version id must belong to this novel and this chapter', () => {
+    const row = { novel_id: 'n1', chapter_number: 3, content: '元の版の本文' }
+    expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row })).toEqual({ ok: true, content: '元の版の本文' })
+    expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row: { ...row, novel_id: 'other' } }).ok).toBe(false)
+    expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row: { ...row, chapter_number: 2 } }).ok).toBe(false)
+    expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row: null }).ok).toBe(false)
+    expect(revisionBaseOf({ ...base, baseVersionId: 'v3a', latest, row: { ...row, content: '  ' } }).ok).toBe(false)
+  })
+
+  test('the base text and the instruction reach the chapter prompt', () => {
+    const src = { ...source(sixChapters, 3), revision: { baseContent: '元の版の本文の目印', instruction: '呼び方の指示の目印' } }
+    const plan = planChapterContext(src, huge)
+    expect(plan.prompt.user).toContain('元の版の本文の目印')
+    expect(plan.prompt.user).toContain('呼び方の指示の目印')
+  })
+})
+
+// ---------------------- 検査 (Phase 5) ----------------------
+
+describe('reviewInputsOf', () => {
+  function castMember(name: string, examples: string[] = []): CastMember {
+    return {
+      name,
+      role: '',
+      gender: '',
+      age: '20',
+      occupation: '',
+      appearance: '',
+      first_person: '私',
+      address_others: '',
+      speech_examples: examples,
+      description: ''
+    }
+  }
+  const cast = [castMember('酒寄彩葉', ['いくよ！']), castMember('月見ヤチヨ', ['任せて']), castMember('通行人', ['どいて'])]
+  const plannedOutline: Outline = {
+    chapters: outline.chapters.map((entry) =>
+      entry.chapter_number === 3 ? { ...entry, characters: ['酒寄彩葉', '月見ヤチヨ'] } : entry
+    )
+  }
+  const bible: StoryBible = {
+    premise: '',
+    ending: '',
+    arcs: [],
+    world: { rules: [], terms: [] },
+    timeline: [],
+    addresses: [
+      { from: '酒寄彩葉', to: '月見ヤチヨ', call: 'ヤチヨ' },
+      { from: '月見ヤチヨ', to: '酒寄彩葉', call: '彩葉' },
+      { from: '通行人', to: '酒寄彩葉', call: 'お嬢さん' }
+    ],
+    cast: []
+  }
+  const reviewSource = {
+    outline: plannedOutline,
+    chapterNumber: 3,
+    title: '題3',
+    content: '　検査する本文。',
+    targetChars: 2000,
+    style: { pov: '三人称多元視点', tone: '一般文芸', age_rating: '全年齢' },
+    cast,
+    bible,
+    bibleUnreadable: false,
+    chapters: sixChapters
+  }
+
+  test('the mechanical check gets the planned cast, earlier chapters, calls and the rating', () => {
+    const inputs = reviewInputsOf(reviewSource)
+    if (inputs === null) throw new Error('inputs expected')
+    expect(inputs.check).toEqual({
+      chapter: { number: 3, content: '　検査する本文。' },
+      targetChars: 2000,
+      plannedCharacters: ['酒寄彩葉', '月見ヤチヨ'],
+      castNames: ['酒寄彩葉', '月見ヤチヨ', '通行人'],
+      callsByName: { 月見ヤチヨ: ['ヤチヨ'], 酒寄彩葉: ['彩葉', 'お嬢さん'] },
+      speechExamples: ['いくよ！', '任せて'],
+      otherChapters: [
+        { number: 1, content: content(1) },
+        { number: 2, content: content(2) }
+      ],
+      ageRating: '全年齢'
+    })
+  })
+
+  test('the model review gets the present cast, their addresses and the ledger before the chapter', () => {
+    const inputs = reviewInputsOf(reviewSource)
+    const review = inputs === null ? null : inputs.review
+    if (review === null) throw new Error('review expected')
+    expect(review.cast.map((member) => member.name)).toEqual(['酒寄彩葉', '月見ヤチヨ'])
+    expect(review.addresses).toEqual(bible.addresses.slice(0, 2))
+    expect(review.ledgerText).toContain('第2章の記録の要約')
+    expect(review.ledgerText).not.toContain('第3章の記録の要約')
+    expect(review.ledgerText).not.toContain('第4章の記録の要約')
+    expect(review.content).toBe('　検査する本文。')
+  })
+
+  test('an adult novel whose bible fails gets only the mechanical check', () => {
+    const adult = { ...reviewSource, style: { ...reviewSource.style, age_rating: 'R18' } }
+    const inputs = reviewInputsOf(adult)
+    expect(inputs?.review).toBeNull()
+    expect(inputs?.check.ageRating).toBe('R18')
+  })
+
+  test('a chapter missing from the outline has no inputs', () => {
+    expect(reviewInputsOf({ ...reviewSource, chapterNumber: 9 })).toBeNull()
+  })
+})
+
+describe('reviewAlarmAction', () => {
+  const pending = { reviewPending: true, reviewRunning: false, reviewAttempts: 1, hasTarget: true }
+
+  test('decides whether to keep the DO alive, retry or give up', () => {
+    expect(reviewAlarmAction({ ...pending, reviewPending: false })).toBe('none')
+    expect(reviewAlarmAction({ ...pending, reviewRunning: true })).toBe('keep')
+    // 走っているはずの検査が失われた (DO が落ちた): 1 回だけやり直す
+    expect(reviewAlarmAction(pending)).toBe('retry')
+    expect(reviewAlarmAction({ ...pending, reviewAttempts: 2 })).toBe('give_up')
+    expect(reviewAlarmAction({ ...pending, hasTarget: false })).toBe('give_up')
+  })
+})
+
+describe('review generations', () => {
+  test('a review is running only when this DO runs it for the current generation', () => {
+    expect(isReviewRunning(3, 3)).toBe(true)
+    // evict でメモリが消えた
+    expect(isReviewRunning(null, 3)).toBe(false)
+    // 前の生成の検査がまだ走っている
+    expect(isReviewRunning(2, 3)).toBe(false)
+  })
+
+  test('a finished review may clear the pending mark only if no new generation started', () => {
+    expect(reviewOwnsState(3, 3)).toBe(true)
+    expect(reviewOwnsState(3, 4)).toBe(false)
+  })
+})
+
+describe('reviewAndSave and the revision base (fake prisma)', () => {
+  type Row = { id: string; novel_id: string; chapter_number: number; title: string | null; content: string; record: null }
+
+  type Update = { where: { id: string }; data: { review: string } }
+
+  function fake(novel: Record<string, unknown> | null, rows: Row[]) {
+    const updates: Update[] = []
+    const costs: unknown[] = []
+    const prisma: PrismaClient = Object.assign(Object.create(null), {
+      chapterGenerationCost: {
+        create: async (args: unknown) => {
+          costs.push(args)
+        }
+      },
+      novel: {
+        findUnique: async () =>
+          novel === null
+            ? null
+            : {
+                id: 'n1',
+                title: 't',
+                genre: 'g',
+                setting: 's',
+                num_chapters: 6,
+                target_chars: 2000,
+                outline_summary_chars: 200,
+                pov: '三人称多元視点',
+                tone: '一般文芸',
+                age_rating: '全年齢',
+                pov_character_id: '',
+                ending: '未指定',
+                notes: '',
+                writing_notes: null,
+                editor_model: 'gemini-2.5-flash',
+                bible: null,
+                outline: JSON.stringify(outline),
+                chapters: [],
+                character_links: [],
+                relations: [],
+                generation_costs: [],
+                generation_job: null,
+                category: null,
+                ...novel
+              }
+      },
+      chapter: {
+        findUnique: async (args: { where: { id: string } }) => {
+          const found = rows.find((row) => row.id === args.where.id)
+          return found === undefined ? null : found
+        },
+        update: async (args: Update) => {
+          updates.push(args)
+        }
+      }
+    })
+    return { prisma, updates, costs }
+  }
+  const row: Row = { id: 'v3', novel_id: 'n1', chapter_number: 3, title: '題3', content: '　本文。', record: null }
+  const target = { novelId: 'n1', chapterNumber: 3, chapterId: 'v3' }
+
+  test('a deleted version is skipped without saving', async () => {
+    const fx = fake({}, [])
+    expect(await reviewAndSave(fx.prisma, untouchedEnv, target)).toBe('skipped')
+    expect(fx.updates).toEqual([])
+  })
+
+  test('a version of another novel is skipped', async () => {
+    const fx = fake({}, [{ ...row, novel_id: 'other' }])
+    expect(await reviewAndSave(fx.prisma, untouchedEnv, target)).toBe('skipped')
+  })
+
+  test('an adult novel with an unreadable bible saves only the mechanical check, without calling the model', async () => {
+    const fx = fake({ age_rating: 'R18', bible: '{oops' }, [{ ...row, content: '　女子高生の彩葉は港へ向かった。' }])
+    expect(await reviewAndSave(fx.prisma, untouchedEnv, target)).toBe('saved')
+    expect(fx.updates).toHaveLength(1)
+    const saved = fx.updates[0]
+    expect(saved.where).toEqual({ id: 'v3' })
+    const review = JSON.parse(saved.data.review)
+    expect(review.reviewed).toBe(false)
+    expect(review.issues).toEqual([])
+    expect(review.checks.map((check: { kind: string }) => check.kind)).toContain('minor_term')
+  })
+
+  const usage = (n: number) => ({ model: 'gemini-2.5-flash', promptTokens: n, outputTokens: n, totalTokens: 2 * n })
+  const reviewedRow = { ...row, content: '　彩葉は港の灯台へ向かった。ヤチヨは黙って首を振り、赤い灯台を見上げた。' }
+
+  // replies を順に返す偽の呼び出し (Error は throw)。呼ばれたモデルを記録する。
+  function fakeMaker(replies: Array<{ text: string; usage?: ReturnType<typeof usage> } | Error>) {
+    const models: string[] = []
+    const queue = [...replies]
+    const make =
+      (model: string): JsonCaller =>
+      async () => {
+        models.push(model)
+        const next = queue.shift()
+        if (next === undefined) throw new Error('unexpected extra call')
+        if (next instanceof Error) throw next
+        return { text: next.text, usage: next.usage }
+      }
+    return { make, models }
+  }
+
+  test('a successful model review saves the issues with reviewed: true and records the cost', async () => {
+    const fx = fake({}, [reviewedRow])
+    const answer = JSON.stringify({
+      issues: [{ quote: 'ヤチヨは黙って首を振り、赤い灯台を見上げた', reason: '灯台は白いはず', kind: 'fact' }]
+    })
+    const maker = fakeMaker([{ text: answer, usage: usage(1) }])
+    expect(await reviewAndSave(fx.prisma, untouchedEnv, target, maker.make)).toBe('saved')
+    // editor_model で呼ぶ
+    expect(maker.models).toEqual(['gemini-2.5-flash'])
+    const review = JSON.parse(fx.updates[0].data.review)
+    expect(review.reviewed).toBe(true)
+    expect(review.issues).toEqual([
+      { kind: 'fact', quote: 'ヤチヨは黙って首を振り、赤い灯台を見上げた', reason: '灯台は白いはず' }
+    ])
+    expect(fx.costs).toHaveLength(1)
+    expect(fx.costs[0]).toMatchObject({ data: { kind: 'review', chapter_number: 3, novel_id: 'n1' } })
+  })
+
+  test('a failed model review saves only the mechanical check and still records the cost of every answer', async () => {
+    const fx = fake({}, [reviewedRow])
+    const maker = fakeMaker([
+      { text: 'not json', usage: usage(1) },
+      { text: 'still not json', usage: usage(2) }
+    ])
+    expect(await reviewAndSave(fx.prisma, untouchedEnv, target, maker.make)).toBe('saved')
+    const review = JSON.parse(fx.updates[0].data.review)
+    expect(review.reviewed).toBe(false)
+    expect(review.issues).toEqual([])
+    expect(Array.isArray(review.checks)).toBe(true)
+    expect(fx.costs).toHaveLength(2)
+  })
+
+  test('a throwing model call also saves the mechanical check', async () => {
+    const fx = fake({}, [reviewedRow])
+    expect(await reviewAndSave(fx.prisma, untouchedEnv, target, fakeMaker([new Error('timeout')]).make)).toBe('saved')
+    expect(JSON.parse(fx.updates[0].data.review).reviewed).toBe(false)
+    expect(fx.costs).toEqual([])
+  })
+
+  test('a revision with a version id from another chapter stops the context', async () => {
+    const fx = fake({}, [{ ...row, id: 'v2', chapter_number: 2 }])
+    const result = await buildChapterContext(fx.prisma, untouchedEnv, {
+      novelId: 'n1',
+      chapterNumber: 3,
+      model: 'gemini-2.5-flash',
+      instruction: '呼び方を直す',
+      baseVersionId: 'v2'
+    })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('元の版')
+    expect(result.error).not.toContain('呼び方を直す')
   })
 })

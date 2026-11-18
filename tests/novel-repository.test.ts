@@ -9,7 +9,9 @@ import {
   parseStoredBible,
   outlineStamps,
   parseStoredRecord,
+  parseStoredReview,
   saveBible,
+  saveChapterReview,
   saveChapter,
   saveOutlineWithStamps,
   chapterStaleness,
@@ -36,6 +38,7 @@ type Row = {
   record: string | null
   outline_hash: string | null
   prev_chapter_id: string | null
+  review: string | null
   created_at: Date
 }
 
@@ -51,6 +54,7 @@ function row(chapterNumber: number, version: number, record: string | null = nul
     record,
     outline_hash: null,
     prev_chapter_id: null,
+    review: null,
     created_at: new Date(0)
   }
 }
@@ -404,5 +408,56 @@ describe('lineage writes', () => {
     await getNovelWithChapters(prisma, 'n1')
     expect(findManyCalls[0].select.outline_hash).toBe(true)
     expect(findManyCalls[0].select.prev_chapter_id).toBe(true)
+  })
+})
+
+// ---------------------- 検査 (Phase 5) ----------------------
+
+describe('chapter review', () => {
+  const review = {
+    checks: [{ kind: 'length', message: '短い' }],
+    issues: [{ kind: 'fact', quote: '灯台は赤かった', reason: '白いはず' }],
+    reviewed: true
+  }
+
+  test('parseStoredReview fills defaults and rejects broken values', () => {
+    expect(parseStoredReview(JSON.stringify(review))).toEqual(review)
+    expect(parseStoredReview(JSON.stringify({}))).toEqual({ checks: [], issues: [], reviewed: false })
+    expect(parseStoredReview(null)).toBeNull()
+    expect(parseStoredReview('')).toBeNull()
+    expect(parseStoredReview('{oops')).toBeNull()
+    expect(parseStoredReview(JSON.stringify({ issues: [{ kind: 'unknown', quote: 'q', reason: 'r' }] }))).toBeNull()
+  })
+
+  test('saveChapterReview stores the JSON on the version', async () => {
+    const updates: unknown[] = []
+    const prisma: PrismaClient = Object.assign(Object.create(null), {
+      chapter: {
+        update: async (args: unknown) => {
+          updates.push(args)
+        }
+      }
+    })
+    await saveChapterReview(prisma, 'v3', review)
+    expect(updates).toEqual([{ where: { id: 'v3' }, data: { review: JSON.stringify(review) } }])
+  })
+
+  test('getNovelWithChapters and listChapterVersions return the validated review', async () => {
+    const { prisma, findManyCalls } = fakePrisma([
+      { ...row(1, 1), review: JSON.stringify(review) },
+      { ...row(2, 1), review: '{oops' }
+    ])
+    const novel = await getNovelWithChapters(prisma, 'n1')
+    expect(novel?.chapters.map((c) => c.review)).toEqual([review, null])
+    expect(findManyCalls[0].select.review).toBe(true)
+    const rows = [
+      { ...row(1, 2), review: JSON.stringify(review) },
+      { ...row(1, 1), review: null }
+    ]
+    const versionsPrisma: PrismaClient = Object.assign(Object.create(null), {
+      chapter: { findMany: async () => rows.map((r) => ({ ...r })) }
+    })
+    const versions = await listChapterVersions(versionsPrisma, 'n1', 1)
+    expect(versions.map((v) => v.review)).toEqual([review, null])
   })
 })

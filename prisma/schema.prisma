@@ -174,6 +174,8 @@ model Chapter {
   // 直前の章として使った version の id。第 1 章と、直前の章の本文が無かったときは null。
   // 直前の章の最新 version がこれと違えば (作り直された)、この章は「要再生成」。
   prev_chapter_id String?
+  // 検査の結果 (ChapterReviewSchema の JSON)。version ごとに 1:1。未検査は null。
+  review         String?
   created_at     DateTime @default(now())
 
   novel Novel @relation(fields: [novel_id], references: [id], onDelete: Cascade)

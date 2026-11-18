@@ -9,6 +9,7 @@ import {
   createBibleFlow,
   currentBibleHash,
   extractRecordFlow,
+  findQuote,
   generateBibleFlow,
   generateOutlineFlow,
   type JsonCaller,
@@ -17,15 +18,23 @@ import {
   outlineTimeoutMs,
   normalizeBible,
   outlinePromptInput,
+  normalizeReviewIssues,
   prepareBibleFlow,
   type RecordFlowInput,
   regenerateOutlineChapterFlow,
   regenerateOutlineChapters,
-  replaceOutlineChapter
+  replaceOutlineChapter,
+  reviewChapterFlow
 } from '@/lib/novel/assist'
-import { buildBiblePrompt, buildRecordPrompt } from '@/lib/novel/assist-prompts'
+import {
+  buildBiblePrompt,
+  buildRecordPrompt,
+  buildReviewPrompt,
+  REVIEW_ISSUES_MAX,
+  type ReviewPromptInput
+} from '@/lib/novel/assist-prompts'
 import { validateAdultCast } from '@/lib/novel/bible'
-import { bibleJsonSchema, recordJsonSchema } from '@/lib/novel/json-schemas'
+import { bibleJsonSchema, recordJsonSchema, reviewJsonSchema } from '@/lib/novel/json-schemas'
 import { outlineChapterJsonSchema, outlineJsonSchema } from '@/lib/novel/outline'
 import { buildOutlineChapterPrompt, buildOutlinePrompt, type CastMember, type Prompt } from '@/lib/novel/prompts'
 import type { UsageCounts } from '@/lib/openai/protocol'
@@ -1294,6 +1303,18 @@ describe('adult checks on the raw answer', () => {
     expect(allAges.ok).toBe(true)
   })
 
+  test('words for minors in the address calls fail for adult novels, even on rows dropped later', async () => {
+    // 名簿に無い相手への行 (completeAddresses が捨てる) の呼び方も、切り詰める前の値で見る
+    const answer = bibleJson({ addresses: [...ADDRESSES, { from: '酒寄彩葉', to: '通行人', call: 'JKちゃん' }] })
+    const result = await generateBibleFlow(fakeCall([{ text: answer }, { text: answer }]).call, adultBibleInput)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('呼称表')
+    const nonString = bibleJson({ addresses: [{ from: '酒寄彩葉', to: '月見ヤチヨ', call: 7 }] })
+    // 文字列でない call は '' として読む (成人指定の検証では問題にならず、後の形の検証で落ちてやり直しになる)
+    const shape = await generateBibleFlow(fakeCall([{ text: nonString }, { text: bibleJson() }]).call, adultBibleInput)
+    expect(shape.ok).toBe(true)
+  })
+
   test('a long text is checked before it is cut', async () => {
     // 物語の核は 3,000 字まで。その後ろにある語も見る (切り詰めた値だけなら通る)
     const premise = `${'あ'.repeat(3100)}高校生`
@@ -1400,5 +1421,145 @@ describe('cast rows the validator does not read', () => {
     const result = await generateBibleFlow(fakeCall([{ text: answer }]).call, adultBibleInput)
     if (!result.ok) throw new Error(result.error)
     expect(result.bible.cast).toEqual(ADULT_CAST)
+  })
+})
+
+// ---------------------- 検査 (Phase 5) ----------------------
+
+const REVIEWED_TEXT = '　彩葉は港の灯台へ向かった。\n「ヤチヨ、鍵はどこにあるの？」\n　ヤチヨは黙って首を振り、赤い灯台を見上げた。'
+
+describe('findQuote', () => {
+  test('matches across differences in spaces and line breaks, and returns the text from the body', () => {
+    // 改行と全角空白を落とした引用
+    expect(findQuote('向かった。「ヤチヨ、鍵はどこにあるの？」', REVIEWED_TEXT)).toBe(
+      '向かった。\n「ヤチヨ、鍵はどこにあるの？」'
+    )
+    expect(findQuote(' ヤチヨは 黙って首を振り、 ', REVIEWED_TEXT)).toBe('ヤチヨは黙って首を振り、')
+  })
+
+  test('a quote that is not in the body is rejected', () => {
+    expect(findQuote('ヤチヨは笑って首を振り、', REVIEWED_TEXT)).toBeNull()
+  })
+
+  test('a quote shorter than the minimum is rejected even if it is in the body', () => {
+    expect(findQuote('鍵はどこに', REVIEWED_TEXT)).toBeNull()
+    expect(findQuote('　　　', REVIEWED_TEXT)).toBeNull()
+  })
+
+  test('characters outside the BMP are kept whole', () => {
+    const body = '𠮷野家の𠮷田さんが𠮷祥寺で待っていた。'
+    expect(findQuote('𠮷田さんが𠮷祥寺で待って', body)).toBe('𠮷田さんが𠮷祥寺で待って')
+  })
+})
+
+describe('normalizeReviewIssues', () => {
+  const quote = 'ヤチヨは黙って首を振り、赤い灯台を見上げた'
+
+  test('unknown kinds become other, and the quote is taken from the body', () => {
+    const issues = normalizeReviewIssues(
+      [
+        { kind: 'fact', quote, reason: '灯台は白いはず' },
+        { kind: 'nonsense', quote: '彩葉は 港の灯台へ向かった', reason: '理由' }
+      ],
+      REVIEWED_TEXT
+    )
+    expect(issues).toEqual([
+      { kind: 'fact', quote, reason: '灯台は白いはず' },
+      { kind: 'other', quote: '彩葉は港の灯台へ向かった', reason: '理由' }
+    ])
+  })
+
+  test('issues with a missing quote or reason, or a quote not in the body, are dropped', () => {
+    const issues = normalizeReviewIssues(
+      [
+        { kind: 'fact', quote, reason: '  ' },
+        { kind: 'fact', reason: '引用が無い' },
+        { kind: 'fact', quote: '本文に無い引用の文字列です', reason: '理由' },
+        'garbage',
+        null
+      ],
+      REVIEWED_TEXT
+    )
+    expect(issues).toEqual([])
+  })
+
+  test('the quote is cut at 200 and the reason at 300 characters', () => {
+    const body = 'あ'.repeat(500)
+    const [issue] = normalizeReviewIssues([{ kind: 'fact', quote: 'あ'.repeat(400), reason: 'い'.repeat(500) }], body)
+    expect(issue.quote).toHaveLength(200)
+    expect(issue.reason).toHaveLength(300)
+  })
+
+  test(`at most ${REVIEW_ISSUES_MAX} issues are kept`, () => {
+    const many = Array.from({ length: 15 }, () => ({ kind: 'fact', quote, reason: '理由' }))
+    expect(normalizeReviewIssues(many, REVIEWED_TEXT)).toHaveLength(REVIEW_ISSUES_MAX)
+  })
+})
+
+describe('reviewChapterFlow', () => {
+  const reviewInput: ReviewPromptInput = {
+    chapterNumber: 3,
+    title: '港の灯',
+    content: REVIEWED_TEXT,
+    entry: storedChapter({ chapter_number: 3, title: '港の灯', summary: '概要', characters: [] }),
+    bible: null,
+    ledgerText: '',
+    cast: input.cast,
+    addresses: [],
+    style: input.style
+  }
+  const answer = JSON.stringify({
+    issues: [{ quote: 'ヤチヨは黙って首を振り、赤い灯台を見上げた', reason: '灯台は白いはず', kind: 'fact' }]
+  })
+
+  test('succeeds and passes the prompt, op, schema and timeout to call', async () => {
+    const { call, calls } = fakeCall([{ text: answer, usage: usage(1) }])
+    const result = await reviewChapterFlow(call, reviewInput)
+    expect(calls[0].prompt).toEqual(buildReviewPrompt(reviewInput))
+    expect(calls[0].options).toEqual({ op: 'reviewChapter', schema: reviewJsonSchema(), timeoutMs: 90_000 })
+    if (!result.ok) throw new Error(result.error)
+    expect(result.issues).toEqual([
+      { kind: 'fact', quote: 'ヤチヨは黙って首を振り、赤い灯台を見上げた', reason: '灯台は白いはず' }
+    ])
+    expect(result.usages).toEqual([usage(1)])
+  })
+
+  test('no issues is a success', async () => {
+    const result = await reviewChapterFlow(fakeCall([{ text: '{"issues":[]}' }]).call, reviewInput)
+    expect(result).toEqual({ ok: true, issues: [], usages: [] })
+  })
+
+  test('an answer that cannot be read is retried once, keeping both usages', async () => {
+    const { call, calls } = fakeCall([
+      { text: 'not json', usage: usage(1) },
+      { text: answer, usage: usage(2) }
+    ])
+    const result = await reviewChapterFlow(call, reviewInput)
+    expect(calls).toHaveLength(2)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.usages).toEqual([usage(1), usage(2)])
+    // issues が配列でないのも解釈の失敗
+    const shape = await reviewChapterFlow(fakeCall([{ text: '{"issues":"none"}' }, { text: '{"x":1}' }]).call, reviewInput)
+    expect(shape.ok).toBe(false)
+  })
+
+  test('a bare array is read as the issues', async () => {
+    const result = await reviewChapterFlow(fakeCall([{ text: JSON.stringify(JSON.parse(answer).issues) }]).call, reviewInput)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.issues).toHaveLength(1)
+  })
+
+  test('a throwing call is not retried', async () => {
+    const { call, calls } = fakeCall([new Error('Gemini reviewChapter failed: 503')])
+    const result = await reviewChapterFlow(call, reviewInput)
+    expect(calls).toHaveLength(1)
+    expect(result).toEqual({ ok: false, error: 'Gemini reviewChapter failed: 503', usages: [] })
+  })
+
+  test('an empty chapter is not sent to the model', async () => {
+    const { call, calls } = fakeCall([])
+    const result = await reviewChapterFlow(call, { ...reviewInput, content: ' \n ' })
+    expect(calls).toHaveLength(0)
+    expect(result.ok).toBe(false)
   })
 })
