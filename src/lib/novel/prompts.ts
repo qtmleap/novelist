@@ -309,6 +309,11 @@ const ADULT_READING_TEXT: Record<AdultReading, string> = {
   resolved: `${READ_ALL_AS_ADULT}${ADULT_CAST_RESOLVED}`
 }
 
+// 成人指定 (R15 / R18) か。下の ratingLine が読み替えの指示を出すのと同じ条件。
+function isAdultRating(ageRating: string | undefined): boolean {
+  return ageRating === 'R15' || ageRating === 'R18'
+}
+
 // 年齢指定は描写の踏み込み度合いを決める (文体とは独立)。知らない値なら undefined。
 function ratingLine(ageRating: string | undefined, adultReading: AdultReading): string | undefined {
   const reading = ADULT_READING_TEXT[adultReading]
@@ -905,17 +910,36 @@ function revisionBaseBody(label: string, text: string, mode: PromptMode): string
   ].join('\n')
 }
 
-// 書き直しのときに【今回の執筆】の先頭に置く、直し方の指示。
-const REVISION_RULES = [
-  `直すのは【${REVISION_INSTRUCTION_HEADING}】に書かれた点だけにする。それ以外は【${REVISION_BASE_HEADING}】の文章をそのまま保つ（言い回しを変えない。【${REVISION_INSTRUCTION_HEADING}】が求めない限り、場面を足したり削ったりしない）。`,
-  '直した結果、前後の文と辻褄が合わなくなる箇所は、合わせて直す。',
-  // 元の版が表記の規則より前に書かれた章のこともある。system の【表記】と「元のまま保つ」がぶつからないようにする。
-  '表記の規則（字下げなど）に合っていない箇所は、規則に合わせて直す。',
-  // system の「出来事をすべて場面として書く」「章末の状況で終える」は、新しく書くときの規則。
-  // 書き直しでは 修正指示 > 元の版 > 計画 の順に優先させる (計画どおりに書き直させない)。
-  `下の題、概要、出来事などは、【${REVISION_BASE_HEADING}】を書いたときの計画である。【${REVISION_BASE_HEADING}】が計画と違っていても、【${REVISION_INSTRUCTION_HEADING}】に書かれていなければ直さない。【${REVISION_INSTRUCTION_HEADING}】が計画と食い違うときは、【${REVISION_INSTRUCTION_HEADING}】に従う。`,
-  '出力は章の全文にする。直していない部分も含めて最初から最後まで書き、どこを直したかの説明は付けない。'
-]
+// 書き直しのときに【今回の執筆】の先頭に置く、直し方の指示。先頭の行が原則で、その後に例外を並べる。
+const REVISION_KEEP_RULE = `直すのは【${REVISION_INSTRUCTION_HEADING}】に書かれた点だけにする。それ以外は【${REVISION_BASE_HEADING}】の文章をそのまま保つ（言い回しを変えない。【${REVISION_INSTRUCTION_HEADING}】が求めない限り、場面を足したり削ったりしない）。`
+
+// 成人指定 (R15 / R18) の書き直しのときだけ足す例外。
+// 全年齢で書いた章を、成人指定に変えた後に書き直すと、元の版の全文、「そのまま保つ」、成人向けの表現の許可が同時に入る。
+// 新しく書くときよりも未成年の記述が残る方向に働くので、読み替えを「そのまま保つ」より優先させる。
+// 言葉は年齢指定の行の読み替えの指示 (READ_ALL_AS_ADULT) に揃える。語の一覧は、あちらにあるので重ねない。
+// resolved (作品設計が成人としての人物設定を確定している) のときは、その人物設定に合わせさせる。
+// all のときの人物設定は辞典の原文で、未成年の記述が残りうるので、合わせる先として指さない。
+const REVISION_ADULT_RULES: Record<AdultReading, string> = {
+  all: `【${REVISION_BASE_HEADING}】に未成年を連想させる記述（年齢、学年、学校、制服、幼い外見など）が残っていたら、【${REVISION_INSTRUCTION_HEADING}】に書かれていなくても、成人（大学生または社会人）として読み替えて書き直す。この点は、【${REVISION_BASE_HEADING}】の文章をそのまま保つことより優先する。`,
+  resolved: `【${REVISION_BASE_HEADING}】に未成年を連想させる記述（年齢、学年、学校、制服、幼い外見など）が残っていたら、【${REVISION_INSTRUCTION_HEADING}】に書かれていなくても、【この章の登場人物】の設定に合わせて、成人（大学生または社会人）として書き直す。この点は、【${REVISION_BASE_HEADING}】の文章をそのまま保つことより優先する。`
+}
+
+// adultReading: 成人指定の書き直しなら、読み替えの指示の出し方。全年齢や年齢指定なしなら null。
+function revisionRules(adultReading: AdultReading | null): string[] {
+  return [
+    REVISION_KEEP_RULE,
+    ...(adultReading === null ? [] : [REVISION_ADULT_RULES[adultReading]]),
+    '直した結果、前後の文と辻褄が合わなくなる箇所は、合わせて直す。',
+    // 元の版が表記の規則より前に書かれた章のこともある。system の【表記】と「元のまま保つ」がぶつからないようにする。
+    '表記の規則（字下げなど）に合っていない箇所は、規則に合わせて直す。',
+    // system の「出来事をすべて場面として書く」「章末の状況で終える」は、新しく書くときの規則。
+    // 書き直しでは 修正指示 > 元の版 > 計画 の順に優先させる (計画どおりに書き直させない)。
+    // 載せるのは今の章立ての計画で、元の版を書いた後に章立てが変わっていれば、元の版を書いたときの計画とは違う。
+    // 書き直した版は元の版の鮮度を引き継ぐ (計画が変わった章は、書き直しても「要再生成」のまま残る)。
+    `下の題、概要、出来事などは、章立てにあるこの章の計画である（【${REVISION_BASE_HEADING}】を書いた後に変わっていることがある）。【${REVISION_BASE_HEADING}】が計画と違っていても、【${REVISION_INSTRUCTION_HEADING}】に書かれていなければ直さない。【${REVISION_INSTRUCTION_HEADING}】が計画と食い違うときは、【${REVISION_INSTRUCTION_HEADING}】に従う。`,
+    '出力は章の全文にする。直していない部分も含めて最初から最後まで書き、どこを直したかの説明は付けない。'
+  ]
+}
 
 type WritingBrief = {
   entry: OutlineChapter
@@ -924,6 +948,8 @@ type WritingBrief = {
   hasNextOpening: boolean
   // 指示つきの書き直しのとき、元の版の字数。通常の生成では null
   revisionBaseChars: number | null
+  // 成人指定 (R15 / R18) の書き直しのとき、読み替えの指示の出し方。それ以外は null
+  revisionAdultReading: AdultReading | null
   // 伏線の id → 説明 (回収する伏線の説明を引く)
   setups: Map<string, string>
   // 前の章が張り、後の章が回収する伏線
@@ -998,24 +1024,28 @@ function writingBody(brief: WritingBrief): string {
         : `章末の状況: ${plan.endState.replace(/。+$/, '')}（${endNote}）`
   const revising = brief.revisionBaseChars !== null
   const items = [
-    ...(revising ? REVISION_RULES : []),
+    ...(revising ? revisionRules(brief.revisionAdultReading) : []),
     writtenLine(brief),
     upcomingLine(brief),
     title.length > 0 ? `題: ${title}` : '',
     summary.length > 0 ? `概要: ${summary}` : '',
     plan.timePlace.length > 0 ? `時と場所: ${plan.timePlace}` : '',
+    // 書き直しでは、計画の項目の見出しを「章立ての計画」として示す。「すべてを場面として書く」「この章の中で書く」
+    // 「この章で決着させる」は新しく書くときの指示で、元の版を計画どおりに書き直させてしまう。
+    // 伏線の「種明かしはしない」「決着させない」は、書き直しでも守る制約なので残す。
     nested(
-      // 書き直しでは、出来事は元の版に書かれている。計画どおりに書き直させない。
-      revising ? '出来事（元の版を書いたときの計画）' : '出来事（この順に、すべてを場面として書く）',
+      revising
+        ? `出来事（章立ての計画。【${REVISION_BASE_HEADING}】をこれに合わせて書き直さない）`
+        : '出来事（この順に、すべてを場面として書く）',
       plan.events.map((event, index) => `${index + 1}. ${event}`)
     ),
     endState,
     nested(
-      '張る伏線（この章の中で書く。種明かしはしない）',
+      revising ? '張る伏線（章立ての計画。種明かしはしない）' : '張る伏線（この章の中で書く。種明かしはしない）',
       plan.setups.map((setup) => `- ${threadLine(setup.id, setup.description)}`)
     ),
     nested(
-      '回収する伏線（この章で決着させる）',
+      revising ? '回収する伏線（章立ての計画）' : '回収する伏線（この章で決着させる）',
       plan.payoffs.map((id) => {
         const description = brief.setups.get(id)
         return `- ${threadLine(id, description === undefined ? '' : description)}`
@@ -1072,6 +1102,9 @@ function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Pro
   const revisionInstruction =
     input.revision === undefined || input.revision === null ? '' : compactText(input.revision.instruction)
   const revising = revisionText.length > 0 && revisionInstruction.length > 0
+  // 成人指定の書き直しで、元の版を人物設定に合わせさせるのは、【この章の登場人物】の節があるときだけ
+  // (名簿が空なら、読み替えだけを指示する)。
+  const revisionReading: AdultReading = present.length > 0 ? adultReadingOf(bible) : 'all'
 
   // 章をまたいで変わらない部分。章番号や今回の登場人物を入れない (前半を 1 字も変えないため)。
   // 全文の章が増えていく間は、前の章のプロンプトのここまでが、次の章のプロンプトの先頭と一致する
@@ -1115,6 +1148,7 @@ function assembleChapterPrompt(input: ChapterPromptInput, mode: PromptMode): Pro
         plan,
         hasNextOpening: next !== null,
         revisionBaseChars: revising ? revisionText.length : null,
+        revisionAdultReading: revising && isAdultRating(style.age_rating) ? revisionReading : null,
         setups: setupDescriptions(chapters),
         deferred: deferredSetups(chapters, chapterNumber),
         totalChapters,

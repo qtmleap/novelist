@@ -1702,12 +1702,33 @@ describe('buildChapterPrompt: 指示つきの書き直し', () => {
       '- 直すのは【修正指示】に書かれた点だけにする。それ以外は【元の版】の文章をそのまま保つ（言い回しを変えない。【修正指示】が求めない限り、場面を足したり削ったりしない）。',
       '- 直した結果、前後の文と辻褄が合わなくなる箇所は、合わせて直す。',
       '- 表記の規則（字下げなど）に合っていない箇所は、規則に合わせて直す。',
-      '- 下の題、概要、出来事などは、【元の版】を書いたときの計画である。【元の版】が計画と違っていても、【修正指示】に書かれていなければ直さない。【修正指示】が計画と食い違うときは、【修正指示】に従う。',
+      // 載せるのは今の章立ての計画。元の版を書いた後に章立てが変わっていれば、元の版を書いたときの計画とは違う
+      '- 下の題、概要、出来事などは、章立てにあるこの章の計画である（【元の版】を書いた後に変わっていることがある）。【元の版】が計画と違っていても、【修正指示】に書かれていなければ直さない。【修正指示】が計画と食い違うときは、【修正指示】に従う。',
       '- 出力は章の全文にする。直していない部分も含めて最初から最後まで書き、どこを直したかの説明は付けない。'
     ])
     // 計画は載せるが、計画どおりに書き直させる文言は付けない
-    expect(body).toContain('- 出来事（元の版を書いたときの計画）:\n  1. ルナが部室に来て、入部したいと言う。')
+    expect(body).toContain(
+      '- 出来事（章立ての計画。【元の版】をこれに合わせて書き直さない）:\n  1. ルナが部室に来て、入部したいと言う。'
+    )
     expect(body).not.toContain('すべてを場面として書く')
+    // 「元の版を書いたときの計画」とは言わない (事実と違うことがある)
+    expect(body).not.toContain('を書いたときの計画')
+    // 伏線も章立ての計画として載せる。種明かしをしない、決着させない、の制約は残す
+    expect(body).toContain(
+      '- 張る伏線（章立ての計画。種明かしはしない）:\n  - [s2] ルナは入部届の住所の欄を空けたままにする。'
+    )
+    expect(body).not.toContain('この章の中で書く')
+    expect(body).toContain('- まだ回収しない伏線（後の章で回収する。この章では決着させない）:\n  - [s1] ')
+    const third = section(buildChapterPrompt(planned(3, { revision })).user, '今回の執筆')
+    expect(third).toContain('- 回収する伏線（章立ての計画）:\n  - [s1] 屋上の望遠鏡の持ち主が分からない。')
+    expect(third).not.toContain('この章で決着させる')
+    // 新しく書くときの見出しは変わらない
+    const fresh = section(buildChapterPrompt(planned(2)).user, '今回の執筆')
+    expect(fresh).toContain('- 出来事（この順に、すべてを場面として書く）:')
+    expect(fresh).toContain('- 張る伏線（この章の中で書く。種明かしはしない）:')
+    expect(section(buildChapterPrompt(planned(3)).user, '今回の執筆')).toContain(
+      '- 回収する伏線（この章で決着させる）:'
+    )
     // 章末の状況も計画として載せるだけ (「この状況になったところで章を終える」の注記は付けない)
     expect(body).toContain('- 章末の状況: 夕方、部室。ルナが入部届を書きかけている。\n')
     expect(body).not.toContain('この状況になったところで章を終える')
@@ -1785,6 +1806,109 @@ describe('buildChapterPrompt: 指示つきの書き直し', () => {
         buildChapterPromptForStorage(planned(2))
       )
     }
+  })
+
+  // 全年齢で書いた章を、成人指定に変えた後に書き直すと、元の版の全文、「そのまま保つ」、成人向けの表現の許可が
+  // 同時に入る。未成年の記述を残させないよう、読み替えを「そのまま保つ」より優先させる。
+  describe('成人指定の書き直し', () => {
+    const KEEP_RULE =
+      '- 直すのは【修正指示】に書かれた点だけにする。それ以外は【元の版】の文章をそのまま保つ（言い回しを変えない。【修正指示】が求めない限り、場面を足したり削ったりしない）。'
+    const ADULT_RULE =
+      '- 【元の版】に未成年を連想させる記述（年齢、学年、学校、制服、幼い外見など）が残っていたら、【修正指示】に書かれていなくても、成人（大学生または社会人）として読み替えて書き直す。この点は、【元の版】の文章をそのまま保つことより優先する。'
+    const ADULT_RULE_RESOLVED =
+      '- 【元の版】に未成年を連想させる記述（年齢、学年、学校、制服、幼い外見など）が残っていたら、【修正指示】に書かれていなくても、【この章の登場人物】の設定に合わせて、成人（大学生または社会人）として書き直す。この点は、【元の版】の文章をそのまま保つことより優先する。'
+    const rulesOf = (overrides: Partial<ChapterPromptInput>): string[] =>
+      section(buildChapterPrompt(revising(overrides)).user, '今回の執筆').split('\n')
+    const adultStyle = (age_rating: string): StyleParams => ({ ...style, age_rating })
+
+    test('「そのまま保つ」の行の直後に、読み替えを優先する行が並ぶ', () => {
+      for (const rating of ['R15', 'R18']) {
+        // 作品設計が成人としての人物設定を確定している: その人物設定に合わせさせる
+        const resolved = rulesOf({ style: adultStyle(rating), bible: adultBible })
+        expect(resolved.slice(2, 6)).toEqual([
+          KEEP_RULE,
+          ADULT_RULE_RESOLVED,
+          '- 直した結果、前後の文と辻褄が合わなくなる箇所は、合わせて直す。',
+          '- 表記の規則（字下げなど）に合っていない箇所は、規則に合わせて直す。'
+        ])
+        // 人物設定が確定していない (作品設計に cast が無い、作品設計が無い旧データ): 読み替えだけを指示する
+        for (const bibleValue of [bible, null]) {
+          const lines = rulesOf({ style: adultStyle(rating), bible: bibleValue })
+          expect(lines.slice(2, 4)).toEqual([KEEP_RULE, ADULT_RULE])
+          expect(lines).not.toContain(ADULT_RULE_RESOLVED)
+        }
+      }
+      // 計画も作品設計も無い旧データでも入る
+      const legacy = section(
+        buildChapterPrompt(input(2, { revision, style: adultStyle('R18') })).user,
+        '今回の執筆'
+      ).split('\n')
+      expect(legacy.slice(2, 4)).toEqual([KEEP_RULE, ADULT_RULE])
+    })
+
+    test('言葉は年齢指定の行の読み替えの指示に揃える。語の一覧は重ねない', () => {
+      for (const phrase of ['未成年を連想させる記述', '成人（大学生または社会人）として読み替えて書']) {
+        expect(ADULT_RULE).toContain(phrase)
+        expect(READ_ALL_AS_ADULT).toContain(phrase)
+      }
+      expect(ADULT_RULE_RESOLVED).toContain('成人（大学生または社会人）として')
+      for (const word of ['高校生', '17歳', '女子高生', '十代', '美少女']) {
+        expect(ADULT_RULE).not.toContain(word)
+        expect(ADULT_RULE_RESOLVED).not.toContain(word)
+      }
+      // 年齢指定の行 (読み替えの指示の本体) も、書き直しのプロンプトに入っている
+      const { user } = buildChapterPrompt(revising({ style: adultStyle('R18'), bible: adultBible }))
+      expect(section(user, '文体・視点')).toContain(READ_ALL_AS_ADULT)
+    })
+
+    test('全年齢と年齢指定なしの書き直しには足さない', () => {
+      for (const age_rating of ['全年齢', undefined, '', 'PG12']) {
+        for (const bibleValue of [adultBible, bible, null]) {
+          const lines = rulesOf({ style: { ...style, age_rating }, bible: bibleValue })
+          expect(lines[2]).toBe(KEEP_RULE)
+          expect(lines[3]).toBe('- 直した結果、前後の文と辻褄が合わなくなる箇所は、合わせて直す。')
+          expect(lines.join('\n')).not.toContain('未成年')
+          expect(lines.join('\n')).not.toContain('そのまま保つことより優先する')
+        }
+      }
+    })
+
+    test('成人指定でも、新しく書くとき (revision なし) には足さない', () => {
+      for (const rating of ['R15', 'R18']) {
+        for (const none of [undefined, null, { baseContent: '', instruction: '口調を直す。' }]) {
+          const { system, user } = buildChapterPrompt(
+            planned(2, { style: adultStyle(rating), bible: adultBible, revision: none })
+          )
+          expect(section(user, '今回の執筆')).not.toContain('未成年')
+          expect(user).not.toContain('そのまま保つ')
+          expect(system).not.toContain('元の版')
+        }
+      }
+    })
+
+    test('system は変わらない。保存用のプロンプトにも入る', () => {
+      const input18 = revising({ style: adultStyle('R18'), bible: adultBible })
+      expect(buildChapterPrompt(input18).system).toBe(
+        buildChapterPrompt(planned(2, { style: adultStyle('R18'), bible: adultBible })).system
+      )
+      // 執筆上の指示や作品設計が無い入力でも、system は書き直しで変わらない
+      for (const rating of ['R15', 'R18']) {
+        const base = { style: adultStyle(rating), writingNotes: '', bible: null }
+        expect(buildChapterPrompt(revising(base)).system).toBe(buildChapterPrompt(planned(2, base)).system)
+        expect(buildChapterPrompt(input(2, { revision, style: adultStyle(rating) })).system).toBe(
+          buildChapterPrompt(input(2, { style: adultStyle(rating) })).system
+        )
+      }
+      const stored = buildChapterPromptForStorage(input18)
+      expect(stored).toContain(`${KEEP_RULE}\n${ADULT_RULE_RESOLVED}\n`)
+      // 保存用では元の版の本文は省くが、規則は残る
+      expect(stored).not.toContain('第2章の地の文')
+    })
+
+    test('名簿が空なら、人物設定に合わせる言い方はしない (【この章の登場人物】の節が無い)', () => {
+      const lines = rulesOf({ style: adultStyle('R18'), bible: adultBible, cast: [], relations: [] })
+      expect(lines.slice(2, 4)).toEqual([KEEP_RULE, ADULT_RULE])
+    })
   })
 
   test('計画の無い旧データ、最終章でも書き直せる', () => {
