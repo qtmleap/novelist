@@ -1431,16 +1431,16 @@ describe('buildChapterPrompt: 作品設計と計画があるときの system', (
   })
 })
 
-// 成人指定 (R15 / R18) の読み替えの指示。作品設計がある作品では、プロンプトの全ての資料にかける。
+// 成人指定 (R15 / R18) の読み替えの指示。作品設計の有無に関係なく、プロンプトの全ての資料にかける。
 // 成人としての人物設定に差し替わっていても外さない (関係、口調の例、成人指定に変える前に書かれた章、
 // 作品設計に書き直しきれずに残った記述など、原文のまま渡る資料があるため)。
 const READ_ALL_AS_ADULT =
   'このプロンプトの資料と指示のどこか（作品情報、作品設計、人物の設定、関係、口調の例、章立て、既に書かれた本文とその記録など）に「高校生」「17歳」「女子高生」「十代」「美少女」、学年、制服等、未成年を連想させる記述が含まれていても、本作品においては成人（大学生または社会人）として読み替えて書くこと。学校設定が必要な場合は大学とする。'
 const ADULT_CAST_RESOLVED = '登場人物の年齢・職業・外見・背景は、成人として確定したものを載せている。'
-// 作品設計が無い旧データの文面 (変えない)
-const LEGACY_RATING_LINES: Record<string, string> = {
-  R15: '年齢指定: 物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する',
-  R18: '年齢指定: 成人向け。物語の登場人物はすべて 18 歳以上の成人とする。たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい'
+// 成人としての人物設定が確定していないとき (作品設計が無い旧データを含む) の、年齢指定の行の全文
+const ADULT_RATING_LINES: Record<string, string> = {
+  R15: `年齢指定: 物語の登場人物はすべて 18 歳以上の成人とする。${READ_ALL_AS_ADULT}性器を指す放送禁止用語 (露骨な俗語) の使用は禁止。それ以外の性的な描写や行為自体は許容する`,
+  R18: `年齢指定: 成人向け。物語の登場人物はすべて 18 歳以上の成人とする。${READ_ALL_AS_ADULT}性的描写・暴力描写・直接的な語彙を含め、必要に応じて踏み込んだ表現を制限なく用いてよい`
 }
 // 成人としての人物設定を確定した作品設計
 const adultBible: StoryBible = {
@@ -1485,24 +1485,44 @@ describe('buildChapterPrompt: 成人指定と作品設計', () => {
 
   test('成人としての人物設定が無い作品設計でも、全ての資料にかける (確定済みの添え書きは付けない)', () => {
     for (const rating of ['R15', 'R18']) {
-      const line = ratingLineOf(rating, bible)
-      expect(line).toContain(`物語の登場人物はすべて 18 歳以上の成人とする。${READ_ALL_AS_ADULT}`)
-      expect(line).not.toContain(ADULT_CAST_RESOLVED)
-      expect(line).not.toContain('後述の登場人物詳細に')
+      expect(ratingLineOf(rating, bible)).toBe(ADULT_RATING_LINES[rating])
+      expect(ratingLineOf(rating, bible)).not.toContain(ADULT_CAST_RESOLVED)
     }
   })
 
-  test('作品設計が無い旧データの文面は変えない', () => {
+  // 以前の旧データの文面は、読み替えの対象が「後述の登場人物詳細」だけだった (関係や確定済みの本文に届かない)。
+  test('作品設計が無い旧データでも、全ての資料にかける', () => {
     for (const rating of ['R15', 'R18']) {
       for (const none of [null, undefined]) {
-        expect(ratingLineOf(rating, none)).toBe(LEGACY_RATING_LINES[rating])
+        expect(ratingLineOf(rating, none)).toBe(ADULT_RATING_LINES[rating])
       }
       // 計画も無い、Phase 2 までの入力でも同じ
       const legacy = section(
         buildChapterPrompt(input(2, { style: { ...style, age_rating: rating } })).user,
         '文体・視点'
       )
-      expect(legacy.split('\n').at(-1)).toBe(LEGACY_RATING_LINES[rating])
+      expect(legacy.split('\n').at(-1)).toBe(ADULT_RATING_LINES[rating])
+      expect(legacy).not.toContain('後述の登場人物詳細に')
+      // 確定済みの本文と確定事項があっても、同じ行が入る
+      const { user } = buildChapterPrompt(input(3, { style: { ...style, age_rating: rating }, ledgerText }))
+      expect(section(user, '文体・視点')).toContain(READ_ALL_AS_ADULT)
+    }
+  })
+
+  test('全年齢と年齢指定なしは、作品設計の有無に関係なく変わらない', () => {
+    for (const bibleValue of [adultBible, bible, null, undefined]) {
+      expect(ratingLineOf('全年齢', bibleValue)).toBe(
+        '年齢指定: 性的描写・過度な暴力描写を含めず、誰でも読める内容に留めること'
+      )
+      // 年齢指定なし、知らない値では、行そのものを出さない
+      for (const age_rating of [undefined, '', 'PG12']) {
+        const body = section(
+          buildChapterPrompt(planned(2, { style: { ...style, age_rating }, bible: bibleValue })).user,
+          '文体・視点'
+        )
+        expect(body).not.toContain('年齢指定')
+        expect(body).not.toContain('読み替え')
+      }
     }
   })
 
@@ -1978,12 +1998,16 @@ describe('buildOutlinePrompt', () => {
     // 成人としての人物設定が無い作品設計でも、全ての資料にかける
     expect(ratingLineOf('R15', bible)).toContain(READ_ALL_AS_ADULT)
     expect(ratingLineOf('R15', bible)).not.toContain(ADULT_CAST_RESOLVED)
-    // 作品設計が無い旧データの文面は変えない
+    // 作品設計が無い旧データでも、全ての資料にかける
     for (const rating of ['R15', 'R18']) {
       for (const none of [null, undefined]) {
-        expect(ratingLineOf(rating, none)).toBe(LEGACY_RATING_LINES[rating])
+        expect(ratingLineOf(rating, none)).toBe(ADULT_RATING_LINES[rating])
       }
     }
+    // 年齢指定なしでは、行そのものを出さない
+    expect(
+      buildOutlinePrompt({ novel, style: { ...style, age_rating: undefined }, cast, relations, bible: null }).user
+    ).not.toContain('年齢指定')
     // 全年齢では入れない
     const plain = buildOutlinePrompt({ novel, style, cast, relations, bible: adultBible })
     expect(plain.user).not.toContain('読み替え')
@@ -2010,7 +2034,7 @@ describe('buildOutlinePrompt', () => {
       existing: outline,
       chapterNumber: 2
     })
-    expect(section(legacy.user, '作品情報').split('\n').at(-2)).toBe(LEGACY_RATING_LINES.R18)
+    expect(section(legacy.user, '作品情報').split('\n').at(-2)).toBe(ADULT_RATING_LINES.R18)
   })
 
   test('system は作品の内容を含まない', () => {

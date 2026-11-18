@@ -284,32 +284,27 @@ const TONE_LINES: Record<string, string | undefined> = {
 }
 
 const ADULT_ONLY = '物語の登場人物はすべて 18 歳以上の成人とする。'
-// 作品設計が無い旧データで使う、従来の読み替えの文面 (変えない)。
-const READ_AS_ADULT =
-  'たとえ後述の登場人物詳細に「高校生」「17歳」「女子高生」「十代」「美少女」等、未成年を連想させる記述が含まれていても、本作品においては大学生または社会人として読み替えて描写すること。学校設定が必要な場合は大学とする。'
-// 作品設計がある作品で使う。読み替えの指示を、プロンプトの全ての資料にかける。
+// 成人指定 (R15 / R18) の読み替えの指示。プロンプトの全ての資料にかける (作品設計の有無に関係なく同じ文面)。
 // 作品設計が成人としての人物設定を確定していても外さない。未成年を連想させる記述は、次のところに残りうるため:
-//   原文のまま渡る資料 (世界観・設定、関係の種別と説明、名簿の役割、口調の例、執筆上の指示、
+//   原文のまま渡る資料 (世界観・設定、人物の設定、関係の種別と説明、名簿の役割、口調の例、執筆上の指示、
 //   成人指定に変える前に書かれた章とその記録) と、作品設計そのもの (書き直しきれずに残った記述)。
+// 以前の文面は対象が「後述の登場人物詳細」だけで、関係や確定済みの本文には指示が届いていなかった。
 const READ_ALL_AS_ADULT =
   'このプロンプトの資料と指示のどこか（作品情報、作品設計、人物の設定、関係、口調の例、章立て、既に書かれた本文とその記録など）に「高校生」「17歳」「女子高生」「十代」「美少女」、学年、制服等、未成年を連想させる記述が含まれていても、本作品においては成人（大学生または社会人）として読み替えて書くこと。学校設定が必要な場合は大学とする。'
 // 作品設計が成人としての人物設定を確定しているときに添える (読み替えの指示は外さない)。
 const ADULT_CAST_RESOLVED = '登場人物の年齢・職業・外見・背景は、成人として確定したものを載せている。'
 
 // 成人指定のときの、読み替えの指示の出し方。
-//   legacy    作品設計が無い旧データ。従来の文面
-//   all       作品設計がある。全ての資料にかける
+//   all       全ての資料にかける (作品設計が無い旧データ、成人としての人物設定が無い作品設計)
 //   resolved  作品設計が成人としての人物設定 (cast) を確定していて、渡される人物設定がそれに差し替わっている。
 //             全ての資料にかけ、人物設定が確定済みであることを添える
-type AdultReading = 'legacy' | 'all' | 'resolved'
+type AdultReading = 'all' | 'resolved'
 
 function adultReadingOf(bible: StoryBible | null | undefined): AdultReading {
-  if (bible === null || bible === undefined) return 'legacy'
-  return bible.cast.length > 0 ? 'resolved' : 'all'
+  return bible !== null && bible !== undefined && bible.cast.length > 0 ? 'resolved' : 'all'
 }
 
 const ADULT_READING_TEXT: Record<AdultReading, string> = {
-  legacy: READ_AS_ADULT,
   all: READ_ALL_AS_ADULT,
   resolved: `${READ_ALL_AS_ADULT}${ADULT_CAST_RESOLVED}`
 }
