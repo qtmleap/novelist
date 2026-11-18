@@ -23,7 +23,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
-import { asModelRef, type CreateNovelInput, type NovelWithChapters } from '@/schemas/novel.dto'
+import { asModelRef, type CreateNovelInput, type NovelWithChapters, normalizeAgeRating } from '@/schemas/novel.dto'
 
 function toFormValues(novel: NovelWithChapters): CreateNovelInput {
   return {
@@ -35,7 +35,7 @@ function toFormValues(novel: NovelWithChapters): CreateNovelInput {
     outline_summary_chars: novel.outline_summary_chars,
     pov: novel.pov,
     tone: novel.tone,
-    age_rating: novel.age_rating,
+    age_rating: normalizeAgeRating(novel.age_rating),
     ending: novel.ending,
     notes: novel.notes,
     writing_notes: novel.writing_notes,

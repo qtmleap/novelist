@@ -41,6 +41,7 @@ import {
   type ChapterCost,
   type ChapterStage,
   type ModelRef,
+  normalizeAgeRating,
   type Outline
 } from '@/schemas/novel.dto'
 import type { OutlineWarning, StoryBible } from '@/schemas/story.dto'
@@ -382,7 +383,7 @@ function NovelDetailContent({ id }: { id: string }) {
         outline_summary_chars: novel.outline_summary_chars,
         pov: novel.pov,
         tone: novel.tone,
-        age_rating: novel.age_rating,
+        age_rating: normalizeAgeRating(novel.age_rating),
         ending: novel.ending,
         notes: novel.notes,
         writing_notes: novel.writing_notes,

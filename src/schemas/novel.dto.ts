@@ -27,6 +27,19 @@ export const DEFAULT_TONE = '一般文芸'
 // 想定年齢 (= 年齢指定)。生成プロンプトの表現強度に反映する。
 export const AGE_RATING_OPTIONS = ['全年齢', 'R15', 'R18'] as const
 export const DEFAULT_AGE_RATING = '全年齢'
+// 書き込み側 (CreateNovelSchema) は選択肢の 3 値だけを受ける。成人指定 (R15/R18) の検証と、プロンプトの年齢指定の行は
+// この 3 値を前提にしているので、'R18G' や 'r18' のような知らない値を保存させると、どちらも外れてしまう。
+export const AgeRatingSchema = z.enum(AGE_RATING_OPTIONS)
+export type AgeRating = z.infer<typeof AgeRatingSchema>
+
+// 既に保存されている値 (API の応答の age_rating は string) を、書き込み側の型に寄せる。
+// 知らない値は、内容の制限がいちばん強い全年齢として扱う。前後の空白や大文字・小文字は寄せない:
+// 寄せると「R18 として扱う」範囲が広がり、意図しない値が成人向けの扱いになるため。
+export function normalizeAgeRating(value: string): AgeRating {
+  const parsed = AgeRatingSchema.safeParse(value)
+  // 既定値 (DEFAULT_AGE_RATING) ではなく全年齢を直接書く。既定値を変えても、知らない値が成人向けの扱いにならないように。
+  return parsed.success ? parsed.data : '全年齢'
+}
 // 語り手(視点キャラ)を指定できる POV。一人称 / 三人称一元視点 のとき pov_character_id が有効。
 export const FOCAL_POVS: readonly string[] = ['一人称', '三人称一元視点']
 
@@ -232,7 +245,7 @@ export const CreateNovelSchema = z.object({
   outline_summary_chars: z.number().int().min(100).max(2000).default(DEFAULT_OUTLINE_SUMMARY_CHARS),
   pov: z.string().max(30).default(DEFAULT_POV),
   tone: z.string().max(30).default(DEFAULT_TONE),
-  age_rating: z.string().max(10).default(DEFAULT_AGE_RATING),
+  age_rating: AgeRatingSchema.default(DEFAULT_AGE_RATING),
   ending: z.string().max(30).default(DEFAULT_ENDING),
   // プロンプトに追加で混ぜる自由記述 (口調の傾向、固有名詞表記、避けたい展開など)
   notes: z.string().max(2000).default(''),
