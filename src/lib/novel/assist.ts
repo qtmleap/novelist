@@ -1,3 +1,6 @@
+import { buildRecordPrompt } from '@/lib/novel/assist-prompts'
+import { recordJsonSchema } from '@/lib/novel/json-schemas'
+import { finalizeRecord } from '@/lib/novel/ledger'
 import {
   type JsonSchema,
   normalizeOutlineCharacters,
@@ -19,7 +22,12 @@ import {
 } from '@/lib/novel/prompts'
 import type { UsageCounts } from '@/lib/openai/protocol'
 import type { Outline, OutlineChapter } from '@/schemas/novel.dto'
-import type { OutlineWarning } from '@/schemas/story.dto'
+import {
+  type ChapterRecord,
+  ChapterRecordDraftSchema,
+  type OutlineWarning,
+  type StoryThread
+} from '@/schemas/story.dto'
 
 // 非ストリームの LLM 呼び出しの流れ (プロンプトを組み立て、呼び、応答を解釈・検証し、通らなければやり直す)。
 // LLM の呼び出しは引数 (JsonCaller) で受け取る。このファイルは env にも fetch にも触れないので、
@@ -216,4 +224,115 @@ export async function regenerateOutlineChapters(
     ...warnings,
     ...result.warnings
   ])
+}
+
+// ---------------------- 章の記録の抽出 (Phase 2) ----------------------
+
+export type RecordFlowInput = {
+  chapterNumber: number
+  title: string | null
+  // この章の本文
+  content: string
+  // 名簿 (人物の名前を正式名に寄せるのに使う)
+  castNames: string[]
+  // この章の前までに未回収の伏線
+  openThreads: StoryThread[]
+  // 章立てでこの章に張る予定の伏線 (Phase 3 から渡る。それまでは空)
+  plannedSetups: StoryThread[]
+  // 一人称の本文の語り手の名前 (任意)。本文の「私」が誰かをプロンプトに書く
+  narrator?: string
+}
+
+export type RecordFlowResult =
+  | { ok: true; record: ChapterRecord; usages: UsageCounts[] }
+  | { ok: false; error: string; usages: UsageCounts[] }
+
+// 記録の応答を待つ上限。抽出に失敗しても章は完了扱いにするので、長く待たせない。
+const RECORD_TIMEOUT_MS = 60_000
+// エラー文に載せる応答の先頭の長さ。
+const RECORD_EXCERPT_CHARS = 200
+
+function excerpt(text: string): string {
+  const chars = [...text]
+  return chars.length > RECORD_EXCERPT_CHARS ? `${chars.slice(0, RECORD_EXCERPT_CHARS).join('')}…` : text
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+function parseJsonText(text: string): Interpreted<unknown> {
+  try {
+    return { ok: true, value: JSON.parse(text) }
+  } catch {
+    return { ok: false, error: `応答が JSON として読めません (応答の先頭: ${excerpt(text)})` }
+  }
+}
+
+// 応答を記録の下書きとして読み、保存できる形に整える。名前の正規化、空の項目の除去、切り詰め、伏線の id 振りは
+// finalizeRecord が全部やる。finalizeRecord が throw する下書き (要約が空など) は解釈の失敗として、やり直しに回す。
+function interpretRecord(text: string, input: RecordFlowInput): Interpreted<ChapterRecord> {
+  const json = parseJsonText(text)
+  if (!json.ok) return json
+  const draft = ChapterRecordDraftSchema.safeParse(json.value)
+  if (!draft.success) {
+    const issues = draft.error.issues
+      .slice(0, 5)
+      .map((issue) => `${issue.path.map(String).join('.')}: ${issue.message}`)
+      .join(' / ')
+    return { ok: false, error: `記録が想定の形式ではありません: ${issues} (応答の先頭: ${excerpt(text)})` }
+  }
+  try {
+    const record = finalizeRecord(draft.data, {
+      chapterNumber: input.chapterNumber,
+      openThreads: input.openThreads,
+      plannedSetups: input.plannedSetups,
+      knownNames: input.castNames
+    })
+    return { ok: true, value: record }
+  } catch (e) {
+    return { ok: false, error: `記録を保存できる形にできません: ${errorMessage(e)}` }
+  }
+}
+
+// 書き上がった 1 章の本文から記録を作る。解釈に失敗したら 1 回だけやり直す。
+// 本文が空なら LLM を呼ばずに失敗を返す (buildRecordPrompt が throw する)。
+export async function extractRecordFlow(call: JsonCaller, input: RecordFlowInput): Promise<RecordFlowResult> {
+  const prompt = buildRecordPromptSafely(input)
+  if (!prompt.ok) return { ok: false, error: prompt.error, usages: [] }
+  // schema の enum は、プロンプトに渡した伏線と同じ並びの id にする (どちらも重複と空を除いて先頭から並べる)。
+  const schema = recordJsonSchema({
+    castNames: input.castNames,
+    openThreadIds: input.openThreads.map((thread) => thread.id),
+    plannedSetupIds: input.plannedSetups.map((thread) => thread.id)
+  })
+  const outcome = await callUntilValid(
+    call,
+    prompt.value,
+    { op: 'extractRecord', schema, timeoutMs: RECORD_TIMEOUT_MS },
+    (text) => interpretRecord(text, input),
+    MAX_ATTEMPTS,
+    []
+  )
+  if (!outcome.ok) return outcome
+  return { ok: true, record: outcome.value, usages: outcome.usages }
+}
+
+function buildRecordPromptSafely(input: RecordFlowInput): Interpreted<Prompt> {
+  try {
+    return {
+      ok: true,
+      value: buildRecordPrompt({
+        chapterNumber: input.chapterNumber,
+        title: input.title,
+        content: input.content,
+        castNames: input.castNames,
+        openThreads: input.openThreads,
+        plannedSetups: input.plannedSetups,
+        narrator: input.narrator
+      })
+    }
+  } catch (e) {
+    return { ok: false, error: errorMessage(e) }
+  }
 }

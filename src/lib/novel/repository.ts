@@ -1,5 +1,18 @@
 import type { Prisma, PrismaClient } from '@/generated/prisma/client'
 import type { CreateNovelInput, SaveCastInput } from '@/schemas/novel.dto'
+import { type ChapterRecord, ChapterRecordSchema } from '@/schemas/story.dto'
+
+// Chapter.record (JSON 文字列 | null) を検証して返す。未抽出 (null) や壊れた値は null。
+// 壊れた記録を後の章の【確定事項】に混ぜないため、ここで弾く。
+export function parseStoredRecord(raw: string | null): ChapterRecord | null {
+  if (raw === null || raw.length === 0) return null
+  try {
+    const result = ChapterRecordSchema.safeParse(JSON.parse(raw))
+    return result.success ? result.data : null
+  } catch {
+    return null
+  }
+}
 
 // キャスト・関係・語り手は専用ページ (saveNovelCast) で管理するので本体作成では触らない。
 export async function createNovel(prisma: PrismaClient, input: CreateNovelInput) {
@@ -91,21 +104,71 @@ export async function saveChapter(
   })
 }
 
+// 章の記録を保存する (version ごとに 1:1。同じ version に抽出し直したら上書き)。
+export async function saveChapterRecord(prisma: PrismaClient, chapterId: string, record: ChapterRecord) {
+  await prisma.chapter.update({ where: { id: chapterId }, data: { record: JSON.stringify(record) } })
+}
+
+// 保存済みの 1 version (生成の再開で、記録の抽出に使う)。無ければ null。
+export async function findChapterVersion(prisma: PrismaClient, chapterId: string) {
+  const row = await prisma.chapter.findUnique({
+    where: { id: chapterId },
+    select: { id: true, novel_id: true, chapter_number: true, title: true, content: true, record: true }
+  })
+  return row === null ? null : { ...row, record: parseStoredRecord(row.record) }
+}
+
 // 指定章の全 version を新しい順で返す (生成履歴の閲覧用)。
 export async function listChapterVersions(prisma: PrismaClient, novelId: string, chapterNumber: number) {
-  return prisma.chapter.findMany({
+  const rows = await prisma.chapter.findMany({
     where: { novel_id: novelId, chapter_number: chapterNumber },
     orderBy: { version: 'desc' },
-    select: { id: true, version: true, title: true, content: true, prompt: true, created_at: true }
+    select: { id: true, version: true, title: true, content: true, prompt: true, record: true, created_at: true }
   })
+  return rows.map((row) => ({ ...row, record: parseStoredRecord(row.record) }))
+}
+
+// 各章の最新 version の id。rows は chapter_number 昇順・version 降順で並んでいる前提 (同じ章の先頭が最新)。
+function latestVersionIds(rows: Array<{ id: string; chapter_number: number }>): string[] {
+  const latest = new Map<number, string>()
+  for (const row of rows) {
+    if (!latest.has(row.chapter_number)) latest.set(row.chapter_number, row.id)
+  }
+  return [...latest.values()]
+}
+
+// 各章の最新 version を本文と記録つきで読む。prompt 列は読まない (1 version あたり数十 KB あり、一覧には要らない)。
+async function latestChapters(prisma: PrismaClient, rows: Array<{ id: string; chapter_number: number }>) {
+  const ids = latestVersionIds(rows)
+  if (ids.length === 0) return []
+  const chapters = await prisma.chapter.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      novel_id: true,
+      chapter_number: true,
+      version: true,
+      title: true,
+      content: true,
+      record: true,
+      created_at: true
+    }
+  })
+  return chapters
+    .map((ch) => ({ ...ch, record: parseStoredRecord(ch.record) }))
+    .sort((a, b) => a.chapter_number - b.chapter_number)
 }
 
 export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
   const novel = await prisma.novel.findUnique({
     where: { id },
     include: {
-      // 章は append-only なので全 version 読んでアプリ側で最新だけ残す。
-      chapters: { orderBy: [{ chapter_number: 'asc' }, { version: 'desc' }] },
+      // 章は append-only。まず全 version の id と番号だけを読み、各章の最新の行だけを後で本文つきで読む
+      // (全 version の本文と prompt を毎回読むと、章を作り直すたびに読む量が増えるため)。
+      chapters: {
+        select: { id: true, chapter_number: true, version: true },
+        orderBy: [{ chapter_number: 'asc' }, { version: 'desc' }]
+      },
       // Gemini プロンプト用に口調・呼び方等もまとめて読む (server 側でしか使わないので API レスポンスには載せない)。
       character_links: {
         include: {
@@ -152,14 +215,8 @@ export async function getNovelWithChapters(prisma: PrismaClient, id: string) {
 
   if (!novel) return null
 
-  // chapter_number ごとに最新 version の章だけ残す。
-  const latestChapterByNumber = new Map<number, (typeof novel.chapters)[0]>()
-  for (const ch of novel.chapters) {
-    if (!latestChapterByNumber.has(ch.chapter_number)) {
-      latestChapterByNumber.set(ch.chapter_number, ch)
-    }
-  }
-  const chapters = Array.from(latestChapterByNumber.values()).sort((a, b) => a.chapter_number - b.chapter_number)
+  // chapter_number ごとに最新 version の章だけ (番号の昇順)。
+  const chapters = await latestChapters(prisma, novel.chapters)
 
   // 本文 (kind = chapter) は chapter_number ごとに最新コスト行のみ表示。古い世代も DB には残る。
   // 章立てなどの行は同じ chapter_number を持ちうるので、最新を選ぶ前に本文だけに絞る。

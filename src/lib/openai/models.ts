@@ -103,6 +103,16 @@ export async function findPrice(env: Env, ref: string): Promise<ModelPrice | nul
   return entry === undefined ? null : entry.price
 }
 
+// モデルの入力の上限 (トークン)。既出の章を本文プロンプトに入れる予算に使う。
+// OpenAI 互換は /models の context_window、Gemini は持たない (null = 既定の予算)。分からなければ null。
+export async function findContextWindow(env: Env, ref: string): Promise<number | null> {
+  const parsed = parseModelRef(ref)
+  if (parsed.provider === 'gemini') return null
+  const upstream = await fetchOpenAIModels(env)
+  const entry = upstream.models.find((m) => m.ref === ref)
+  return entry === undefined ? null : entry.contextWindow
+}
+
 // 1 回分のコスト (USD)。単価が分からないモデルは 0 を記録し、警告を残す。
 export function computeCostUsd(
   price: ModelPrice | null,

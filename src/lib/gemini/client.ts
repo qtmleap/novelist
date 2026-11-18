@@ -283,7 +283,8 @@ export function streamChapter(env: Env, params: StreamChapterParams): StreamChap
 
   // 上流が無応答でハングすると DO が永久に「生成中」のままになるので、接続〜チャンク間の
   // 無応答に上限を設ける。チャンク受信ごとにタイマーを張り直し、超過したら fetch を abort する。
-  const STALL_TIMEOUT_MS = 90_000
+  // 既出の章を全文で渡すので入力が大きく、思考するモデルでは最初のチャンクまでが長い。それを打ち切らない長さにする。
+  const STALL_TIMEOUT_MS = 180_000
   // 一時的な過負荷 (429/5xx) や接続失敗は数回までバックオフして再接続を試みる (本文受信前のみ)。
   const MAX_CONNECT_ATTEMPTS = 3
   const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504])

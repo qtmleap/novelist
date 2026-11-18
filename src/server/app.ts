@@ -1,7 +1,6 @@
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import type { PrismaClient } from '@/generated/prisma/client'
 import {
   createCharacter,
   createVariant,
@@ -12,21 +11,16 @@ import {
   updateCharacter,
   updateVariant
 } from '@/lib/character/repository'
-import { type Env, getEnv, getPrisma } from '@/lib/db'
-import { generateJson } from '@/lib/gemini/client'
-import {
-  generateOutlineFlow,
-  type JsonCaller,
-  type OutlineFlowInput,
-  regenerateOutlineChapters
-} from '@/lib/novel/assist'
+import { getEnv, getPrisma } from '@/lib/db'
+import { generateOutlineFlow, type OutlineFlowInput, regenerateOutlineChapters } from '@/lib/novel/assist'
 import {
   buildCastForGemini,
-  buildChapterPayload,
   buildRelationsForGemini,
+  chapterGenPayload,
+  jsonCaller,
+  recordCostsBestEffort,
   viewpointCharFor
-} from '@/lib/novel/chapter-payload'
-import { type GenerationCostInput, recordGenerationCost } from '@/lib/novel/cost'
+} from '@/lib/novel/chapter-context'
 import { normalizeOutlineCharacters, sortOutline } from '@/lib/novel/outline'
 import { buildOutlinePrompt, renderPromptForStorage } from '@/lib/novel/prompts'
 import {
@@ -49,7 +43,6 @@ import {
   upsertGenerationJob
 } from '@/lib/novel/repository'
 import { buildModelCatalog } from '@/lib/openai/models'
-import type { UsageCounts } from '@/lib/openai/protocol'
 import { type CharacterVariant, CharacterVariantInputSchema, CreateCharacterSchema } from '@/schemas/character.dto'
 import {
   ArrangeNovelsSchema,
@@ -68,23 +61,6 @@ import { readAuthEmail, requireAuth } from '@/server/auth'
 
 // 本文生成でモデル指定が無かったときの既定。
 const DEFAULT_CHAPTER_MODEL: ModelRef = 'gemini-2.5-flash'
-
-// 章立てなど本文以外の呼び出しのコストを記録する。記録に失敗しても生成結果は返したいので、
-// 例外は警告に留める。
-async function recordCostsBestEffort(
-  prisma: PrismaClient,
-  env: Env,
-  target: Omit<GenerationCostInput, 'usage'>,
-  usages: UsageCounts[]
-): Promise<void> {
-  for (const usage of usages) {
-    try {
-      await recordGenerationCost(prisma, env, { ...target, usage })
-    } catch (e) {
-      console.warn(`${target.kind} cost record failed`, e)
-    }
-  }
-}
 
 type NovelWithChapters = NonNullable<Awaited<ReturnType<typeof getNovelWithChapters>>>
 
@@ -112,11 +88,6 @@ function outlineFlowInput(novel: NovelWithChapters): OutlineFlowInput {
     relations: buildRelationsForGemini(novel.relations),
     alwaysInclude: viewpointChar !== undefined && FOCAL_POVS.includes(novel.pov) ? [viewpointChar.name] : []
   }
-}
-
-// assist.ts の流れに渡す LLM の呼び出し。model が undefined なら既定のモデル。
-function jsonCaller(env: Env, model: ModelRef | undefined): JsonCaller {
-  return (prompt, options) => generateJson(env, model, prompt, options)
 }
 
 // 章番号を含むルートの param。z.coerce で文字列 → 数値に変換・検証するので
@@ -334,7 +305,8 @@ export const app = new Hono()
           chapter_number: ch.chapter_number,
           title: ch.title,
           content: ch.content,
-          created_at: ch.created_at.toISOString()
+          created_at: ch.created_at.toISOString(),
+          record: ch.record
         })),
         cast: novel.cast,
         relations: novel.relations,
@@ -523,7 +495,8 @@ export const app = new Hono()
           title: v.title,
           content: v.content,
           prompt: v.prompt,
-          created_at: v.created_at.toISOString()
+          created_at: v.created_at.toISOString(),
+          record: v.record
         }))
       )
     } finally {
@@ -582,9 +555,10 @@ export const app = new Hono()
       const { id, number: chapterNumber } = c.req.valid('param')
       const options = c.req.valid('json')
       const prisma = getPrisma()
+      // 小説と章立ての該当章があることだけ確かめる。文脈 (既出の章、確定事項) は DO が組み立てる。
       let payload: import('@/lib/chapter-gen-do').StartChapterGenPayload | null
       try {
-        payload = await buildChapterPayload(
+        payload = await chapterGenPayload(
           prisma,
           id,
           chapterNumber,
@@ -628,7 +602,7 @@ export const app = new Hono()
           current: chapters[0],
           model
         })
-        const payload = await buildChapterPayload(prisma, id, chapters[0], model)
+        const payload = await chapterGenPayload(prisma, id, chapters[0], model)
         if (!payload) return c.json({ error: 'not_found' }, 404)
         const env = getEnv()
         const doId = env.CHAPTER_GEN.idFromName(`${id}:${chapters[0]}`)

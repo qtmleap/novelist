@@ -1,14 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  extractRecordFlow,
   generateOutlineFlow,
   type JsonCaller,
   type JsonCallOptions,
   type OutlineFlowInput,
   outlineTimeoutMs,
+  type RecordFlowInput,
   regenerateOutlineChapterFlow,
   regenerateOutlineChapters,
   replaceOutlineChapter
 } from '@/lib/novel/assist'
+import { buildRecordPrompt } from '@/lib/novel/assist-prompts'
+import { recordJsonSchema } from '@/lib/novel/json-schemas'
 import { outlineChapterJsonSchema, outlineJsonSchema } from '@/lib/novel/outline'
 import { buildOutlineChapterPrompt, buildOutlinePrompt, type CastMember, type Prompt } from '@/lib/novel/prompts'
 import type { UsageCounts } from '@/lib/openai/protocol'
@@ -231,7 +235,8 @@ describe('regenerateOutlineChapterFlow', () => {
     const { call } = fakeCall([{ text: chapterJson({ chapter_number: 99, title: '新しい題' }), usage: usage(1) }])
     const result = await regenerateOutlineChapterFlow(call, chapterInput)
     if (!result.ok) throw new Error(result.error)
-    expect(result.chapter).toEqual({
+    // 章立ての項目は増えていく (Phase 3 の events など。既定値つき) ので、この流れが決める項目だけを見る
+    expect(result.chapter).toMatchObject({
       chapter_number: 2,
       title: '新しい題',
       summary: '新しい概要',
@@ -492,5 +497,109 @@ describe('regenerateOutlineChapters', () => {
     expect(result).toEqual({ ok: true, outline: existing, warnings: [] })
     expect(calls).toHaveLength(0)
     expect(seen).toEqual([])
+  })
+})
+
+describe('extractRecordFlow', () => {
+  const recordInput: RecordFlowInput = {
+    chapterNumber: 3,
+    title: '港の灯',
+    content: '　彩葉は港でヤチヨに会った。',
+    castNames: ['酒寄彩葉', '月見ヤチヨ'],
+    openThreads: [{ id: 's1', description: '灯台の鍵の行方' }],
+    plannedSetups: []
+  }
+
+  function draftJson(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      summary: '彩葉が港でヤチヨに会った。',
+      facts: ['港の灯台は赤い'],
+      characters: [{ name: '彩葉', actions: ['港へ行った'], learned: ['ヤチヨが船乗りだと知った'], state: '港にいる' }],
+      new_threads: ['ヤチヨの手紙の差出人'],
+      resolved_thread_ids: ['s1'],
+      end_state: { time: '夕方', place: '港', present: ['ヤチヨ'] },
+      ...overrides
+    })
+  }
+
+  test('succeeds, normalizes names and assigns thread ids', async () => {
+    const { call, calls } = fakeCall([{ text: draftJson(), usage: usage(1) }])
+    const result = await extractRecordFlow(call, recordInput)
+    expect(calls).toHaveLength(1)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.usages).toEqual([usage(1)])
+    expect(result.record).toEqual({
+      summary: '彩葉が港でヤチヨに会った。',
+      facts: ['港の灯台は赤い'],
+      // 「彩葉」「ヤチヨ」は名簿の正式名に寄せる
+      characters: [
+        { name: '酒寄彩葉', actions: ['港へ行った'], learned: ['ヤチヨが船乗りだと知った'], state: '港にいる' }
+      ],
+      threads_opened: [{ id: 'c3-1', description: 'ヤチヨの手紙の差出人' }],
+      threads_resolved: ['s1'],
+      end_state: { time: '夕方', place: '港', present: ['月見ヤチヨ'] }
+    })
+  })
+
+  test('passes the prompt, op, schema and a 60 second timeout to call', async () => {
+    const { call, calls } = fakeCall([{ text: draftJson() }])
+    await extractRecordFlow(call, recordInput)
+    expect(calls[0].prompt).toEqual(buildRecordPrompt(recordInput))
+    expect(calls[0].options).toEqual({
+      op: 'extractRecord',
+      schema: recordJsonSchema({ castNames: ['酒寄彩葉', '月見ヤチヨ'], openThreadIds: ['s1'], plannedSetupIds: [] }),
+      timeoutMs: 60_000
+    })
+  })
+
+  test('the narrator reaches the prompt', async () => {
+    const { call, calls } = fakeCall([{ text: draftJson() }])
+    await extractRecordFlow(call, { ...recordInput, narrator: '酒寄彩葉' })
+    expect(calls[0].prompt).toEqual(buildRecordPrompt({ ...recordInput, narrator: '酒寄彩葉' }))
+    expect(calls[0].prompt.user).toContain('酒寄彩葉')
+  })
+
+  test('retries once after invalid JSON and keeps both usages', async () => {
+    const { call, calls } = fakeCall([
+      { text: 'not json', usage: usage(1) },
+      { text: draftJson(), usage: usage(2) }
+    ])
+    const result = await extractRecordFlow(call, recordInput)
+    expect(calls).toHaveLength(2)
+    expect(calls[1].prompt).toEqual(calls[0].prompt)
+    if (!result.ok) throw new Error(result.error)
+    expect(result.usages).toEqual([usage(1), usage(2)])
+  })
+
+  test('a draft that finalizeRecord rejects is retried, then fails', async () => {
+    const blank = { text: draftJson({ summary: '   ' }), usage: usage(1) }
+    const { call, calls } = fakeCall([blank, { ...blank, usage: usage(2) }])
+    const result = await extractRecordFlow(call, recordInput)
+    expect(calls).toHaveLength(2)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.error).toContain('記録を保存できる形にできません')
+    expect(result.usages).toEqual([usage(1), usage(2)])
+  })
+
+  test('a draft of the wrong shape is retried', async () => {
+    const { call, calls } = fakeCall([{ text: JSON.stringify({ summary: 1 }) }, { text: draftJson() }])
+    const result = await extractRecordFlow(call, recordInput)
+    expect(calls).toHaveLength(2)
+    expect(result.ok).toBe(true)
+  })
+
+  test('a throwing call is not retried', async () => {
+    const { call, calls } = fakeCall([new Error('Gemini extractRecord failed: 503')])
+    const result = await extractRecordFlow(call, recordInput)
+    expect(calls).toHaveLength(1)
+    expect(result).toEqual({ ok: false, error: 'Gemini extractRecord failed: 503', usages: [] })
+  })
+
+  test('an empty chapter is not sent to the model', async () => {
+    const { call, calls } = fakeCall([])
+    const result = await extractRecordFlow(call, { ...recordInput, content: ' \n　\n' })
+    expect(calls).toHaveLength(0)
+    expect(result.ok).toBe(false)
+    expect(result.usages).toEqual([])
   })
 })

@@ -159,6 +159,9 @@ model Chapter {
   // 生成時に Gemini へ実際に送ったプロンプト全文。version ごとに 1:1。
   // この列追加より前に生成された章は null (フロントは「未保存」と表示する)。
   prompt         String?
+  // 本文から抽出した記録 (ChapterRecordSchema の JSON)。version ごとに 1:1。
+  // 抽出に失敗した章と、この列追加より前に生成された章は null。
+  record         String?
   created_at     DateTime @default(now())
 
   novel Novel @relation(fields: [novel_id], references: [id], onDelete: Cascade)
