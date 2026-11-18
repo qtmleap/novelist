@@ -1,9 +1,15 @@
-import { ChapterStreamEventSchema } from '@/schemas/novel.dto'
+import { type ChapterStage, ChapterStreamEventSchema } from '@/schemas/novel.dto'
 
 export type StreamHandlers = {
   onDelta: (text: string) => void
   onDone: (payload: { chapterId: string; title: string }) => void
   onError: (message: string) => void
+  // 段階の切り替わり (資料の準備、執筆、記録の抽出)。本文が流れていない間の表示に使う。
+  onStage?: (stage: ChapterStage) => void
+  // 接続が切れて再接続したとき (2 回目以降の open) に、本文を送り直される前に呼ぶ。
+  // サーバーは接続のたびにそれまでの本文を 1 つの delta でまとめて送り直すので、
+  // 受け手は表示中の本文を空にしておかないと二重になる。最初の接続では呼ばない。
+  onReset?: () => void
 }
 
 /**
@@ -14,6 +20,13 @@ export type StreamHandlers = {
  */
 export function subscribeChapterStream(url: string, handlers: StreamHandlers): { close: () => void } {
   const es = new EventSource(url)
+  // let を使わず、接続を一度でも開いたかを覚えておく。
+  const connection = { opened: false }
+
+  es.onopen = () => {
+    if (connection.opened) handlers.onReset?.()
+    connection.opened = true
+  }
 
   es.onmessage = (e) => {
     let json: unknown
@@ -33,6 +46,8 @@ export function subscribeChapterStream(url: string, handlers: StreamHandlers): {
     } else if ('error' in event) {
       handlers.onError(event.error)
       es.close()
+    } else if ('stage' in event) {
+      handlers.onStage?.(event.stage)
     }
   }
 

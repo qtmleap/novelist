@@ -1,10 +1,12 @@
 'use client'
 
-import { FileText, History, Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import { ClipboardList, FileText, History, Loader2, RefreshCw, Trash2 } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChapterRecordView } from '@/components/novel/ChapterRecordView'
 import { ErrorAlert } from '@/components/novel/ErrorAlert'
+import { CHAPTER_STAGE_LABELS } from '@/components/novel/GenerationStatus'
 import { NovelSkeleton } from '@/components/novel/NovelSkeleton'
 import { PageHeader } from '@/components/PageHeader'
 import {
@@ -25,7 +27,13 @@ import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
 import { cn } from '@/lib/utils'
-import { asModelRef, type ChapterCost, type ChapterVersion, type NovelWithChapters } from '@/schemas/novel.dto'
+import {
+  asModelRef,
+  type ChapterCost,
+  type ChapterStage,
+  type ChapterVersion,
+  type NovelWithChapters
+} from '@/schemas/novel.dto'
 
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
@@ -75,6 +83,8 @@ export default function ChapterDetailPage() {
   const [error, setError] = useState<string | null>(null)
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [buffer, setBuffer] = useState('')
+  // 再生成中の今の段階。本文が流れるのは writing の間だけなので、他の段階で止まって見えないよう表示する。
+  const [stage, setStage] = useState<ChapterStage | null>(null)
   const [regenOpen, setRegenOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -89,7 +99,10 @@ export default function ChapterDetailPage() {
     { status: 'loading' } | { status: 'loaded'; versions: ChapterVersion[] } | { status: 'error'; message: string }
   >({ status: 'loading' })
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
-  const [showVersionPrompt, setShowVersionPrompt] = useState(false)
+  // 履歴ダイアログで、選んだ版の何を表示するか。
+  const [versionView, setVersionView] = useState<'content' | 'prompt' | 'record'>('content')
+  // 章の記録 (本文から抽出した確定事項) の表示。
+  const [recordOpen, setRecordOpen] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const auth = useAuth()
   const editAllowed = canEdit(auth)
@@ -142,6 +155,7 @@ export default function ChapterDetailPage() {
     if (!novelId || chapterNumber <= 0 || !novel) return
     setIsRegenerating(true)
     setBuffer('')
+    setStage(null)
     setError(null)
     try {
       await api.startChapterGeneration(
@@ -151,6 +165,9 @@ export default function ChapterDetailPage() {
 
       await new Promise<void>((resolve) => {
         const sub = subscribeChapterStream(`/api/novels/${novelId}/chapters/${chapterNumber}/stream`, {
+          onStage: (next) => setStage(next),
+          // 再接続でサーバーが本文を全文送り直してくるので、足し込む前に空にする。
+          onReset: () => setBuffer(''),
           onDelta: (text) => setBuffer((b) => b + text),
           onDone: async () => {
             try {
@@ -177,6 +194,7 @@ export default function ChapterDetailPage() {
     } finally {
       setIsRegenerating(false)
       setBuffer('')
+      setStage(null)
     }
   }
 
@@ -209,7 +227,7 @@ export default function ChapterDetailPage() {
     if (!novelId || chapterNumber <= 0) return
     setHistoryOpen(true)
     setHistoryView({ status: 'loading' })
-    setShowVersionPrompt(false)
+    setVersionView('content')
     try {
       const data = await api.getChapterVersions({ params: { id: novelId, number: String(chapterNumber) } })
       setHistoryView({ status: 'loaded', versions: data })
@@ -253,6 +271,21 @@ export default function ChapterDetailPage() {
             <div className='mt-2'>
               <ChapterMeta chars={displayContent.length} cost={cost} />
             </div>
+            {/* live region は常に描画する (中身と同時に差し込むと読み上げられないことがあるため)。
+                空のときは余白を持たせず、レイアウトに影響させない。 */}
+            <p
+              aria-live='polite'
+              className={cn(
+                isRegenerating && stage !== null && 'mt-2 flex items-center gap-1.5 text-xs text-muted-foreground'
+              )}
+            >
+              {isRegenerating && stage !== null && (
+                <>
+                  <Loader2 aria-hidden='true' className='size-3.5 shrink-0 animate-spin' />
+                  {CHAPTER_STAGE_LABELS[stage]}
+                </>
+              )}
+            </p>
           </div>
 
           <article className='whitespace-pre-wrap text-sm leading-relaxed text-foreground/90'>
@@ -308,6 +341,17 @@ export default function ChapterDetailPage() {
             >
               <History />
               生成履歴
+            </Button>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={busy}
+              onClick={() => setRecordOpen(true)}
+              className='[&_svg]:size-4!'
+            >
+              <ClipboardList />
+              この章の記録
             </Button>
           </div>
 
@@ -426,12 +470,30 @@ export default function ChapterDetailPage() {
             </DialogContent>
           </Dialog>
 
+          <Dialog open={recordOpen} onOpenChange={setRecordOpen}>
+            <DialogContent className='sm:max-w-3xl'>
+              <DialogHeader>
+                <DialogTitle>第 {chapterNumber} 章の記録</DialogTitle>
+                <DialogDescription>次の章以降を書くときに、確定した事実として渡されます。</DialogDescription>
+              </DialogHeader>
+              {chapter.record === null ? (
+                <p className='text-sm text-muted-foreground'>
+                  この章の記録はまだありません（抽出に失敗したか、この機能より前に生成された章です）
+                </p>
+              ) : (
+                <div className='max-h-[60vh] overflow-auto pr-1'>
+                  <ChapterRecordView record={chapter.record} />
+                </div>
+              )}
+            </DialogContent>
+          </Dialog>
+
           <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
             <DialogContent className='sm:max-w-3xl'>
               <DialogHeader>
                 <DialogTitle>第 {chapterNumber} 章の生成履歴</DialogTitle>
                 <DialogDescription>
-                  再生成しても過去の生成は残ります。版を選んで本文とプロンプトを確認できます。
+                  再生成しても過去の生成は残ります。版を選んで本文・プロンプト・記録を確認できます。
                 </DialogDescription>
               </DialogHeader>
               {historyView.status === 'loading' && <p className='text-sm text-muted-foreground'>取得中…</p>}
@@ -450,7 +512,7 @@ export default function ChapterDetailPage() {
                         variant={v.id === selectedVersion.id ? 'default' : 'outline'}
                         onClick={() => {
                           setSelectedVersionId(v.id)
-                          setShowVersionPrompt(false)
+                          setVersionView('content')
                         }}
                       >
                         v{v.version}
@@ -462,21 +524,45 @@ export default function ChapterDetailPage() {
                     {selectedVersion.title !== null && <span className='font-medium'>{selectedVersion.title}</span>}
                     <span>{formatDateTime(selectedVersion.created_at)}</span>
                     <span className='tabular-nums'>{selectedVersion.content.length.toLocaleString()} 文字</span>
-                    {selectedVersion.prompt !== null && (
+                    {versionView !== 'content' && (
                       <button
                         type='button'
-                        onClick={() => setShowVersionPrompt((v) => !v)}
+                        onClick={() => setVersionView('content')}
                         className='underline underline-offset-2 hover:text-foreground'
                       >
-                        {showVersionPrompt ? '本文を表示' : 'この版のプロンプトを表示'}
+                        本文を表示
+                      </button>
+                    )}
+                    {selectedVersion.prompt !== null && versionView !== 'prompt' && (
+                      <button
+                        type='button'
+                        onClick={() => setVersionView('prompt')}
+                        className='underline underline-offset-2 hover:text-foreground'
+                      >
+                        この版のプロンプトを表示
+                      </button>
+                    )}
+                    {selectedVersion.record !== null && versionView !== 'record' && (
+                      <button
+                        type='button'
+                        onClick={() => setVersionView('record')}
+                        className='underline underline-offset-2 hover:text-foreground'
+                      >
+                        この版の記録を表示
                       </button>
                     )}
                   </div>
-                  <pre className='max-h-[55vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap'>
-                    {showVersionPrompt && selectedVersion.prompt !== null
-                      ? selectedVersion.prompt
-                      : selectedVersion.content}
-                  </pre>
+                  {versionView === 'record' && selectedVersion.record !== null ? (
+                    <div className='max-h-[55vh] overflow-auto rounded-md border p-3'>
+                      <ChapterRecordView record={selectedVersion.record} />
+                    </div>
+                  ) : (
+                    <pre className='max-h-[55vh] overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed whitespace-pre-wrap'>
+                      {versionView === 'prompt' && selectedVersion.prompt !== null
+                        ? selectedVersion.prompt
+                        : selectedVersion.content}
+                    </pre>
+                  )}
                 </div>
               )}
             </DialogContent>

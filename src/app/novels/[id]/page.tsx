@@ -21,7 +21,14 @@ import { canEdit, useAuth } from '@/hooks/useAuth'
 import { api, readApiError } from '@/lib/api/client'
 import { routes } from '@/lib/routes'
 import { subscribeChapterStream } from '@/lib/stream'
-import { asModelRef, type Chapter, type ChapterCost, type ModelRef, type Outline } from '@/schemas/novel.dto'
+import {
+  asModelRef,
+  type Chapter,
+  type ChapterCost,
+  type ChapterStage,
+  type ModelRef,
+  type Outline
+} from '@/schemas/novel.dto'
 import type { OutlineWarning } from '@/schemas/story.dto'
 
 function chaptersFromApi(apiChapters: Chapter[]): ChapterData[] {
@@ -41,6 +48,8 @@ type GenState = {
   outlineWarnings: OutlineWarning[]
   chapters: ChapterData[]
   streamingIndex: number | null
+  // 生成中の章の今の段階。サーバーが送るまで (または送らない間) は null。
+  stage: ChapterStage | null
   buffer: string
   genStatus: GenStatus
   genError: string | null
@@ -53,6 +62,8 @@ type GenAction =
   | { type: 'OUTLINE_ERR'; error: string }
   | { type: 'CHAPTERS_REFRESHED'; chapters: ChapterData[] }
   | { type: 'CHAPTER_START'; chapterNumber: number }
+  | { type: 'CHAPTER_STAGE'; stage: ChapterStage }
+  | { type: 'CHAPTER_RESET' }
   | { type: 'CHAPTER_DELTA'; text: string }
   | { type: 'CHAPTER_DONE'; chapterNumber: number; chapterId: string; title: string }
   | { type: 'CHAPTER_ERR'; error: string }
@@ -75,9 +86,15 @@ function genReducer(state: GenState, action: GenAction): GenState {
         ...state,
         genStatus: 'generatingChapter',
         streamingIndex: action.chapterNumber,
+        stage: null,
         buffer: '',
         genError: null
       }
+    case 'CHAPTER_STAGE':
+      return { ...state, stage: action.stage }
+    case 'CHAPTER_RESET':
+      // 再接続でサーバーが本文を全文送り直してくるので、足し込む前に空にする。段階はそのまま。
+      return { ...state, buffer: '' }
     case 'CHAPTER_DELTA':
       return { ...state, buffer: state.buffer + action.text }
     case 'CHAPTER_DONE': {
@@ -92,12 +109,12 @@ function genReducer(state: GenState, action: GenAction): GenState {
         existing !== -1
           ? state.chapters.map((c) => (c.number === action.chapterNumber ? committed : c))
           : [...state.chapters, committed]
-      return { ...state, chapters: next, streamingIndex: null, buffer: '', genStatus: 'idle' }
+      return { ...state, chapters: next, streamingIndex: null, stage: null, buffer: '', genStatus: 'idle' }
     }
     case 'CHAPTER_ERR':
-      return { ...state, genStatus: 'error', genError: action.error, streamingIndex: null, buffer: '' }
+      return { ...state, genStatus: 'error', genError: action.error, streamingIndex: null, stage: null, buffer: '' }
     case 'CANCEL':
-      return { ...state, genStatus: 'cancelled', streamingIndex: null, buffer: '' }
+      return { ...state, genStatus: 'cancelled', streamingIndex: null, stage: null, buffer: '' }
     default:
       return state
   }
@@ -186,6 +203,7 @@ function NovelDetailContent({ id }: { id: string }) {
       outlineWarnings: [],
       chapters: chaptersFromApi(n.chapters),
       streamingIndex: null,
+      stage: null,
       buffer: '',
       genStatus: 'idle',
       genError: null
@@ -208,6 +226,8 @@ function NovelDetailContent({ id }: { id: string }) {
     abortRef.current = abort
 
     const sub = subscribeChapterStream(`/api/novels/${id}/chapters/${chapterNum}/stream`, {
+      onStage: (stage) => dispatch({ type: 'CHAPTER_STAGE', stage }),
+      onReset: () => dispatch({ type: 'CHAPTER_RESET' }),
       onDelta: (text) => dispatch({ type: 'CHAPTER_DELTA', text }),
       onDone: ({ chapterId, title }) => {
         dispatch({ type: 'CHAPTER_DONE', chapterNumber: chapterNum, chapterId, title })
@@ -325,7 +345,7 @@ function NovelDetailContent({ id }: { id: string }) {
     await handleStartGeneration([num], asModelRef(novel.writer_model))
   }
 
-  const { outline, outlineWarnings, chapters, streamingIndex, genStatus, genError } = state
+  const { outline, outlineWarnings, chapters, streamingIndex, stage, genStatus, genError } = state
   const isGenerating = genStatus === 'generatingOutline' || genStatus === 'generatingChapter'
   const totalChapters = outline !== null ? outline.chapters.length : novel.num_chapters
   const currentChapter = streamingIndex !== null ? streamingIndex : chapters.filter((c) => c.done).length + 1
@@ -443,7 +463,12 @@ function NovelDetailContent({ id }: { id: string }) {
       )}
 
       {isGenerating && (
-        <GenerationStatus currentChapter={currentChapter} totalChapters={totalChapters} onCancel={handleStop} />
+        <GenerationStatus
+          currentChapter={currentChapter}
+          totalChapters={totalChapters}
+          stage={stage}
+          onCancel={handleStop}
+        />
       )}
 
       <OutlineWarnings warnings={outlineWarnings} onDismiss={() => dispatch({ type: 'OUTLINE_WARNINGS_DISMISS' })} />
